@@ -2,28 +2,6 @@ const std = @import("std");
 const lexer = @import("lexer");
 const parser = @import("parser");
 
-const REX_W = 0x48;
-const REX_WB = 0x49;
-const REX_B = 0x41;
-
-pub var code_buffer: std.ArrayList(u8) = undefined;
-
-pub var rellocations: std.StringHashMap(std.ArrayList(u64)) = undefined;
-
-pub var data_virt_address: u64 = undefined;
-
-fn immMinSize(imm: i64) u8 {
-    if (imm > std.math.maxInt(i32)) {
-        return 8;
-    } else if (imm > std.math.maxInt(i16)) {
-        return 4;
-    } else if (imm > std.math.maxInt(i8)) {
-        return 2;
-    } else {
-        return 1;
-    }
-}
-
 fn regCode(reg: lexer.TokenType) u3 {
     switch (reg) {
         .Rax, .Eax, .Ax, .Al, .R8, .R8d, .R8w, .R8b => {
@@ -56,851 +34,1384 @@ fn regCode(reg: lexer.TokenType) u3 {
     }
 }
 
-fn sibByte(op1: parser.ComplexAddress, op2: parser.Register) u8 {
-    const base: u3 = regCode(op2.name);
-    var ss: u2 = undefined;
-    if (op1.scale) |scale| {
-        switch (scale) {
-            0 => {
-                ss = 0b00;
-            },
-            2 => {
-                ss = 0b01;
-            },
-            4 => {
-                ss = 0b10;
-            },
-            8 => {
-                ss = 0b11;
-            },
-            else => {
-                ss = 0;
-            },
+fn digitToReg(digit: u8) parser.Register {
+    switch (digit) {
+        0 => {
+            return parser.Register.init(.Eax);
+        },
+        1 => {
+            return parser.Register.init(.Ecx);
+        },
+        2 => {
+            return parser.Register.init(.Edx);
+        },
+        3 => {
+            return parser.Register.init(.Ebx);
+        },
+        4 => {
+            return parser.Register.init(.Esp);
+        },
+        5 => {
+            return parser.Register.init(.Ebp);
+        },
+        6 => {
+            return parser.Register.init(.Esi);
+        },
+        7 => {
+            return parser.Register.init(.Edi);
+        },
+        else => unreachable,
+    }
+}
+
+const CodegenError = error{
+    InvalidIndex,
+    DiffOperSizes,
+    InvalidNumberOfOperands,
+    InvalidOperand,
+    ImmValueIsTooLarge,
+    UnspecifiedMemoryPointerSize,
+    WrongMemoryPointerSize,
+    WrongRegisterSize,
+};
+
+const ModRmByte = packed struct {
+    rm: u3,
+    reg: u3,
+    mod: u2,
+
+    pub fn byte(self: *const ModRmByte) u8 {
+        return (@as(u8, self.mod) << 6) | (@as(u8, self.reg) << 3) | (self.rm);
+    }
+
+    pub fn default() ModRmByte {
+        return ModRmByte{ .rm = 0b000, .reg = 0b000, .mod = 0b00 };
+    }
+};
+
+const SibByte = packed struct {
+    base: u3,
+    index: u3,
+    ss: u2,
+
+    pub fn byte(self: *const SibByte) u8 {
+        return (@as(u8, self.ss) << 6) | (@as(u8, self.index) << 3) | (self.base);
+    }
+
+    pub fn default() SibByte {
+        return SibByte{ .base = 0b000, .index = 0b000, .ss = 0b00 };
+    }
+};
+
+const RexByte = packed struct {
+    b: bool,
+    x: bool,
+    r: bool,
+    w: bool,
+    rex: u4 = 0b0100,
+
+    pub fn default() RexByte {
+        return RexByte{ .b = false, .x = false, .r = false, .w = false };
+    }
+
+    pub fn byte(self: RexByte) u8 {
+        return @bitCast(self);
+    }
+
+    pub fn setB(self: *RexByte) void {
+        self.b = true;
+    }
+    pub fn setX(self: *RexByte) void {
+        self.x = true;
+    }
+    pub fn setR(self: *RexByte) void {
+        self.r = true;
+    }
+    pub fn setW(self: *RexByte) void {
+        self.w = true;
+    }
+};
+
+const InstrBytes = struct {
+    as: bool,
+    os: bool,
+    rex: RexByte,
+    opcode: u8,
+    modrm: ?ModRmByte,
+    sib: ?SibByte,
+    disp: ?parser.Displacement,
+    disp_bytes: u8,
+    need_sib: bool,
+
+    pub fn init() InstrBytes {
+        var ib: InstrBytes = undefined;
+        ib.reset();
+        return ib;
+    }
+
+    pub fn reset(self: *InstrBytes) void {
+        self.as = false;
+        self.os = false;
+        self.rex = RexByte.default();
+        self.opcode = 0x00;
+        self.modrm = null;
+        self.sib = null;
+        self.disp = null;
+        self.disp_bytes = 0;
+        self.need_sib = false;
+    }
+
+    pub fn plusR(self: *InstrBytes, reg: lexer.TokenType) void {
+        self.opcode += regCode(reg);
+    }
+
+    pub fn setOsRexW(self: *InstrBytes, size: u8) void {
+        if (size == 2) {
+            self.os = true;
+        } else if (size == 8) {
+            self.rex.setW();
         }
-    } else {
-        ss = 0;
     }
 
-    var ind: u3 = undefined;
-    if (op1.index) |index| {
-        ind = regCode(index.name);
-    }
-    const byte: u8 = (@as(u8, ss) << 6) | (@as(u8, ind) << 3) | (base);
-    return byte;
-}
+    fn sibByte(self: *InstrBytes, base: ?parser.Register, index: ?parser.Register, scale: ?parser.Scale) void {
+        var bs: u3 = undefined;
+        var ind: u3 = undefined;
+        var ss: u2 = undefined;
 
-fn modRMReg(op1: parser.Operand, op2: parser.Operand) u8 {
-    var mod: u2 = undefined;
-    var rm: u3 = undefined;
-    var reg: u3 = undefined;
-    switch (op1) {
-        .reg => {
-            switch (op2) {
-                .reg => {
-                    mod = 0b11;
-                    rm = regCode(op1.reg.name);
-                    reg = regCode(op2.reg.name);
-                },
-                .mem => {
-                    reg = regCode(op1.reg.name);
-                    switch (op2.mem.mem) {
-                        .label => {
-                            mod = 0b00;
-                            rm = 0b100;
-                        },
-                        .addr => {
-                            if (op2.mem.mem.addr.index == null) {
-                                mod = 0b00;
-                                rm = regCode(op2.mem.mem.addr.base.name);
-                            } else {
-                                mod = 0b00;
-                                rm = 0b100;
-                            }
-                        },
-                    }
-                },
-                else => {},
+        if (scale) |sc| {
+            switch (sc.num) {
+                1 => ss = 0b00,
+                2 => ss = 0b01,
+                4 => ss = 0b10,
+                8 => ss = 0b11,
+                else => unreachable,
             }
-        },
-        .mem => {
-            // switch (op2) {
-            //     .reg => {
+        } else {
+            ss = 0b00;
+        }
 
-            //     },
-            //     else => {},
-            // }
-        },
-        else => {},
-    }
-    const modrmreg: u8 = (@as(u8, mod) << 6) | (@as(u8, reg) << 3) | (rm);
-    return modrmreg;
-}
+        if (index) |i| {
+            ind = regCode(i.name);
+            if (i.name.isAdditionalReg()) {
+                self.rex.setX();
+            }
+            if (i.size == 4) {
+                self.as = true;
+            } else {
+                self.as = false;
+            }
+        } else {
+            ind = 0b100;
+        }
 
-fn syscall(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
-    if (instr.operands.items.len != 0) {
-        // error - syscall must have exactly 0 operands
-    }
-    const buffer: [2]u8 = .{ 0x0F, 0x05 };
-    try code_buffer.appendSlice(allocator, &buffer);
-}
-
-fn xor(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
-    if (instr.operands.items.len != 2) {
-        // error - xor must have exactly 2 operands
-    }
-    const first = instr.operands.items[0];
-    const second = instr.operands.items[1];
-    switch (first) {
-        .reg => {
-            const rexw = switch (first.reg.size) {
-                8 => true,
-                else => false,
-            };
-            switch (second) {
-                .reg => {
-                    if (first.reg.size == second.reg.size) {
-                        const code = modRMReg(first, second);
-                        const buffer: [2]u8 = .{ 0x31, code };
-                        if (rexw) {
-                            try code_buffer.append(allocator, REX_W);
-                        }
-                        try code_buffer.appendSlice(allocator, &buffer);
-                    } else {
-                        // error - operand sizes not match
-                    }
-                },
-                .mem => {},
-                .imm => {
-                    const immsize = immMinSize(second.imm);
-                    switch (first.reg.name) {
-                        .Al => {
-                            if (immsize == 1) {
-                                const buffer: [2]u8 = .{ 0x34, @truncate(@as(u64, @bitCast(second.imm))) };
-                                try code_buffer.appendSlice(allocator, &buffer);
-                            } else {
-                                // error - imm value too big
-                            }
+        if (base) |b| {
+            bs = regCode(b.name);
+            if (b.name.isAdditionalReg()) {
+                self.rex.setB();
+            }
+            if (b.size == 4) {
+                self.as = true;
+            } else {
+                self.as = false;
+            }
+        } else {
+            bs = 0b101;
+            if (self.modrm) |modrm| {
+                if (self.disp == null) {
+                    switch (modrm.mod) {
+                        0b00 => {
+                            self.disp = parser.Displacement{ .num = 0 };
+                            self.disp_bytes = 4;
                         },
-                        .Ax => {
-                            if (immsize <= 2) {
-                                const buffer: [3]u8 = .{ 0x35, @truncate(@as(u64, @bitCast(second.imm))), @truncate(@as(u64, @bitCast(second.imm >> 8))) };
-                                try code_buffer.appendSlice(allocator, &buffer);
-                            } else {
-                                //
-                            }
+                        0b01 => {
+                            self.disp = parser.Displacement{ .num = 0 };
+                            self.disp_bytes = 1;
                         },
-                        .Eax => {
-                            if (immsize <= 4) {
-                                const buffer: [5]u8 = .{ 0x35, @truncate(@as(u64, @bitCast(second.imm))), @truncate(@as(u64, @bitCast(second.imm >> 8))), @truncate(@as(u64, @bitCast(second.imm >> 16))), @truncate(@as(u64, @bitCast(second.imm >> 24))) };
-                                try code_buffer.appendSlice(allocator, &buffer);
-                            }
-                        },
-                        .Rax => {
-                            if (immsize <= 4) {
-                                const buffer: [6]u8 = .{ REX_W, 0x35, @truncate(@as(u64, @bitCast(second.imm))), @truncate(@as(u64, @bitCast(second.imm >> 8))), @truncate(@as(u64, @bitCast(second.imm >> 16))), @truncate(@as(u64, @bitCast(second.imm >> 24))) };
-                                try code_buffer.appendSlice(allocator, &buffer);
-                            }
+                        0b10 => {
+                            self.disp = parser.Displacement{ .num = 0 };
+                            self.disp_bytes = 4;
                         },
                         else => {},
                     }
-                },
-                .label => {},
+                }
             }
-        },
-        .mem => {},
-        .imm => {
-            // error - immediate cannot be first operand of xor
-        },
-        .label => {
-            // error - label cannot be first operand of xor
-        },
-    }
-}
+        }
 
-fn inc(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
-    if (instr.operands.items.len != 1) {
-        // error - inc must have exactly 1 operand
+        self.sib = SibByte{ .base = bs, .index = ind, .ss = ss };
     }
-    const first = instr.operands.items[0];
-    switch (first) {
-        .reg => {
-            const rexw = switch (first.reg.size) {
-                8 => true,
-                else => false,
-            };
-            const rexb = if (first.reg.name.isAdditionalReg()) true else false;
-            const code = modRMReg(first, .{ .reg = try parser.Register.init(.Rax) });
-            var buffer: [2]u8 = .{ 0xFF, code };
-            if (first.reg.size == 1) {
-                buffer[0] = 0xFE;
-            }
-            if (rexb) {
-                try code_buffer.append(allocator, REX_WB);
-            } else if (rexw) {
-                try code_buffer.append(allocator, REX_W);
-            }
-            try code_buffer.appendSlice(allocator, &buffer);
-        },
-        .mem => {},
-        .imm => {
-            // error - immediate cannot be operand of inc
-        },
-        .label => {
-            // error - label cannot be operand of inc
-        },
-    }
-}
 
-fn dec(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
-    if (instr.operands.items.len != 1) {
-        // error - dec must have exactly 1 operand
+    fn modRM(self: *InstrBytes, reg: parser.Register, rm: parser.Operand) void {
+        var mod: u2 = undefined;
+        var rm_code: u3 = undefined;
+        const reg_code: u3 = regCode(reg.name);
+        if (reg.size == 2) {
+            self.os = true;
+        } else if (reg.size == 8) {
+            self.rex.setW();
+        }
+        if (reg.name.isAdditionalReg()) {
+            self.rex.setR();
+        }
+        switch (rm) {
+            .reg => {
+                mod = 0b11;
+                rm_code = regCode(rm.reg.name);
+                if (rm.reg.name.isAdditionalReg()) {
+                    self.rex.setB();
+                }
+            },
+            .mem => {
+                switch (rm.mem.mem) {
+                    .label => {
+                        // RIP-relative addressing
+                        mod = 0b00;
+                        rm_code = 0b101;
+                        self.disp = parser.Displacement{ .num = 0 };
+                        self.disp_bytes = 4;
+                    },
+                    .addr => {
+                        const disp_size: u8 = if (rm.mem.mem.addr.disp) |disp| parser.dispMinSize(disp) else 0;
+                        const baseIn = if (rm.mem.mem.addr.base != null) true else false;
+                        const indexIn = if (rm.mem.mem.addr.index != null) true else false;
+                        const dispIn = if (disp_size == 0) false else true;
+                        if (!indexIn) {
+                            if (baseIn) {
+                                const base_code = regCode(rm.mem.mem.addr.base.?.name);
+                                if (disp_size == 0) {
+                                    if (base_code == 0b101) {
+                                        if (rm.mem.mem.addr.base.?.name.isAdditionalReg()) {
+                                            self.rex.setB();
+                                        }
+                                        if (rm.mem.mem.addr.base.?.size == 4) {
+                                            self.as = true;
+                                        } else {
+                                            self.as = false;
+                                        }
+                                        mod = 0b01;
+                                        rm_code = base_code;
+                                        self.disp = parser.Displacement{ .num = 0 };
+                                        self.disp_bytes = 1;
+                                        self.need_sib = false;
+                                    } else if (base_code == 0b100) {
+                                        mod = 0b00;
+                                        rm_code = base_code;
+                                        self.need_sib = true;
+                                    } else {
+                                        if (rm.mem.mem.addr.base.?.name.isAdditionalReg()) {
+                                            self.rex.setB();
+                                        }
+                                        if (rm.mem.mem.addr.base.?.size == 4) {
+                                            self.as = true;
+                                        } else {
+                                            self.as = false;
+                                        }
+                                        mod = 0b00;
+                                        rm_code = base_code;
+                                        self.need_sib = false;
+                                    }
+                                } else if (disp_size == 1) {
+                                    if (base_code == 0b100) {
+                                        mod = 0b01;
+                                        rm_code = base_code;
+                                        self.disp = rm.mem.mem.addr.disp;
+                                        self.disp_bytes = 1;
+                                        self.need_sib = true;
+                                    } else {
+                                        if (rm.mem.mem.addr.base.?.name.isAdditionalReg()) {
+                                            self.rex.setB();
+                                        }
+                                        if (rm.mem.mem.addr.base.?.size == 4) {
+                                            self.as = true;
+                                        } else {
+                                            self.as = false;
+                                        }
+                                        mod = 0b01;
+                                        rm_code = base_code;
+                                        self.disp = rm.mem.mem.addr.disp;
+                                        self.disp_bytes = 1;
+                                        self.need_sib = false;
+                                    }
+                                } else if (disp_size <= 4) {
+                                    if (base_code == 0b100) {
+                                        mod = 0b10;
+                                        rm_code = base_code;
+                                        self.disp = rm.mem.mem.addr.disp;
+                                        self.disp_bytes = 4;
+                                        self.need_sib = true;
+                                    } else {
+                                        if (rm.mem.mem.addr.base.?.name.isAdditionalReg()) {
+                                            self.rex.setB();
+                                        }
+                                        if (rm.mem.mem.addr.base.?.size == 4) {
+                                            self.as = true;
+                                        } else {
+                                            self.as = false;
+                                        }
+                                        mod = 0b10;
+                                        rm_code = base_code;
+                                        self.disp = rm.mem.mem.addr.disp;
+                                        self.disp_bytes = 4;
+                                        self.need_sib = false;
+                                    }
+                                } else {
+                                    unreachable;
+                                }
+                            } else if (dispIn) {
+                                // Absolute disp32 addressing
+                                self.need_sib = true;
+                                mod = 0b00;
+                                rm_code = 0b100;
+                                self.disp = rm.mem.mem.addr.disp;
+                                self.disp_bytes = 4;
+                            } else {
+                                unreachable;
+                            }
+                        } else {
+                            self.need_sib = true;
+                            if (disp_size == 0) {
+                                if (baseIn) {
+                                    const base_code = regCode(rm.mem.mem.addr.base.?.name);
+                                    if (base_code == 0b101) {
+                                        mod = 0b01;
+                                        rm_code = 0b100;
+                                        self.disp = parser.Displacement{ .num = 0 };
+                                        self.disp_bytes = 1;
+                                    } else {
+                                        mod = 0b00;
+                                        rm_code = 0b100;
+                                    }
+                                } else {
+                                    mod = 0b00;
+                                    rm_code = 0b100;
+                                }
+                            } else if (disp_size == 1) {
+                                if (baseIn) {
+                                    mod = 0b01;
+                                    rm_code = 0b100;
+                                    self.disp = rm.mem.mem.addr.disp;
+                                    self.disp_bytes = 1;
+                                } else {
+                                    mod = 0b00;
+                                    rm_code = 0b100;
+                                    self.disp = rm.mem.mem.addr.disp;
+                                    self.disp_bytes = 4;
+                                }
+                            } else if (disp_size <= 4) {
+                                if (baseIn) {
+                                    mod = 0b10;
+                                    rm_code = 0b100;
+                                    self.disp = rm.mem.mem.addr.disp;
+                                    self.disp_bytes = 4;
+                                } else {
+                                    mod = 0b00;
+                                    rm_code = 0b100;
+                                    self.disp = rm.mem.mem.addr.disp;
+                                    self.disp_bytes = 4;
+                                }
+                            } else {
+                                unreachable;
+                            }
+                        }
+                    },
+                }
+            },
+            else => unreachable,
+        }
+        self.modrm = ModRmByte{ .mod = mod, .reg = reg_code, .rm = rm_code };
     }
-    const first = instr.operands.items[0];
-    switch (first) {
-        .reg => {
-            const rexw = switch (first.reg.size) {
-                8 => true,
-                else => false,
-            };
-            switch (first.reg.size) {
-                1 => {
-                    const code = modRMReg(first, .{ .reg = try parser.Register.init(.Rcx) });
-                    const buffer: [2]u8 = .{ 0xFE, code };
-                    if (rexw) {
-                        try code_buffer.append(allocator, REX_W);
+
+    fn checkAndSwapBaseIndex(self: *const InstrBytes, mem: parser.ComplexAddress) !parser.ComplexAddress {
+        _ = self;
+        var output = mem;
+        if (mem.index) |index| {
+            var with_scale = false;
+            if (mem.scale) |scale| {
+                if (scale.num > 1) {
+                    with_scale = true;
+                }
+            }
+            const index_code = regCode(index.name);
+            if (index_code == 0b100 and !index.name.isAdditionalReg()) {
+                if (!with_scale) {
+                    if (mem.base) |base| {
+                        const base_code = regCode(base.name);
+                        if ((base_code != 0b100 or base.name.isAdditionalReg())) {
+                            const temp = output.base;
+                            output.base = output.index;
+                            output.index = temp;
+                        } else {
+                            return CodegenError.InvalidIndex;
+                        }
+                    } else {
+                        return CodegenError.InvalidIndex;
                     }
-                    try code_buffer.appendSlice(allocator, &buffer);
-                },
-                2, 4, 8 => {
-                    const code = modRMReg(first, .{ .reg = try parser.Register.init(.Rcx) });
-                    const buffer: [2]u8 = .{ 0xFF, code };
-                    if (rexw) {
-                        try code_buffer.append(allocator, REX_W);
-                    }
-                    try code_buffer.appendSlice(allocator, &buffer);
-                },
-                else => {
-                    // error but unreachable
-                },
+                } else {
+                    return CodegenError.InvalidIndex;
+                }
+            }
+        }
+        return output;
+    }
+
+    pub fn def(self: *InstrBytes, reg: parser.Register, rm: parser.Operand, opcode: u8) !void {
+        self.reset();
+        self.opcode = opcode;
+        var checked: parser.Operand = rm;
+        switch (rm) {
+            .mem => {
+                switch (rm.mem.mem) {
+                    .addr => {
+                        checked = parser.Operand{ .mem = .{ .mem = .{ .addr = try self.checkAndSwapBaseIndex(rm.mem.mem.addr) }, .size = rm.mem.size } };
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+        self.modRM(reg, checked);
+        if (self.modrm) |_| {
+            if (self.need_sib) {
+                self.sibByte(checked.mem.mem.addr.base, checked.mem.mem.addr.index, checked.mem.mem.addr.scale);
+            }
+        }
+    }
+};
+
+const Codegen = struct {
+    ibytes: InstrBytes,
+    allocator: std.mem.Allocator,
+    section: *parser.CodeSection,
+
+    pub fn init(section: *parser.CodeSection, allocator: std.mem.Allocator) Codegen {
+        return Codegen{
+            .ibytes = InstrBytes.init(),
+            .allocator = allocator,
+            .section = section,
+        };
+    }
+    pub fn addToBuffer(self: *Codegen) !void {
+        if (self.ibytes.as) {
+            try self.section.buffer.append(self.allocator, 0x67);
+        }
+        if (self.ibytes.os) {
+            try self.section.buffer.append(self.allocator, 0x66);
+        }
+        if (self.ibytes.rex.byte() > 0x40) {
+            try self.section.buffer.append(self.allocator, self.ibytes.rex.byte());
+        }
+        try self.section.buffer.append(self.allocator, self.ibytes.opcode);
+        if (self.ibytes.modrm) |modrm| {
+            try self.section.buffer.append(self.allocator, modrm.byte());
+        }
+        if (self.ibytes.sib) |sib| {
+            try self.section.buffer.append(self.allocator, sib.byte());
+        }
+        if (self.ibytes.disp) |disp| {
+            try self.addDisplacement(disp, self.ibytes.disp_bytes);
+        }
+    }
+
+    pub fn addImmediate(self: *Codegen, imm: parser.Immediate, bytes: u8) !void {
+        const value: u64 = switch (imm) {
+            .i => @bitCast(imm.i),
+            .u => imm.u,
+        };
+        try self.section.buffer.append(self.allocator, @as(u8, @truncate(value)));
+        if (bytes > 1) {
+            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 8)));
+        }
+        if (bytes > 2) {
+            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 16)));
+            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 24)));
+        }
+        if (bytes > 4) {
+            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 32)));
+            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 40)));
+            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 48)));
+            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 56)));
+        }
+    }
+
+    pub fn addDisplacement(self: *Codegen, disp: parser.Displacement, bytes: u8) !void {
+        const value: u32 = @bitCast(disp.num);
+        try self.section.buffer.append(self.allocator, @as(u8, @truncate(value)));
+        if (bytes > 1) {
+            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 8)));
+        }
+        if (bytes > 2) {
+            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 16)));
+            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 24)));
+        }
+    }
+
+    pub fn addRelocation(self: *Codegen, label: []u8, l_type: parser.RelType, till_next_instr: u8) !void {
+        const rel_size: u8 = switch (l_type) {
+            .Rel32D, .Rel32C, .Abs32D => 4,
+            .Abs64D => 8,
+        };
+        const offset = self.section.buffer.items.len - rel_size;
+        const addend = switch (l_type) {
+            .Rel32D, .Rel32C => -@as(i32, (till_next_instr + rel_size)),
+            .Abs32D, .Abs64D => 0,
+        };
+        const relocation = parser.Relocation{
+            .type = l_type,
+            .name = label,
+            .offset = offset,
+            .addend = addend,
+        };
+        try self.section.relocations.append(self.allocator, relocation);
+    }
+};
+
+var gen: Codegen = undefined;
+
+fn memEncoding(rmop: parser.Operand, opcode: u8, digit: u8, sizes_mask: u4, discard_rexw: bool) !void {
+    var rm_size: u8 = undefined;
+    switch (rmop) {
+        .mem => {
+            if (rmop.mem.size) |size| {
+                rm_size = size;
+            } else {
+                return CodegenError.UnspecifiedMemoryPointerSize;
             }
         },
-        .mem => {},
-        .imm => {
-            // error - immediate cannot be operand of dec
+        .reg => {
+            rm_size = rmop.reg.size;
         },
-        .label => {
-            // error - label cannot be operand of dec
-        },
+        else => unreachable,
+    }
+
+    if (rm_size & sizes_mask == rm_size) {
+        const reg = digitToReg(digit);
+        try gen.ibytes.def(reg, rmop, opcode);
+        gen.ibytes.setOsRexW(rm_size);
+        if (discard_rexw) {
+            gen.ibytes.rex.w = false;
+        }
+        switch (rmop) {
+            .mem => {
+                switch (rmop.mem.mem) {
+                    .addr => {
+                        try gen.addToBuffer();
+                    },
+                    .label => {
+                        try gen.addToBuffer();
+                        try gen.addRelocation(rmop.mem.mem.label, .Rel32D, 0);
+                    },
+                }
+            },
+            .reg => {
+                try gen.addToBuffer();
+            },
+            else => unreachable,
+        }
+    } else {
+        return CodegenError.WrongMemoryPointerSize;
     }
 }
 
-fn testi(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
+fn memRegEncoding(rmop: parser.Operand, regop: parser.Register, opcode: u8) !void {
+    const reg_size = regop.size;
+    var rm_size: u8 = undefined;
+    switch (rmop) {
+        .reg => rm_size = rmop.reg.size,
+        .mem => rm_size = rmop.mem.size orelse reg_size,
+        else => return CodegenError.InvalidOperand,
+    }
+    if (rm_size == reg_size) {
+        try gen.ibytes.def(regop, rmop, opcode);
+        switch (rmop) {
+            .reg => {
+                try gen.addToBuffer();
+            },
+            .mem => {
+                switch (rmop.mem.mem) {
+                    .addr => {
+                        try gen.addToBuffer();
+                    },
+                    .label => {
+                        try gen.addToBuffer();
+                        try gen.addRelocation(rmop.mem.mem.label, .Rel32D, 0);
+                    },
+                }
+            },
+            else => unreachable,
+        }
+    } else {
+        return CodegenError.DiffOperSizes;
+    }
+}
+
+fn regMemEncoding(regop: parser.Register, rmop: parser.Operand, opcode: u8, sizes_mask: u4) !void {
+    const reg_size = regop.size;
+    var rm_size: u8 = undefined;
+    switch (rmop) {
+        .reg => rm_size = rmop.reg.size,
+        .mem => rm_size = rmop.mem.size orelse reg_size,
+        else => return CodegenError.InvalidOperand,
+    }
+    if (rm_size == reg_size) {
+        if (rm_size & sizes_mask == rm_size) {
+            try gen.ibytes.def(regop, rmop, opcode);
+            switch (rmop) {
+                .reg => {
+                    try gen.addToBuffer();
+                },
+                .mem => {
+                    switch (rmop.mem.mem) {
+                        .addr => {
+                            try gen.addToBuffer();
+                        },
+                        .label => {
+                            try gen.addToBuffer();
+                            try gen.addRelocation(rmop.mem.mem.label, .Rel32D, 0);
+                        },
+                    }
+                },
+                else => unreachable,
+            }
+        } else {
+            return CodegenError.InvalidOperand;
+        }
+    } else {
+        return CodegenError.DiffOperSizes;
+    }
+}
+
+fn opEncoding(reg: parser.Register, opcode: u8, sizes_mask: u4, discard_rexw: bool) !void {
+    const reg_size = reg.size;
+    if (reg_size & sizes_mask == reg_size) {
+        gen.ibytes.reset();
+        gen.ibytes.opcode = opcode;
+        gen.ibytes.plusR(reg.name);
+        gen.ibytes.setOsRexW(reg_size);
+        if (reg.name.isAdditionalReg()) {
+            gen.ibytes.rex.setB();
+        }
+        if (discard_rexw) {
+            gen.ibytes.rex.w = false;
+        }
+        try gen.addToBuffer();
+    } else {
+        return CodegenError.WrongRegisterSize;
+    }
+}
+
+fn opImmEncoding(reg: parser.Register, opcode: u8, imm: parser.Operand) !void {
+    const reg_size = reg.size;
+    var is_label: bool = undefined;
+    var imm_size: u8 = undefined;
+    switch (imm) {
+        .imm => {
+            is_label = false;
+            imm_size = parser.immMinSize(imm.imm);
+        },
+        .label => {
+            is_label = true;
+            imm_size = 8;
+        },
+        else => unreachable,
+    }
+    if (reg_size >= imm_size) {
+        if (reg_size == 8 and imm_size <= 4) {
+            try memImmEncodingG1(.{ .reg = reg }, 0xC7, 0, imm.imm);
+        } else {
+            try gen.ibytes.def(reg, .{ .reg = parser.Register.init(.Eax) }, opcode);
+            gen.ibytes.plusR(reg.name);
+            gen.ibytes.modrm = null;
+            try gen.addToBuffer();
+            if (is_label) {
+                try gen.addImmediate(.{ .u = 0 }, reg_size);
+                try gen.addRelocation(imm.label, .Abs64D, 0);
+            } else {
+                try gen.addImmediate(imm.imm, reg_size);
+            }
+        }
+    } else {
+        return CodegenError.ImmValueIsTooLarge;
+    }
+}
+
+fn memImmEncodingG1(rmop: parser.Operand, opcode: u8, digit: u8, imm: parser.Immediate) !void {
+    const imm_size = parser.immMinSize(imm);
+    var rm_size: u8 = undefined;
+    switch (rmop) {
+        .reg => {
+            rm_size = rmop.reg.size;
+        },
+        .mem => {
+            if (rmop.mem.size) |size| {
+                rm_size = size;
+            } else {
+                return CodegenError.UnspecifiedMemoryPointerSize;
+            }
+        },
+        else => unreachable,
+    }
+    if (rm_size >= imm_size and imm_size <= 4) {
+        const reg = digitToReg(digit);
+        try gen.ibytes.def(reg, rmop, opcode);
+        gen.ibytes.setOsRexW(rm_size);
+        const imm_bytes = if (rm_size == 8) 4 else rm_size;
+        switch (rmop) {
+            .reg => {
+                try gen.addToBuffer();
+                try gen.addImmediate(imm, imm_bytes);
+            },
+            .mem => {
+                switch (rmop.mem.mem) {
+                    .addr => {
+                        try gen.addToBuffer();
+                        try gen.addImmediate(imm, imm_bytes);
+                    },
+                    .label => {
+                        try gen.addToBuffer();
+                        try gen.addRelocation(rmop.mem.mem.label, .Rel32D, imm_bytes);
+                        try gen.addImmediate(imm, imm_bytes);
+                    },
+                }
+            },
+            else => unreachable,
+        }
+    } else {
+        return CodegenError.ImmValueIsTooLarge;
+    }
+}
+
+fn memImmEncodingG2(rmop: parser.Operand, opcode: u8, digit: u8, imm: parser.Immediate) !void {
+    var rm_size: u8 = undefined;
+    switch (rmop) {
+        .reg => {
+            rm_size = rmop.reg.size;
+        },
+        .mem => {
+            if (rmop.mem.size) |size| {
+                rm_size = size;
+            } else {
+                return CodegenError.UnspecifiedMemoryPointerSize;
+            }
+        },
+        else => unreachable,
+    }
+    const reg = digitToReg(digit);
+    try gen.ibytes.def(reg, rmop, opcode);
+    gen.ibytes.setOsRexW(rm_size);
+    switch (rmop) {
+        .reg => {
+            try gen.addToBuffer();
+            try gen.addImmediate(imm, 1);
+        },
+        .mem => {
+            switch (rmop.mem.mem) {
+                .addr => {
+                    try gen.addToBuffer();
+                    try gen.addImmediate(imm, 1);
+                },
+                .label => {
+                    try gen.addToBuffer();
+                    try gen.addRelocation(rmop.mem.mem.label, .Rel32D, 1);
+                    try gen.addImmediate(imm, 1);
+                },
+            }
+        },
+        else => unreachable,
+    }
+}
+
+fn immEncoding(opcode: u8, imm: parser.Operand, sizes_mask: u4, discard_os: bool) !void {
+    var is_label: bool = undefined;
+    var imm_size: u8 = undefined;
+    switch (imm) {
+        .imm => {
+            is_label = false;
+            imm_size = parser.immMinSize(imm.imm);
+        },
+        .label => {
+            is_label = true;
+            imm_size = 4;
+        },
+        else => unreachable,
+    }
+    if (imm_size % sizes_mask == imm_size) {
+        if (!discard_os and imm_size == 2) {
+            try gen.section.buffer.append(gen.allocator, 0x66);
+        }
+        try gen.section.buffer.append(gen.allocator, opcode);
+        if (is_label) {
+            try gen.addImmediate(.{ .u = 0 }, imm_size);
+            try gen.addRelocation(imm.label, .Abs32D, 0);
+        } else {
+            try gen.addImmediate(imm.imm, imm_size);
+        }
+    } else {
+        return CodegenError.InvalidOperand;
+    }
+}
+
+fn accImmEncoding(acc: parser.Register, opcode: u8, imm: parser.Immediate) !void {
+    const acc_size = acc.size;
+    const imm_size = parser.immMinSize(imm);
+    if (acc_size >= imm_size and imm_size <= 4) {
+        gen.ibytes.reset();
+        gen.ibytes.opcode = opcode;
+        gen.ibytes.setOsRexW(acc_size);
+
+        const imm_bytes = if (acc_size == 8) 4 else acc_size;
+        try gen.addToBuffer();
+        try gen.addImmediate(imm, imm_bytes);
+    } else {
+        return CodegenError.ImmValueIsTooLarge;
+    }
+}
+
+fn zeroEncoding(opcode_bytes: []const u8) !void {
+    try gen.section.buffer.appendSlice(gen.allocator, opcode_bytes);
+}
+
+fn syscall(instr: parser.CpuInstruction) !void {
+    if (instr.operands.items.len != 0) {
+        return CodegenError.InvalidNumberOfOperands;
+    }
+    const buffer: [2]u8 = .{ 0x0F, 0x05 };
+    try zeroEncoding(buffer[0..]);
+}
+
+fn mov(instr: parser.CpuInstruction) !void {
     if (instr.operands.items.len != 2) {
-        // error - test must have exactly 2 operands
+        return CodegenError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     const second = instr.operands.items[1];
     switch (first) {
         .reg => {
-            const rexw = switch (first.reg.size) {
-                8 => true,
-                else => false,
-            };
-            const rexb = if (first.reg.name.isAdditionalReg()) true else false;
             switch (second) {
                 .reg => {
-                    if (first.reg.size == second.reg.size) {
-                        const code = modRMReg(first, second);
-                        var buffer: [2]u8 = .{ 0x85, code };
-                        if (first.reg.size == 1) {
-                            buffer[0] = 0x84;
-                        }
-                        if (rexb) {
-                            try code_buffer.append(allocator, REX_WB);
-                        } else if (rexw) {
-                            try code_buffer.append(allocator, REX_W);
-                        }
-                        try code_buffer.appendSlice(allocator, &buffer);
-                    } else {
-                        // error - registers sizes don't match
-                    }
+                    const opcode: u8 = if (first.reg.size == 1) 0x88 else 0x89;
+                    try memRegEncoding(first, second.reg, opcode);
                 },
-                .mem => {},
-                .imm => {},
-                .label => {
-                    // error maybe
+                .mem => {
+                    const opcode: u8 = if (first.reg.size == 1) 0x8A else 0x8B;
+                    try regMemEncoding(first.reg, second, opcode, 0b1111);
+                },
+                .imm, .label => {
+                    const opcode: u8 = if (first.reg.size == 1) 0xB0 else 0xB8;
+                    try opImmEncoding(first.reg, opcode, second);
                 },
             }
         },
-        .mem => {},
-        .imm => {
-            // error - immediate cannot be first operand of test
-        },
-        .label => {
-            // error - label cannot be first operand of test
-        },
-    }
-}
-
-fn add(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
-    if (instr.operands.items.len != 2) {
-        // error - add must have exactly 2 operands
-    }
-    const first = instr.operands.items[0];
-    const second = instr.operands.items[1];
-    switch (first) {
-        .reg => {
-            const rexw = switch (first.reg.size) {
-                8 => true,
-                else => false,
-            };
+        .mem => {
             switch (second) {
-                .reg => {},
-                .mem => {
-                    switch (second.mem.mem) {
-                        .label => {
-                            const data_label = second.mem.mem.label;
-                            const res = parser.dl_table.get(data_label);
-                            if (res) |record| {
-                                const address = data_virt_address + record.offset;
-                                const code = modRMReg(first, second);
-                                if (code % 8 == 4) {
-                                    const sib = sibByte(.{ .base = try parser.Register.init(.Rbp), .index = try parser.Register.init(.Rsp), .scale = 0 }, try parser.Register.init(.Rbp));
-                                    const buffer: [7]u8 = .{ 0x8B, code, sib, @truncate(address), @truncate(address >> 8), @truncate(address >> 16), @truncate(address >> 24) };
-                                    if (rexw) {
-                                        try code_buffer.append(allocator, REX_W);
-                                    }
-                                    try code_buffer.appendSlice(allocator, &buffer);
-                                }
-                            }
-                        },
-                        .addr => {
-                            const code = modRMReg(first, second);
-                            const buffer: [2]u8 = .{ 0x03, code };
-                            if (rexw) {
-                                try code_buffer.append(allocator, REX_W);
-                            }
-                            try code_buffer.appendSlice(allocator, &buffer);
-                        },
-                    }
+                .reg => {
+                    const opcode: u8 = if (second.reg.size == 1) 0x88 else 0x89;
+                    try memRegEncoding(first, second.reg, opcode);
                 },
                 .imm => {
-                    const immsize = immMinSize(second.imm);
-                    if (immsize == 1) {
-                        const imm: u8 = @truncate(@as(u64, @bitCast(second.imm)));
-                        switch (first.reg.size) {
-                            1 => {},
-                            2, 4, 8 => {
-                                const code = modRMReg(first, .{ .reg = try parser.Register.init(.Rax) });
-                                const buffer: [3]u8 = .{ 0x83, code, imm };
-                                if (rexw) {
-                                    try code_buffer.append(allocator, REX_W);
-                                }
-                                try code_buffer.appendSlice(allocator, &buffer);
-                            },
-                            else => {
-                                // error but unreachable
-                            },
-                        }
+                    var ptr_size: u8 = undefined;
+                    if (first.mem.size) |size| {
+                        ptr_size = size;
+                    } else {
+                        return CodegenError.UnspecifiedMemoryPointerSize;
                     }
+                    const opcode: u8 = if (ptr_size == 1) 0xC6 else 0xC7;
+                    try memImmEncodingG1(first, opcode, 0, second.imm);
                 },
-                .label => {},
-            }
-        },
-        .mem => {},
-        .imm => {
-            // error - immediate cannot be first operand of mov
-        },
-        .label => {
-            // error - label cannot be first operand of mov
-        },
-    }
-}
-
-fn div(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
-    if (instr.operands.items.len != 1) {
-        // error - div must have exactly 1 operand
-    }
-    const first = instr.operands.items[0];
-    switch (first) {
-        .reg => {
-            const rexw = switch (first.reg.size) {
-                8 => true,
-                else => false,
-            };
-            const rexb = if (first.reg.name.isAdditionalReg()) true else false;
-            const code = modRMReg(first, .{ .reg = try parser.Register.init(.Rsi) });
-            var buffer: [2]u8 = .{ 0xF7, code };
-            if (first.reg.size == 1) {
-                buffer[0] = 0xF6;
-            }
-            if (rexb) {
-                try code_buffer.append(allocator, REX_WB);
-            } else if (rexw) {
-                try code_buffer.append(allocator, REX_W);
-            }
-            try code_buffer.appendSlice(allocator, &buffer);
-        },
-        .mem => {},
-        .imm => {
-            // error - immediate cannot be operand of div
-        },
-        .label => {
-            // error - label cannot be operand of div
-        },
-    }
-}
-
-fn lea(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
-    if (instr.operands.items.len != 2) {
-        // error - lea must have exactly 2 operands
-    }
-    const first = instr.operands.items[0];
-    const second = instr.operands.items[1];
-    switch (first) {
-        .reg => {
-            const rexw = switch (first.reg.size) {
-                8 => true,
-                else => false,
-            };
-            const rexb = if (first.reg.name.isAdditionalReg()) true else false;
-            switch (second) {
+                .label => {
+                    // unsupported for now
+                    return CodegenError.InvalidOperand;
+                },
                 .mem => {
-                    switch (second.mem.mem) {
-                        .addr => {
-                            const code = modRMReg(first, second);
-                            if (code % 8 == 4) {
-                                // [--][--]
-                                const sib = sibByte(.{ .base = undefined, .index = second.mem.mem.addr.index, .scale = second.mem.mem.addr.scale }, try parser.Register.init(second.mem.mem.addr.base.name));
-                                const buffer: [3]u8 = .{ 0x8D, code, sib };
-                                if (rexb) {
-                                    try code_buffer.append(allocator, REX_WB);
-                                } else if (rexw) {
-                                    try code_buffer.append(allocator, REX_W);
-                                }
-                                try code_buffer.appendSlice(allocator, &buffer);
-                            }
-                        },
-                        .label => {
-                            // error - second op of lea must be mem
-                        },
-                    }
-                },
-                else => {
-                    // error - second op of lea must be mem
+                    return CodegenError.InvalidOperand;
                 },
             }
         },
         else => {
-            // error - first op of lea must be reg
+            return CodegenError.InvalidOperand;
         },
     }
 }
 
-fn mov(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
+fn push(instr: parser.CpuInstruction) !void {
+    if (instr.operands.items.len != 1) {
+        return CodegenError.InvalidNumberOfOperands;
+    }
+    const first = instr.operands.items[0];
+    switch (first) {
+        .reg => {
+            const opcode: u8 = 0x50;
+            try opEncoding(first.reg, opcode, 0b1010, true);
+        },
+        .mem => {
+            const opcode: u8 = 0xFF;
+            try memEncoding(first, opcode, 6, 0b1010, true);
+        },
+        .imm, .label => {
+            const immsize = parser.immMinSize(first.imm);
+            const opcode: u8 = if (immsize == 1) 0x6A else 0x68;
+            try immEncoding(opcode, first, 0b0111, false);
+        },
+    }
+}
+
+fn pop(instr: parser.CpuInstruction) !void {
+    if (instr.operands.items.len != 1) {
+        return CodegenError.InvalidNumberOfOperands;
+    }
+    const first = instr.operands.items[0];
+    switch (first) {
+        .reg => {
+            const opcode: u8 = 0x58;
+            try opEncoding(first.reg, opcode, 0b1010, true);
+        },
+        .mem => {
+            const opcode: u8 = 0x8F;
+            try memEncoding(first, opcode, 0, 0b1010, true);
+        },
+        else => {
+            return CodegenError.InvalidOperand;
+        },
+    }
+}
+
+fn inc(instr: parser.CpuInstruction) !void {
+    if (instr.operands.items.len != 1) {
+        return CodegenError.InvalidNumberOfOperands;
+    }
+    const first = instr.operands.items[0];
+    var opcode: u8 = undefined;
+    switch (first) {
+        .reg => {
+            opcode = if (first.reg.size == 1) 0xFE else 0xFF;
+        },
+        .mem => {
+            opcode = if (first.mem.size == 1) 0xFE else 0xFF;
+        },
+        else => {
+            return CodegenError.InvalidOperand;
+        },
+    }
+
+    try memEncoding(first, opcode, 0, 0b1111, false);
+}
+
+fn dec(instr: parser.CpuInstruction) !void {
+    if (instr.operands.items.len != 1) {
+        return CodegenError.InvalidNumberOfOperands;
+    }
+    const first = instr.operands.items[0];
+    var opcode: u8 = undefined;
+    switch (first) {
+        .reg => {
+            opcode = if (first.reg.size == 1) 0xFE else 0xFF;
+        },
+        .mem => {
+            opcode = if (first.mem.size == 1) 0xFE else 0xFF;
+        },
+        else => {
+            return CodegenError.InvalidOperand;
+        },
+    }
+
+    try memEncoding(first, opcode, 1, 0b1111, false);
+}
+
+fn lea(instr: parser.CpuInstruction) !void {
     if (instr.operands.items.len != 2) {
-        // error - mov must have exactly 2 operands
+        return CodegenError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     const second = instr.operands.items[1];
     switch (first) {
         .reg => {
-            const rexw = switch (first.reg.size) {
-                8 => true,
-                else => false,
-            };
-            const rexb = if (first.reg.name.isAdditionalReg()) true else false;
             switch (second) {
-                .reg => {},
                 .mem => {
-                    // mov rcx, [count]
-                    switch (second.mem.mem) {
-                        .label => {
-                            const data_label = second.mem.mem.label;
-                            const res = parser.dl_table.get(data_label);
-                            if (res) |record| {
-                                const address = data_virt_address + record.offset;
-                                const code = modRMReg(first, second);
-                                if (code % 8 == 4) {
-                                    // [--][--]
-                                    const sib = sibByte(.{ .base = try parser.Register.init(.Rbp), .index = try parser.Register.init(.Rsp), .scale = 0 }, try parser.Register.init(.Rbp));
-                                    const buffer: [7]u8 = .{ 0x8B, code, sib, @truncate(address), @truncate(address >> 8), @truncate(address >> 16), @truncate(address >> 24) };
-                                    if (rexw) {
-                                        try code_buffer.append(allocator, REX_W);
-                                    }
-                                    try code_buffer.appendSlice(allocator, &buffer);
-                                }
-                            }
-                        },
-                        .addr => {
-                            const code = modRMReg(first, second);
-                            if (code % 8 == 4) {
-                                // [--][--]
-                                const sib = sibByte(.{ .base = undefined, .index = second.mem.mem.addr.index, .scale = second.mem.mem.addr.scale }, try parser.Register.init(second.mem.mem.addr.base.name));
-                                var buffer: [3]u8 = .{ 0x8B, code, sib };
-                                if (first.reg.size == 1) {
-                                    buffer[0] = 0x8A;
-                                }
-                                if (rexb) {
-                                    try code_buffer.append(allocator, REX_WB);
-                                } else if (rexw) {
-                                    try code_buffer.append(allocator, REX_W);
-                                }
-                                try code_buffer.appendSlice(allocator, &buffer);
-                            }
-                        },
+                    const opcode: u8 = 0x8D;
+                    try regMemEncoding(first.reg, second, opcode, 0b1110);
+                },
+                else => {
+                    return CodegenError.InvalidOperand;
+                },
+            }
+        },
+        else => {
+            return CodegenError.InvalidOperand;
+        },
+    }
+}
+
+fn div(instr: parser.CpuInstruction) !void {
+    if (instr.operands.items.len != 1) {
+        return CodegenError.InvalidNumberOfOperands;
+    }
+    const first = instr.operands.items[0];
+
+    var opcode: u8 = undefined;
+    switch (first) {
+        .reg => {
+            opcode = if (first.reg.size == 1) 0xF6 else 0xF7;
+        },
+        .mem => {
+            opcode = if (first.mem.size == 1) 0xF6 else 0xF7;
+        },
+        else => {
+            return CodegenError.InvalidOperand;
+        },
+    }
+
+    try memEncoding(first, opcode, 6, 0b1111, false);
+}
+
+fn testi(instr: parser.CpuInstruction) !void {
+    if (instr.operands.items.len != 2) {
+        return CodegenError.InvalidNumberOfOperands;
+    }
+    const first = instr.operands.items[0];
+    const second = instr.operands.items[1];
+    switch (second) {
+        .imm => {
+            switch (first) {
+                .reg => {
+                    if (first.reg.name.isAccumulator()) {
+                        const opcode: u8 = if (first.reg.name == .Al) 0xA8 else 0xA9;
+                        try accImmEncoding(first.reg, opcode, second.imm);
+                    } else {
+                        const opcode: u8 = if (first.reg.size == 1) 0xF6 else 0xF7;
+                        try memImmEncodingG1(first, opcode, 0, second.imm);
                     }
+                },
+                .mem => {
+                    var ptr_size: u8 = undefined;
+                    if (first.mem.size) |size| {
+                        ptr_size = size;
+                    } else {
+                        return CodegenError.UnspecifiedMemoryPointerSize;
+                    }
+                    const opcode: u8 = if (ptr_size == 1) 0xF6 else 0xF7;
+                    try memImmEncodingG1(first, opcode, 0, second.imm);
+                },
+                else => {
+                    return CodegenError.InvalidOperand;
+                },
+            }
+        },
+        .reg => {
+            switch (first) {
+                .reg, .mem => {
+                    const opcode: u8 = if (second.reg.size == 1) 0x84 else 0x85;
+                    try memRegEncoding(first, second.reg, opcode);
+                },
+                else => {
+                    return CodegenError.InvalidOperand;
+                },
+            }
+        },
+        else => {
+            return CodegenError.InvalidOperand;
+        },
+    }
+    // switch (first) {
+    //     .reg => {
+    //         switch (second) {
+    //             .imm => {
+    //                 if (first.reg.name.isAccumulator()) {
+    //                     const opcode: u8 = if (first.reg.size == 1) 0xA8 else 0xA9;
+    //                     try accImmEncoding(first.reg, opcode, second.imm);
+    //                 }
+    //             },
+    //             .reg => {},
+    //             else => {
+    //                 return CodegenError.InvalidOperand;
+    //             },
+    //         }
+    //     },
+    //     .mem => {},
+    //     else => {
+    //         return CodegenError.InvalidOperand;
+    //     },
+    // }
+}
+
+fn add(instr: parser.CpuInstruction) !void {
+    if (instr.operands.items.len != 2) {
+        return CodegenError.InvalidNumberOfOperands;
+    }
+    const first = instr.operands.items[0];
+    const second = instr.operands.items[1];
+    switch (first) {
+        .reg => {
+            switch (second) {
+                .reg => {
+                    const opcode: u8 = if (first.reg.size == 1) 0x00 else 0x01;
+                    try memRegEncoding(first, second.reg, opcode);
+                },
+                .mem => {
+                    const opcode: u8 = if (first.reg.size == 1) 0x02 else 0x03;
+                    try regMemEncoding(first.reg, second, opcode, 0b1111);
                 },
                 .imm => {
-                    // mov rax, 1
-                    const immsize = immMinSize(second.imm);
-
-                    if (immsize == first.reg.size or (first.reg.size == 8 and immsize <= 4)) {
-                        const code = modRMReg(first, .{ .reg = try parser.Register.init(.Rax) });
-                        switch (first.reg.size) {
-                            1 => {
-                                var buffer: [3]u8 = .{ 0xC6, code, @truncate(@as(u64, @bitCast(second.imm))) };
-                                try code_buffer.appendSlice(allocator, &buffer);
-                            },
-                            2 => {
-                                var buffer: [4]u8 = .{ 0xC7, code, @truncate(@as(u64, @bitCast(second.imm))), @truncate(@as(u64, @bitCast(second.imm >> 8))) };
-                                try code_buffer.appendSlice(allocator, &buffer);
-                            },
-                            4, 8 => {
-                                var buffer: [6]u8 = .{ 0xC7, code, @truncate(@as(u64, @bitCast(second.imm))), @truncate(@as(u64, @bitCast(second.imm >> 8))), @truncate(@as(u64, @bitCast(second.imm >> 16))), @truncate(@as(u64, @bitCast(second.imm >> 24))) };
-                                if (rexb) {
-                                    try code_buffer.append(allocator, REX_WB);
-                                } else if (rexw) {
-                                    try code_buffer.append(allocator, REX_W);
-                                }
-                                try code_buffer.appendSlice(allocator, &buffer);
-                            },
-                            else => {
-                                // error but unreachable
-                            },
-                        }
-                    }
-                },
-                .label => {
-                    // mov rbx, label
-                    const data_label = second.label.name;
-                    const res = parser.dl_table.get(data_label);
-                    if (res) |record| {
-                        const address = data_virt_address + record.offset;
-
-                        if (address <= std.math.maxInt(u32)) {
-                            // label 32-bit
-                            const code = modRMReg(first, .{ .reg = try parser.Register.init(.Rax) });
-                            const buffer: [7]u8 = .{ REX_W, 0xC7, code, @truncate(address), @truncate(address >> 8), @truncate(address >> 16), @truncate(address >> 24) };
-                            try code_buffer.appendSlice(allocator, &buffer);
+                    if (first.reg.name.isAccumulator()) {
+                        const opcode: u8 = if (first.reg.name == .Al) 0x04 else 0x05;
+                        try accImmEncoding(first.reg, opcode, second.imm);
+                    } else {
+                        const reg_size = first.reg.size;
+                        const imm_size = parser.immMinSize(second.imm);
+                        if (imm_size == 1 and reg_size > 1) {
+                            const opcode: u8 = 0x83;
+                            try memImmEncodingG2(first, opcode, 0, second.imm);
                         } else {
-                            // label 64-bit
+                            const opcode: u8 = if (reg_size == 1) 0x80 else 0x81;
+                            try memImmEncodingG1(first, opcode, 0, second.imm);
                         }
+                    }
+                },
+                .label => {
+                    return CodegenError.InvalidOperand;
+                },
+            }
+        },
+        .mem => {
+            switch (second) {
+                .reg => {
+                    const opcode: u8 = if (second.reg.size == 1) 0x00 else 0x01;
+                    try memRegEncoding(first, second.reg, opcode);
+                },
+                .imm => {
+                    var ptr_size: u8 = undefined;
+                    if (first.mem.size) |size| {
+                        ptr_size = size;
                     } else {
-                        // error - label is not defined
+                        return CodegenError.UnspecifiedMemoryPointerSize;
                     }
+                    const imm_size = parser.immMinSize(second.imm);
+                    if (imm_size == 1 and ptr_size > 1) {
+                        const opcode: u8 = 0x83;
+                        try memImmEncodingG2(first, opcode, 0, second.imm);
+                    } else {
+                        const opcode: u8 = if (ptr_size == 1) 0x80 else 0x81;
+                        try memImmEncodingG1(first, opcode, 0, second.imm);
+                    }
+                },
+                .label => {
+                    // not supported for now
+                    return CodegenError.InvalidOperand;
+                },
+                .mem => {
+                    return CodegenError.InvalidOperand;
                 },
             }
         },
-        .mem => {
-            switch (first.mem.mem) {
-                .label => {},
-                .addr => {
-                    switch (second) {
-                        .reg => {
-                            const rexw = switch (second.reg.size) {
-                                8 => true,
-                                else => false,
-                            };
-                            const rexb = if (second.reg.name.isAdditionalReg()) true else false;
-                            const code = modRMReg(second, first);
-                            if (code % 8 == 4) {
-                                // [--][--]
-                                const sib = sibByte(.{ .base = undefined, .index = first.mem.mem.addr.index, .scale = first.mem.mem.addr.scale }, try parser.Register.init(first.mem.mem.addr.base.name));
-                                var buffer: [3]u8 = .{ 0x89, code, sib };
-                                if (second.reg.size == 1) {
-                                    buffer[0] = 0x88;
-                                }
-                                if (rexb) {
-                                    try code_buffer.append(allocator, REX_WB);
-                                } else if (rexw) {
-                                    try code_buffer.append(allocator, REX_W);
-                                }
-                                try code_buffer.appendSlice(allocator, &buffer);
-                            }
-                        },
-                        .imm => {},
-                        .mem => {
-                            // error - mov mem to mem not allowed
-                        },
-                        .label => {},
-                    }
-                },
-            }
-        },
-        .imm => {
-            // error - immediate cannot be first operand of mov
-        },
-        .label => {
-            // error - label cannot be first operand of mov
+        else => {
+            return CodegenError.InvalidOperand;
         },
     }
 }
 
-fn jcc(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction, mnem: lexer.TokenType) !void {
+fn xor(instr: parser.CpuInstruction) !void {
+    if (instr.operands.items.len != 2) {
+        return CodegenError.InvalidNumberOfOperands;
+    }
+    const first = instr.operands.items[0];
+    const second = instr.operands.items[1];
+    switch (first) {
+        .reg => {
+            switch (second) {
+                .reg => {
+                    const opcode: u8 = if (first.reg.size == 1) 0x30 else 0x31;
+                    try memRegEncoding(first, second.reg, opcode);
+                },
+                .mem => {
+                    const opcode: u8 = if (first.reg.size == 1) 0x32 else 0x33;
+                    try regMemEncoding(first.reg, second, opcode, 0b1111);
+                },
+                .imm => {
+                    if (first.reg.name.isAccumulator()) {
+                        const opcode: u8 = if (first.reg.name == .Al) 0x34 else 0x35;
+                        try accImmEncoding(first.reg, opcode, second.imm);
+                    } else {
+                        const reg_size = first.reg.size;
+                        const imm_size = parser.immMinSize(second.imm);
+                        if (imm_size == 1 and reg_size > 1) {
+                            const opcode: u8 = 0x83;
+                            try memImmEncodingG2(first, opcode, 6, second.imm);
+                        } else {
+                            const opcode: u8 = if (reg_size == 1) 0x80 else 0x81;
+                            try memImmEncodingG1(first, opcode, 6, second.imm);
+                        }
+                    }
+                },
+                .label => {
+                    return CodegenError.InvalidOperand;
+                },
+            }
+        },
+        .mem => {
+            switch (second) {
+                .reg => {
+                    const opcode: u8 = if (second.reg.size == 1) 0x30 else 0x31;
+                    try memRegEncoding(first, second.reg, opcode);
+                },
+                .imm => {
+                    var ptr_size: u8 = undefined;
+                    if (first.mem.size) |size| {
+                        ptr_size = size;
+                    } else {
+                        return CodegenError.UnspecifiedMemoryPointerSize;
+                    }
+                    const imm_size = parser.immMinSize(second.imm);
+                    if (imm_size == 1 and ptr_size > 1) {
+                        const opcode: u8 = 0x83;
+                        try memImmEncodingG2(first, opcode, 6, second.imm);
+                    } else {
+                        const opcode: u8 = if (ptr_size == 1) 0x80 else 0x81;
+                        try memImmEncodingG1(first, opcode, 6, second.imm);
+                    }
+                },
+                .label => {
+                    // not supported for now
+                    return CodegenError.InvalidOperand;
+                },
+                .mem => {
+                    return CodegenError.InvalidOperand;
+                },
+            }
+        },
+        else => {
+            return CodegenError.InvalidOperand;
+        },
+    }
+}
+
+fn jmp(instr: parser.CpuInstruction) !void {
     if (instr.operands.items.len != 1) {
-        // error - jne must have exactly 1 operand
+        return CodegenError.InvalidNumberOfOperands;
+    }
+    const first = instr.operands.items[0];
+    switch (first) {
+        .reg, .mem => {
+            const opcode: u8 = 0xFF;
+            try memEncoding(first, opcode, 4, 0b1000, true);
+        },
+        .label => {
+            const opcode: u8 = 0xE9;
+            try gen.section.buffer.append(gen.allocator, opcode);
+            try gen.addImmediate(.{ .u = 0 }, 4);
+            try gen.addRelocation(first.label, .Rel32C, 0);
+        },
+        else => {
+            return CodegenError.InvalidOperand;
+        },
+    }
+}
+
+fn jcc(instr: parser.CpuInstruction, mnem: lexer.TokenType) !void {
+    if (instr.operands.items.len != 1) {
+        return CodegenError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     switch (first) {
         .label => {
-            // only uses rel32 for now
-            var buffer: [6]u8 = .{ 0x0F, undefined, undefined, undefined, undefined, undefined };
-
-            buffer[1] = switch (mnem) {
-                .Je => 0x84,
-                .Jne => 0x85,
+            const opcode_pref: u8 = 0x0F;
+            const opcode: u8 = switch (mnem) {
                 .Ja => 0x87,
-                .Jz => 0x84,
-                else => undefined,
+                .Je, .Jz => 0x84,
+                .Jne => 0x85,
+                else => {
+                    return CodegenError.InvalidOperand;
+                },
             };
-
-            try code_buffer.appendSlice(allocator, &buffer);
-
-            var result = try rellocations.getOrPut(first.label.name);
-            if (!result.found_existing) {
-                result.value_ptr.* = std.ArrayList(u64).empty;
-            }
-            const offset = code_buffer.items.len - 4;
-            try result.value_ptr.append(allocator, offset);
+            try gen.section.buffer.append(gen.allocator, opcode_pref);
+            try gen.section.buffer.append(gen.allocator, opcode);
+            try gen.addImmediate(.{ .u = 0 }, 4);
+            try gen.addRelocation(first.label, .Rel32C, 0);
         },
         else => {
-            // error - jcc can jump only to label name
+            return CodegenError.InvalidOperand;
         },
     }
 }
 
-fn push(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
-    if (instr.operands.items.len != 1) {
-        // error - push must have exactly 1 operand
-    }
-    const first = instr.operands.items[0];
-    switch (first) {
-        .reg => {
-            const rexb = if (first.reg.name.isAdditionalReg()) true else false;
-            var code: u8 = 0x50;
-            switch (first.reg.size) {
-                2, 8 => {
-                    code += regCode(first.reg.name);
-                },
-                else => {
-                    // error - invalid operand size
-                },
-            }
-            if (rexb) {
-                try code_buffer.append(allocator, REX_B);
-            }
-            try code_buffer.append(allocator, code);
-        },
-        .mem => {
-            //
-        },
-        .imm => {
-            //
-        },
-        .label => {
-            //
-        },
-    }
-}
+var peek: usize = 0;
 
-fn pop(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
-    if (instr.operands.items.len != 1) {
-        // error - push must have exactly 1 operand
-    }
-    const first = instr.operands.items[0];
-    switch (first) {
-        .reg => {
-            const rexb = if (first.reg.name.isAdditionalReg()) true else false;
-            var code: u8 = 0x58;
-            switch (first.reg.size) {
-                2, 8 => {
-                    code += regCode(first.reg.name);
-                },
-                else => {
-                    // error - invalid operand size
-                },
-            }
-            if (rexb) {
-                try code_buffer.append(allocator, REX_B);
-            }
-            try code_buffer.append(allocator, code);
-        },
-        .mem => {
-            //
-        },
-        .imm => {
-            //
-        },
-        .label => {
-            //
-        },
-    }
-}
-
-fn jmp(allocator: std.mem.Allocator, instr: *const parser.CpuInstruction) !void {
-    if (instr.operands.items.len != 1) {
-        // error - jmp must have exactly 1 operand
-    }
-    const first = instr.operands.items[0];
-    switch (first) {
-        .label => {
-            // only uses rel32 for now
-            var buffer: [5]u8 = .{ 0xE9, undefined, undefined, undefined, undefined };
-
-            try code_buffer.appendSlice(allocator, &buffer);
-
-            var result = try rellocations.getOrPut(first.label.name);
-            if (!result.found_existing) {
-                result.value_ptr.* = std.ArrayList(u64).empty;
-            }
-            const offset = code_buffer.items.len - 4;
-            try result.value_ptr.append(allocator, offset);
-        },
-        else => {
-            // error - jmp can jump only to label name
-        },
-    }
-}
-
-fn genInstruction(allocator: std.mem.Allocator, instruction: parser.CodeInstruction) !void {
+fn genInstruction(instruction: parser.CodeInstruction, section: *parser.CodeSection) !void {
     switch (instruction) {
         .label => {
-            const cl_ptr = parser.cl_table.getPtr(instruction.label.name);
+            const cl_ptr = section.symbols.getPtr(instruction.label);
             if (cl_ptr) |cl| {
-                cl.offset = code_buffer.items.len;
-                const res = try rellocations.getOrPut(instruction.label.name);
-                if (!res.found_existing) {
-                    res.value_ptr.* = std.ArrayList(u64).empty;
-                }
+                cl.offset = section.buffer.items.len;
+                // TODO: add global keyword for globally visible symbols
+                cl.binding = .Local;
+            } else {
+                // error - label not found (should be unreachable at this stage)
             }
         },
         .cpu => {
             switch (instruction.cpu.mnem) {
                 .Mov => {
-                    try mov(allocator, &instruction.cpu);
+                    try mov(instruction.cpu);
                 },
                 .Xor => {
-                    try xor(allocator, &instruction.cpu);
+                    try xor(instruction.cpu);
                 },
                 .Add => {
-                    try add(allocator, &instruction.cpu);
+                    try add(instruction.cpu);
                 },
                 .Inc => {
-                    try inc(allocator, &instruction.cpu);
+                    try inc(instruction.cpu);
                 },
                 .Dec => {
-                    try dec(allocator, &instruction.cpu);
+                    try dec(instruction.cpu);
                 },
                 .Ja, .Je, .Jne, .Jz => {
-                    try jcc(allocator, &instruction.cpu, instruction.cpu.mnem);
+                    try jcc(instruction.cpu, instruction.cpu.mnem);
                 },
                 .Syscall => {
-                    try syscall(allocator, &instruction.cpu);
+                    try syscall(instruction.cpu);
                 },
                 .Div => {
-                    try div(allocator, &instruction.cpu);
+                    try div(instruction.cpu);
                 },
                 .Test => {
-                    try testi(allocator, &instruction.cpu);
+                    try testi(instruction.cpu);
                 },
                 .Lea => {
-                    try lea(allocator, &instruction.cpu);
+                    try lea(instruction.cpu);
                 },
                 .Push => {
-                    try push(allocator, &instruction.cpu);
+                    try push(instruction.cpu);
                 },
                 .Pop => {
-                    try pop(allocator, &instruction.cpu);
+                    try pop(instruction.cpu);
                 },
                 .Jmp => {
-                    try jmp(allocator, &instruction.cpu);
+                    try jmp(instruction.cpu);
                 },
                 else => {
                     //
                 },
             }
+            // var count: u8 = 0;
+            // std.debug.print("{d: >4}: ", .{peek});
+            // for (section.buffer.items[peek..]) |byte| {
+            //     std.debug.print("{x:02} ", .{byte});
+            //     count += 1;
+            // }
+            // std.debug.print("\x1b[40G", .{});
+            // parser.printCPUInstruction(instruction.cpu);
+            // peek += count;
+            // std.debug.print("\n", .{});
         },
     }
 }
 
-fn firstPass(allocator: std.mem.Allocator, instructions: []parser.CodeInstruction) !void {
-    for (instructions) |instruction| {
-        try genInstruction(allocator, instruction);
+pub fn bufferizeCodeSection(section: *parser.CodeSection, allocator: std.mem.Allocator) !void {
+    gen = Codegen.init(section, allocator);
+    for (section.instr.items, 0..) |instruction, i| {
+        genInstruction(instruction, section) catch |err| {
+            std.debug.print("Instruction {d} (", .{i});
+            parser.printCPUInstruction(instruction.cpu);
+            std.debug.print(") failed code generation\n", .{});
+            // std.debug.print("{s}\n", .{@errorName(err)});
+            return err;
+        };
     }
-}
-
-fn secondPass() void {
-    var cl_iter = parser.cl_table.iterator();
-    while (cl_iter.next()) |cl| {
-        const label = cl.key_ptr.*;
-        if (cl.value_ptr.defined) {
-            const result = rellocations.get(label);
-            if (result) |rellocs| {
-                for (rellocs.items) |ind| {
-                    const address: i64 = @intCast(cl.value_ptr.offset);
-                    const offset: i64 = @intCast(ind);
-                    const rel32: i32 = @intCast(address - offset - 4);
-                    const buffer: [4]u8 = std.mem.toBytes(rel32);
-                    for (&buffer, 0..) |byte, i| {
-                        code_buffer.items[@as(usize, @intCast(offset)) + i] = byte;
-                    }
-                }
-            }
-        }
-    }
-    if (parser.cl_table.get(parser.program.entry.name)) |rec| {
-        if (rec.defined) {
-            parser.program.entry.addr = @intCast(rec.offset);
-        }
-    }
-}
-
-pub fn bufferizeCodeSection(section: *parser.CodeSection, allocator: std.mem.Allocator, data_address: u64) !void {
-    rellocations = std.StringHashMap(std.ArrayList(u64)).init(allocator);
-    data_virt_address = data_address;
-    try firstPass(allocator, section.instr.items);
-
-    printFirstPass();
-
-    secondPass();
-
-    printCodeBuffer();
-
-    std.debug.print("Entry - {s}: {d}\n", .{ parser.program.entry.name, parser.program.entry.addr });
-}
-
-fn printFirstPass() void {
-    std.debug.print("Rellocations table: \n", .{});
-    var iter = rellocations.iterator();
-    while (iter.next()) |entry| {
-        std.debug.print("{s}: \n", .{entry.key_ptr.*});
-        for (entry.value_ptr.items) |offset| {
-            std.debug.print("  {d}\n", .{offset});
-        }
-    }
-
-    std.debug.print("Code labels table: \n", .{});
-    var iter2 = parser.cl_table.iterator();
-    while (iter2.next()) |entry| {
-        std.debug.print("{s}: {d}, def - {}\n", .{ entry.key_ptr.*, entry.value_ptr.offset, entry.value_ptr.defined });
-    }
-}
-
-fn printCodeBuffer() void {
-    std.debug.print("Code buffer:\n", .{});
-    for (code_buffer.items) |op| {
-        std.debug.print("{x:02}", .{op});
-    }
-    std.debug.print("\n", .{});
 }

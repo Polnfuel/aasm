@@ -1,38 +1,43 @@
 const std = @import("std");
 const lexer = @import("lexer");
+const object = @import("object");
 
 const MAX_OPERAND_COUNT = 3;
 
 pub const Register = struct {
     name: lexer.TokenType,
     size: u8,
-
-    pub fn init(reg: lexer.TokenType) !Register {
+    // Caller must be sure that reg param is actually register name
+    pub fn init(reg: lexer.TokenType) Register {
         const r = @intFromEnum(reg);
-        if (reg.isReg()) {
-            const r64_end = @intFromEnum(lexer.TokenType.R15);
-            const r32_end = @intFromEnum(lexer.TokenType.R15d);
-            const r16_end = @intFromEnum(lexer.TokenType.R15w);
-            if (r <= r64_end) {
-                return Register{ .name = reg, .size = 8 };
-            } else if (r <= r32_end) {
-                return Register{ .name = reg, .size = 4 };
-            } else if (r <= r16_end) {
-                return Register{ .name = reg, .size = 2 };
-            } else {
-                return Register{ .name = reg, .size = 1 };
-            }
+        const r64_end = @intFromEnum(lexer.TokenType.R15);
+        const r32_end = @intFromEnum(lexer.TokenType.R15d);
+        const r16_end = @intFromEnum(lexer.TokenType.R15w);
+        if (r <= r64_end) {
+            return Register{ .name = reg, .size = 8 };
+        } else if (r <= r32_end) {
+            return Register{ .name = reg, .size = 4 };
+        } else if (r <= r16_end) {
+            return Register{ .name = reg, .size = 2 };
         } else {
-            // error - not a register name
-            return Register{ .name = reg, .size = undefined };
+            return Register{ .name = reg, .size = 1 };
         }
     }
 };
 
+pub const Displacement = struct {
+    num: i32,
+};
+
+pub const Scale = struct {
+    num: u8,
+};
+
 pub const ComplexAddress = struct {
-    base: Register,
+    base: ?Register,
     index: ?Register,
-    scale: ?u8,
+    scale: ?Scale,
+    disp: ?Displacement,
 };
 
 pub const MemOperand = struct {
@@ -43,56 +48,62 @@ pub const MemOperand = struct {
     size: ?u8,
 };
 
+pub const Immediate = union(enum) {
+    u: u64,
+    i: i64,
+
+    pub fn invert(self: *Immediate) !void {
+        switch (self.*) {
+            .u => {
+                const unsigned = self.u;
+                if (unsigned < std.math.maxInt(i64)) {
+                    const signed: i64 = @intCast(unsigned);
+                    self.* = .{ .i = -signed };
+                } else {
+                    // error - integer doesn't fit in 64 bit
+                }
+            },
+            .i => {
+                const signed = self.i;
+                self.* = .{ .u = @abs(signed) };
+            },
+        }
+    }
+};
+
 pub const Operand = union(enum) {
     reg: Register,
-    imm: i64,
+    imm: Immediate,
     mem: MemOperand,
-    label: struct {
-        name: []u8,
-    },
+    label: []u8,
 };
 
 pub const CpuInstruction = struct {
     mnem: lexer.TokenType,
     operands: std.ArrayList(Operand),
-    size: u8,
-};
-
-const CodeLabel = struct {
-    name: []u8,
-};
-
-const DataLabel = struct {
-    name: []u8,
 };
 
 const DataInitialization = union(enum) {
-    str_lit: []u8,
-    num_lit: []u8,
+    str: []u8,
+    num: Immediate,
     repeat: struct {
-        count: []u8,
+        count: Immediate,
         item: union(enum) {
-            str_lit: []u8,
-            num_lit: []u8,
+            str: []u8,
+            num: Immediate,
         },
     },
 };
 
 const DataInstruction = struct {
-    label: DataLabel,
-    type: lexer.TokenType,
+    label: []u8,
+    size: u8,
     data: std.ArrayList(DataInitialization),
 };
 
 pub const CodeInstruction = union(enum) {
-    label: CodeLabel,
+    label: []u8,
     cpu: CpuInstruction,
-};
-
-const SectionFlag = enum {
-    Read,
-    Write,
-    Exec,
 };
 
 const SectionFlags = struct {
@@ -105,138 +116,296 @@ const SectionFlags = struct {
     }
 };
 
-const SectionType = enum {
-    Data,
-    Code,
+pub const SymBinding = enum {
+    Local,
+    Global,
+};
+
+pub const Symbol = struct {
+    offset: u64,
+    binding: SymBinding,
+};
+
+pub const RelType = enum {
+    Abs64D,
+    Abs32D,
+    Rel32C,
+    Rel32D,
+};
+
+pub const Relocation = struct {
+    type: RelType,
+    name: []u8,
+    offset: u64,
+    addend: i32,
 };
 
 pub const DataSection = struct {
-    name: []const u8,
     flags: SectionFlags,
     instr: std.ArrayList(DataInstruction),
+    symbols: std.StringHashMap(Symbol),
+    buffer: std.ArrayList(u8),
 
-    pub fn new() DataSection {
+    pub fn new(allocator: std.mem.Allocator) DataSection {
         return DataSection{
-            .name = ".data",
             .flags = SectionFlags.empty(),
             .instr = .empty,
+            .symbols = std.StringHashMap(Symbol).init(allocator),
+            .buffer = .empty,
         };
     }
 };
 
 pub const CodeSection = struct {
-    name: []const u8,
     flags: SectionFlags,
     instr: std.ArrayList(CodeInstruction),
+    symbols: std.StringHashMap(Symbol),
+    relocations: std.ArrayList(Relocation),
+    buffer: std.ArrayList(u8),
 
-    pub fn new() CodeSection {
+    pub fn new(allocator: std.mem.Allocator) CodeSection {
         return CodeSection{
-            .name = ".text",
             .flags = SectionFlags.empty(),
             .instr = .empty,
+            .symbols = std.StringHashMap(Symbol).init(allocator),
+            .buffer = .empty,
+            .relocations = .empty,
         };
     }
 };
 
-const Section = struct {
-    type: SectionType,
-    section: union {
-        data: DataSection,
-        code: CodeSection,
-    },
+const ParserError = error{
+    InvalidEntryName,
+    WrongFlag,
+    IncompleteDataInstr,
+    LabelAlreadyDefined,
+
+    UnexpectedSymbols,
+    UnexpectedComma,
+
+    ExpectedFlag,
+    ExpectedNumOrString,
+    ExpectedNonNegNum,
+    ExpectedOpenedParenth,
+    ExpectedClosedParenth,
+    ExpectedComma,
+    ExpectedSizeDirective,
+    ExpectedLabelName,
+    ExpectedColon,
+
+    InvalidScale,
+    InvalidDispSize,
+    InvalidIndexSize,
+    InvalidBaseSize,
+    InvalidOperand,
+    InvalidStrLitLen,
+
+    TooManyOperands,
+    DispIsZero,
+
+    InvalidDataSize,
+    RepeatCountTooLarge,
 };
 
-const Entry = struct {
-    addr: u64,
-    name: []u8,
-};
-
-const Program = struct {
-    entry: Entry,
-    //flags
-    sections: std.ArrayList(Section),
-};
-
-pub var program: Program = undefined;
-
-fn parseEntry(tokens: []lexer.Token, allocator: std.mem.Allocator) !void {
-    _ = allocator;
+fn parseEntry(tokens: []lexer.Token, program: *object.Program) !void {
     const next = tokens[0];
     if (next.type == .Ident) {
-        const result = try cl_table.getOrPut(next.value.?);
-        if (!result.found_existing) {
-            result.value_ptr.defined = false;
-            program.entry.name = next.value.?;
-        }
+        program.entry = next.value.?;
     } else {
-        // error - invalid entry name
+        return ParserError.InvalidEntryName;
     }
     if (tokens[1].type != .NewLine) {
-        // error - unexpected symbols on line
+        return ParserError.UnexpectedSymbols;
     }
 }
 
-fn parseDataSectionFlag(token: lexer.Token, data_section: *DataSection) !void {
+fn parseSectionFlags(token: lexer.Token) !SectionFlags {
+    var flags = SectionFlags.empty();
     if (token.type == .Ident and token.value.?.len <= 3) {
         for (token.value.?) |char| {
             switch (char) {
                 'r' => {
-                    data_section.flags.read = true;
+                    flags.read = true;
                 },
                 'w' => {
-                    data_section.flags.write = true;
+                    flags.write = true;
                 },
                 'x' => {
-                    data_section.flags.exec = true;
+                    flags.exec = true;
                 },
                 else => {
-                    // error - wrong flag
+                    return ParserError.WrongFlag;
                 },
             }
         }
     } else {
-        // error - expected flag
+        return ParserError.ExpectedFlag;
+    }
+    return flags;
+}
+
+fn immFromNumToken(token: lexer.Token) !Immediate {
+    switch (token.type) {
+        .NumberLiteral, .PosNumLiteral => {
+            const value = try std.fmt.parseInt(u64, token.value.?, 10);
+            const imm = Immediate{ .u = value };
+            return imm;
+        },
+        .NegNumLiteral => {
+            const value = try std.fmt.parseInt(u64, token.value.?, 10);
+            var imm = Immediate{ .u = value };
+            try imm.invert();
+            return imm;
+        },
+        else => unreachable,
     }
 }
 
-fn parseRepeat(tokens: []lexer.Token, allocator: std.mem.Allocator, instr: *DataInstruction) !void {
+pub fn immMinSize(imm: Immediate) u8 {
+    switch (imm) {
+        .i => {
+            if (imm.i >= std.math.minInt(i8) and imm.i <= std.math.maxInt(i8)) {
+                return 1;
+            } else if (imm.i >= std.math.minInt(i16) and imm.i <= std.math.maxInt(i16)) {
+                return 2;
+            } else if (imm.i >= std.math.minInt(i32) and imm.i <= std.math.maxInt(i32)) {
+                return 4;
+            } else if (imm.i >= std.math.minInt(i64) and imm.i <= std.math.maxInt(i64)) {
+                return 8;
+            }
+        },
+        .u => {
+            if (imm.u <= std.math.maxInt(u8)) {
+                return 1;
+            } else if (imm.u <= std.math.maxInt(u16)) {
+                return 2;
+            } else if (imm.u <= std.math.maxInt(u32)) {
+                return 4;
+            } else if (imm.u <= std.math.maxInt(u64)) {
+                return 8;
+            }
+        },
+    }
+    return 8; // but actually must be unreachable
+}
+
+fn dispFromNumToken(token: lexer.Token) !Displacement {
+    const int = try std.fmt.parseInt(i64, token.value.?, 10);
+    if (int >= 0) {
+        var value: i32 = undefined;
+        if (int >= std.math.minInt(i32) and int <= std.math.maxInt(i32)) {
+            value = @intCast(int);
+            if (token.type == .NegNumLiteral) {
+                value = -value;
+            }
+        } else if (int == std.math.maxInt(i32) + 1 and token.type == .NegNumLiteral) {
+            value = std.math.minInt(i32);
+        } else {
+            return ParserError.InvalidDispSize;
+        }
+        const disp = Displacement{ .num = value };
+        return disp;
+    } else {
+        unreachable;
+    }
+}
+
+pub fn dispMinSize(disp: Displacement) u8 {
+    if (disp.num >= std.math.minInt(i8) and disp.num <= std.math.maxInt(i8)) {
+        return 1;
+    } else if (disp.num >= std.math.minInt(i16) and disp.num <= std.math.maxInt(i16)) {
+        return 2;
+    } else if (disp.num >= std.math.minInt(i32) and disp.num <= std.math.maxInt(i32)) {
+        return 4;
+    } else {
+        return 8; // should be unreachable
+    }
+}
+
+fn scaleFromNumToken(token: lexer.Token) !Scale {
+    const int = try std.fmt.parseInt(u8, token.value.?, 10);
+    switch (int) {
+        1, 2, 4, 8 => {
+            return Scale{ .num = int };
+        },
+        else => {
+            return ParserError.InvalidScale;
+        },
+    }
+}
+
+fn parseRepeat(tokens: []lexer.Token, data_size: u8) !DataInitialization {
     var data_init: DataInitialization = undefined;
     if (tokens[0].type == .OpenParenthes) {
-        if (tokens[1].type == .NumberLiteral) {
-            if (tokens[2].type == .Comma) {
-                if (tokens[3].type == .NumberLiteral) {
-                    data_init = .{ .repeat = .{ .count = tokens[1].value.?, .item = .{ .num_lit = tokens[3].value.? } } };
-                } else if (tokens[3].type == .StringLiteral) {
-                    data_init = .{ .repeat = .{ .count = tokens[1].value.?, .item = .{ .str_lit = tokens[3].value.? } } };
-                } else {
-                    // error - expected number or string literals
+        switch (tokens[1].type) {
+            .NumberLiteral, .PosNumLiteral => {
+                const count = try immFromNumToken(tokens[1]);
+                const count_value = count.u;
+                if (count_value * data_size > 16378) {
+                    return ParserError.RepeatCountTooLarge;
                 }
-                if (tokens[4].type == .CloseParenthes) {
-                    try instr.data.append(allocator, data_init);
-                } else {
-                    // error - expected close parenth
+                switch (count) {
+                    .u => {
+                        if (tokens[2].type == .Comma) {
+                            switch (tokens[3].type) {
+                                .NumberLiteral, .PosNumLiteral, .NegNumLiteral => {
+                                    const value = try immFromNumToken(tokens[3]);
+                                    const value_size = immMinSize(value);
+                                    if (value_size <= data_size) {
+                                        data_init = .{ .repeat = .{ .count = count, .item = .{ .num = value } } };
+                                    } else {
+                                        return ParserError.InvalidDataSize;
+                                    }
+                                },
+                                .StringLiteral => {
+                                    if (data_size == 1) {
+                                        data_init = .{ .repeat = .{ .count = count, .item = .{ .str = tokens[3].value.? } } };
+                                    } else {
+                                        return ParserError.InvalidDataSize;
+                                    }
+                                },
+                                else => {
+                                    return ParserError.ExpectedNumOrString;
+                                },
+                            }
+                            if (tokens[4].type == .CloseParenthes) {
+                                return data_init;
+                            } else {
+                                return ParserError.ExpectedClosedParenth;
+                            }
+                        } else {
+                            return ParserError.ExpectedComma;
+                        }
+                    },
+                    .i => unreachable,
                 }
-            } else {
-                // error - expected comma
-            }
-        } else {
-            // error - expected number
+            },
+            else => {
+                return ParserError.ExpectedNonNegNum;
+            },
         }
     } else {
-        // error - expected open parenth
+        return ParserError.ExpectedOpenedParenth;
     }
 }
 
-fn parseDataInstruction(tokens: []lexer.Token, allocator: std.mem.Allocator, data_section: *DataSection) !void {
+fn parseDataInstruction(tokens: []lexer.Token, program: *object.Program) !void {
     var instruction: DataInstruction = undefined;
-    const lower = @intFromEnum(lexer.TokenType.D8);
-    const upper = @intFromEnum(lexer.TokenType.D64);
+    if (tokens.len < 4) {
+        return ParserError.IncompleteDataInstr;
+    }
     if (tokens[0].type == .Ident) {
         if (tokens[1].type == .Colon) {
-            const dir = @intFromEnum(tokens[2].type);
-            if (dir >= lower and dir <= upper) {
-                instruction.label.name = tokens[0].value.?;
-                instruction.type = tokens[2].type;
+            if (tokens[2].type.isDataDirective()) {
+                const data_size: u8 = switch (tokens[2].type) {
+                    .D8 => 1,
+                    .D16 => 2,
+                    .D32 => 4,
+                    .D64 => 8,
+                    else => unreachable,
+                };
+                instruction.label = tokens[0].value.?;
+                instruction.size = data_size;
                 instruction.data = .empty;
                 var expect_value = true;
                 var i: usize = 3;
@@ -247,251 +416,375 @@ fn parseDataInstruction(tokens: []lexer.Token, allocator: std.mem.Allocator, dat
                             if (expect_value) {
                                 expect_value = false;
                             } else {
-                                // error - expected comma
+                                return ParserError.ExpectedComma;
                             }
-                            const data_init: DataInitialization = .{ .str_lit = token.value.? };
-                            try instruction.data.append(allocator, data_init);
+                            if (data_size == 1) {
+                                const data_init: DataInitialization = .{ .str = token.value.? };
+                                try instruction.data.append(program.allocator, data_init);
+                            } else {
+                                return ParserError.InvalidDataSize;
+                            }
                         },
-                        .NumberLiteral => {
+                        .NumberLiteral, .NegNumLiteral, .PosNumLiteral => {
                             if (expect_value) {
                                 expect_value = false;
                             } else {
-                                // error - expected comma
+                                return ParserError.ExpectedComma;
                             }
-                            const data_init: DataInitialization = .{ .num_lit = token.value.? };
-                            try instruction.data.append(allocator, data_init);
+                            const num = try immFromNumToken(token);
+                            const num_size = immMinSize(num);
+                            if (num_size <= data_size) {
+                                const data_init: DataInitialization = .{ .num = num };
+                                try instruction.data.append(program.allocator, data_init);
+                            } else {
+                                return ParserError.InvalidDataSize;
+                            }
                         },
                         .Repeat => {
                             if (expect_value) {
                                 expect_value = false;
                             } else {
-                                // error - expected comma
+                                return ParserError.ExpectedComma;
                             }
-                            try parseRepeat(tokens[i + 1 ..], allocator, &instruction);
+                            const data_init = try parseRepeat(tokens[i + 1 ..], data_size);
+                            try instruction.data.append(program.allocator, data_init);
                             i += 5;
                         },
                         .Comma => {
                             if (!expect_value) {
                                 expect_value = true;
                             } else {
-                                // error - unexpected comma
+                                return ParserError.UnexpectedComma;
                             }
                         },
                         else => {
-                            // error - unexpected value
+                            return ParserError.UnexpectedSymbols;
                         },
                     }
                     i += 1;
                 }
-                try data_section.instr.append(allocator, instruction);
+                // check if label is not in code section
+                if (program.code_section) |*code_section| {
+                    const result = code_section.symbols.get(instruction.label);
+                    if (result != null) {
+                        return ParserError.LabelAlreadyDefined;
+                    }
+                }
+                // try to add to data symbols table
+                const result = try program.data_section.?.symbols.getOrPut(instruction.label);
+                if (result.found_existing) {
+                    return ParserError.LabelAlreadyDefined;
+                }
+                try program.data_section.?.instr.append(program.allocator, instruction);
             } else {
-                // error - expected size directive
+                return ParserError.ExpectedSizeDirective;
             }
         } else {
-            // error - expected colon
+            return ParserError.ExpectedColon;
         }
     } else {
-        // error - expected label name
+        return ParserError.ExpectedLabelName;
     }
 }
 
-fn parseDataSection(tokens: []lexer.Token, allocator: std.mem.Allocator) !usize {
-    var data_section = DataSection.new();
+fn parseDataSection(tokens: []lexer.Token, program: *object.Program) !usize {
+    program.data_section = DataSection.new(program.allocator);
     const first = tokens[0];
-    try parseDataSectionFlag(first, &data_section);
+    program.data_section.?.flags = try parseSectionFlags(first);
     if (tokens[1].type == .NewLine) {
         var current_instruction: []lexer.Token = tokens[2..2];
         var i: usize = 2;
         while (i < tokens.len) : (i += 1) {
             const token = tokens[i];
             if (token.type == .NewLine) {
-                try parseDataInstruction(current_instruction, allocator, &data_section);
+                try parseDataInstruction(current_instruction, program);
                 current_instruction.ptr = tokens[i + 1 .. i + 1].ptr;
                 current_instruction.len = 0;
             } else if (token.type == .Section) {
-                // calibration needed
-                const section: Section = .{ .type = .Data, .section = .{ .data = data_section } };
-                try program.sections.append(allocator, section);
                 return i;
             } else {
                 current_instruction.len += 1;
             }
         }
     } else {
-        // error - unexpected symbols on line
+        return ParserError.UnexpectedSymbols;
     }
     return tokens.len;
 }
 
-fn parseCodeSectionFlag(token: lexer.Token, code_section: *CodeSection) !void {
-    if (token.type == .Ident and token.value.?.len <= 3) {
-        for (token.value.?) |char| {
-            switch (char) {
-                'r' => {
-                    code_section.flags.read = true;
-                },
-                'w' => {
-                    code_section.flags.write = true;
-                },
-                'x' => {
-                    code_section.flags.exec = true;
-                },
-                else => {
-                    // error - wrong flag
-                },
+fn checkMemoryOperand(oper: *MemOperand) !void {
+    switch (oper.mem) {
+        .addr => {
+            if (oper.mem.addr.disp) |disp| {
+                if (disp.num == 0 and (oper.mem.addr.base != null or oper.mem.addr.index != null)) {
+                    oper.mem.addr.disp = null;
+                }
             }
+            if (oper.mem.addr.base) |base| {
+                const b_size = base.size;
+                if (b_size > 2) {
+                    if (oper.mem.addr.index) |index| {
+                        const i_size = index.size;
+                        if (b_size != i_size) {
+                            return ParserError.InvalidIndexSize;
+                        }
+                    }
+                } else {
+                    return ParserError.InvalidBaseSize;
+                }
+            }
+        },
+        .label => {},
+    }
+}
+
+fn parseMemoryOperand(tokens: []lexer.Token) !MemOperand {
+    var oper: ?MemOperand = null;
+
+    var toks: [7]lexer.TokenType = .{ .NotPresent, .NotPresent, .NotPresent, .NotPresent, .NotPresent, .NotPresent, .NotPresent };
+    for (tokens, 0..) |token, i| {
+        toks[i] = token.type;
+    }
+    const t1 = toks[0];
+    const t2 = toks[1];
+    const t3 = toks[2];
+    const t4 = toks[3];
+    const t5 = toks[4];
+    const t6 = toks[5];
+    const t7 = toks[6];
+
+    if (t1.isReg()) {
+        if (t2 == .Asteriks and t3 == .NumberLiteral) {
+            if (t4 == .PosNumLiteral or t4 == .NegNumLiteral) {
+                if (t5 == .Plus and t6.isReg()) {
+                    const disp = try dispFromNumToken(tokens[3]);
+                    const scale = try scaleFromNumToken(tokens[2]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t6), .index = Register.init(t1), .scale = scale, .disp = disp } }, .size = null };
+                } else if (t5 == .NotPresent) {
+                    const disp = try dispFromNumToken(tokens[3]);
+                    const scale = try scaleFromNumToken(tokens[2]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t1), .scale = scale, .disp = disp } }, .size = null };
+                }
+            } else if (t4 == .Plus and t5.isReg()) {
+                if (t6 == .PosNumLiteral or t6 == .NegNumLiteral) {
+                    const disp = try dispFromNumToken(tokens[5]);
+                    const scale = try scaleFromNumToken(tokens[2]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t5), .index = Register.init(t1), .scale = scale, .disp = disp } }, .size = null };
+                } else if (t6 == .NotPresent) {
+                    const scale = try scaleFromNumToken(tokens[2]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t5), .index = Register.init(t1), .scale = scale, .disp = null } }, .size = null };
+                }
+            } else if (t4 == .NotPresent) {
+                const scale = try scaleFromNumToken(tokens[2]);
+                oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t1), .scale = scale, .disp = null } }, .size = null };
+            }
+        } else if (t2 == .Plus and t3.isReg()) {
+            if (t4 == .Asteriks and t5 == .NumberLiteral) {
+                if (t6 == .PosNumLiteral or t6 == .NegNumLiteral) {
+                    const disp = try dispFromNumToken(tokens[5]);
+                    const scale = try scaleFromNumToken(tokens[4]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
+                } else if (t6 == .NotPresent) {
+                    const scale = try scaleFromNumToken(tokens[4]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t3), .scale = scale, .disp = null } }, .size = null };
+                }
+            } else if (t4 == .PosNumLiteral or t4 == .NegNumLiteral) {
+                const disp = try dispFromNumToken(tokens[3]);
+                oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t3), .scale = null, .disp = disp } }, .size = null };
+            } else if (t4 == .NotPresent) {
+                oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t3), .scale = null, .disp = null } }, .size = null };
+            }
+        } else if (t2 == .PosNumLiteral) {
+            if (t3 == .Asteriks and t4.isReg()) {
+                if (t5 == .PosNumLiteral or t5 == .NegNumLiteral) {
+                    const disp = try dispFromNumToken(tokens[4]);
+                    const scale = try scaleFromNumToken(tokens[1]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t4), .scale = scale, .disp = disp } }, .size = null };
+                } else if (t5 == .NotPresent) {
+                    const scale = try scaleFromNumToken(tokens[1]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t4), .scale = scale, .disp = null } }, .size = null };
+                }
+            } else if (t3 == .NotPresent) {
+                const disp = try dispFromNumToken(tokens[1]);
+                oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = null, .scale = null, .disp = disp } }, .size = null };
+            }
+        } else if (t2 == .NegNumLiteral) {
+            const disp = try dispFromNumToken(tokens[1]);
+            oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = null, .scale = null, .disp = disp } }, .size = null };
+        } else if (t2 == .NotPresent) {
+            oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = null, .scale = null, .disp = null } }, .size = null };
         }
+    } else if (t1 == .NumberLiteral) {
+        if (t2 == .Asteriks and t3.isReg()) {
+            if (t4 == .PosNumLiteral or t4 == .NegNumLiteral) {
+                if (t5 == .Plus and t6.isReg()) {
+                    const disp = try dispFromNumToken(tokens[3]);
+                    const scale = try scaleFromNumToken(tokens[0]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t6), .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
+                } else if (t5 == .NotPresent) {
+                    const disp = try dispFromNumToken(tokens[3]);
+                    const scale = try scaleFromNumToken(tokens[0]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
+                }
+            } else if (t4 == .Plus and t5.isReg()) {
+                if (t6 == .PosNumLiteral or t6 == .NegNumLiteral) {
+                    const disp = try dispFromNumToken(tokens[5]);
+                    const scale = try scaleFromNumToken(tokens[0]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t5), .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
+                } else if (t6 == .NotPresent) {
+                    const scale = try scaleFromNumToken(tokens[0]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t5), .index = Register.init(t3), .scale = scale, .disp = null } }, .size = null };
+                }
+            } else if (t4 == .NotPresent) {
+                const scale = try scaleFromNumToken(tokens[0]);
+                oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t3), .scale = scale, .disp = null } }, .size = null };
+            }
+        } else if (t2 == .Plus and t3.isReg()) {
+            if (t4 == .Asteriks and t5 == .NumberLiteral and t6 == .Plus and t7.isReg()) {
+                const disp = try dispFromNumToken(tokens[0]);
+                const scale = try scaleFromNumToken(tokens[4]);
+                oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t7), .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
+            } else if (t4 == .NotPresent) {
+                const disp = try dispFromNumToken(tokens[0]);
+                oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t3), .index = null, .scale = null, .disp = disp } }, .size = null };
+            }
+        } else if (t2 == .PosNumLiteral and t3 == .Asteriks and t4.isReg()) {
+            if (t5 == .Plus and t6.isReg()) {
+                const disp = try dispFromNumToken(tokens[0]);
+                const scale = try scaleFromNumToken(tokens[1]);
+                oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t6), .index = Register.init(t4), .scale = scale, .disp = disp } }, .size = null };
+            } else if (t5 == .NotPresent) {
+                const disp = try dispFromNumToken(tokens[0]);
+                const scale = try scaleFromNumToken(tokens[1]);
+                oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t4), .scale = scale, .disp = disp } }, .size = null };
+            }
+        } else if (t2 == .NotPresent) {
+            const disp = try dispFromNumToken(tokens[0]);
+            oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = null, .scale = null, .disp = disp } }, .size = null };
+        }
+    } else if (t1 == .PosNumLiteral or t1 == .NegNumLiteral) {
+        if (t2 == .Plus) {
+            if (t3.isReg()) {
+                if (t4 == .Asteriks and t5 == .NumberLiteral and t6 == .Plus and t7.isReg()) {
+                    const disp = try dispFromNumToken(tokens[0]);
+                    const scale = try scaleFromNumToken(tokens[4]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t7), .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
+                } else if (t4 == .NotPresent) {
+                    const disp = try dispFromNumToken(tokens[0]);
+                    oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t3), .index = null, .scale = null, .disp = disp } }, .size = null };
+                }
+            }
+        } else if (t2 == .PosNumLiteral and t3 == .Asteriks and t4.isReg()) {
+            if (t5 == .Plus and t6.isReg()) {
+                const disp = try dispFromNumToken(tokens[0]);
+                const scale = try scaleFromNumToken(tokens[1]);
+                oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t6), .index = Register.init(t4), .scale = scale, .disp = disp } }, .size = null };
+            } else if (t5 == .NotPresent) {
+                const disp = try dispFromNumToken(tokens[0]);
+                const scale = try scaleFromNumToken(tokens[1]);
+                oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t4), .scale = scale, .disp = disp } }, .size = null };
+            }
+        } else if (t2 == .NotPresent) {
+            const disp = try dispFromNumToken(tokens[0]);
+            oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = null, .scale = null, .disp = disp } }, .size = null };
+        }
+    } else if (t1 == .Ident) {
+        oper = MemOperand{ .mem = .{ .label = tokens[0].value.? }, .size = null };
+    }
+
+    if (oper) |*operand| {
+        try checkMemoryOperand(operand);
+        return operand.*;
     } else {
-        // error - expected flag
+        return ParserError.InvalidOperand;
     }
 }
 
 fn parseOperand(tokens: []lexer.Token) !Operand {
     var oper: Operand = undefined;
+    const first = tokens[0];
     switch (tokens.len) {
-        0 => {
-            // error - absent operand
-        },
         1 => {
-            const token = tokens[0];
+            const token = first;
             if (token.type.isReg()) {
-                oper = .{ .reg = try Register.init(token.type) };
-                return oper;
+                oper = .{ .reg = Register.init(token.type) };
             } else if (token.type == .Ident) {
-                oper = .{ .label = .{ .name = token.value.? } };
-                // add label?
-                return oper;
-            } else if (token.type == .NumberLiteral) {
-                const value = try std.fmt.parseInt(i64, token.value.?, 10);
-                oper = .{ .imm = value };
-                return oper;
+                oper = .{ .label = token.value.? };
+            } else if (token.type == .NumberLiteral or token.type == .NegNumLiteral or token.type == .PosNumLiteral) {
+                oper = .{ .imm = try immFromNumToken(token) };
             } else if (token.type == .StringLiteral) {
-                if (token.value.?.len > 0 and token.value.?.len < 2) {
+                if (token.value.?.len == 1) {
                     const value = token.value.?[0];
-                    oper = .{ .imm = value };
-                    return oper;
+                    oper = .{ .imm = .{ .u = value } };
                 } else {
-                    // error - invalid string literal length (must be 1 char)
+                    return ParserError.InvalidStrLitLen;
                 }
             } else {
-                // error - invalid operand
-            }
-        },
-        3 => {
-            if (tokens[0].type == .OpenBracket) {
-                if (tokens[2].type == .CloseBracket) {
-                    const token = tokens[1];
-                    if (token.type.isReg()) {
-                        oper = .{ .mem = .{ .mem = .{ .addr = .{ .base = try Register.init(token.type), .index = null, .scale = null } }, .size = null } };
-                        return oper;
-                    } else if (token.type == .Ident) {
-                        oper = .{ .mem = .{ .mem = .{ .label = token.value.? }, .size = null } };
-                        return oper;
-                    } else {
-                        // error - invalid memory operand
-                    }
-                } else {
-                    // error - expected closed bracket
-                }
-            } else {
-                // error - invalid operand
-            }
-        },
-        4 => {
-            if (tokens[0].type.isPointerSize()) {
-                const mem_size: u8 = switch (tokens[0].type) {
-                    .P8 => 1,
-                    .P16 => 2,
-                    .P32 => 4,
-                    .P64 => 8,
-                    else => unreachable,
-                };
-                if (tokens[1].type == .OpenBracket) {
-                    if (tokens[3].type == .CloseBracket) {
-                        const token = tokens[2];
-                        if (token.type.isReg()) {
-                            oper = .{ .mem = .{ .mem = .{ .addr = .{ .base = try Register.init(token.type), .index = null, .scale = null } }, .size = mem_size } };
-                            return oper;
-                        } else if (token.type == .Ident) {
-                            oper = .{ .mem = .{ .mem = .{ .label = token.value.? }, .size = mem_size } };
-                            return oper;
-                        } else {
-                            // error - invalid memory operand
-                        }
-                    } else {
-                        // error - expected closed bracket
-                    }
-                } else {
-                    // error - invalid operand
-                }
-            } else {
-                // error - invalid operand
-            }
-        },
-        5 => {
-            if (tokens[0].type == .OpenBracket) {
-                if (tokens[4].type == .CloseBracket) {
-                    if (tokens[2].type == .Plus) {
-                        const tok1 = tokens[1];
-                        const tok2 = tokens[3];
-                        if (tok1.type.isReg()) {
-                            oper = .{ .mem = .{ .mem = .{ .addr = .{ .base = try Register.init(tok1.type), .index = null, .scale = null } }, .size = null } };
-                            if (tok2.type.isReg()) {
-                                oper.mem.mem.addr.index = try Register.init(tok2.type);
-                                return oper;
-                            } else if (tok2.type == .NumberLiteral) {
-                                // TODO: number displacement
-                            } else {
-                                // error - unknown type of displacement
-                            }
-                        } else if (tok1.type == .Ident) {
-                            // TODO: label name as base
-                        } else {
-                            // error - unknown type of base
-                        }
-                    } else {
-                        // error - should be plus sign
-                    }
-                } else {
-                    // error - expected closed bracket
-                }
-            } else {
-                // error - invalid operand
+                return ParserError.InvalidOperand;
             }
         },
         else => {
-            // error - invalid operand
+            const second = tokens[1];
+            const last = tokens[tokens.len - 1];
+            if (first.type.isPointerSize() and tokens.len > 3) {
+                if (second.type == .OpenBracket and last.type == .CloseBracket) {
+                    var mem_operand = try parseMemoryOperand(tokens[2 .. tokens.len - 1]);
+                    const ptr_size: u8 = switch (first.type) {
+                        .P8 => 1,
+                        .P16 => 2,
+                        .P32 => 4,
+                        .P64 => 8,
+                        else => unreachable,
+                    };
+                    mem_operand.size = ptr_size;
+                    oper = .{ .mem = mem_operand };
+                } else {
+                    return ParserError.InvalidOperand;
+                }
+            } else if (first.type == .OpenBracket and last.type == .CloseBracket) {
+                if (tokens.len > 2) {
+                    const mem_operand = try parseMemoryOperand(tokens[1 .. tokens.len - 1]);
+                    oper = .{ .mem = mem_operand };
+                } else {
+                    return ParserError.InvalidOperand;
+                }
+            } else {
+                return ParserError.InvalidOperand;
+            }
         },
     }
     return oper;
 }
 
-fn parseCodeInstruction(tokens: []lexer.Token, allocator: std.mem.Allocator, code_section: *CodeSection) !void {
+var instr_count: usize = 0;
+
+fn parseCodeInstruction(tokens: []lexer.Token, program: *object.Program) !void {
     var instruction: CodeInstruction = undefined;
     if (tokens[0].type == .Ident) {
         if (tokens[1].type == .Colon) {
-            const check_dl = dl_table.contains(tokens[0].value.?);
-            const check_cl = cl_table.contains(tokens[0].value.?);
-            if (!check_dl) {
-                if (!check_cl or std.mem.eql(u8, tokens[0].value.?, program.entry.name)) {
-                    const result = try cl_table.getOrPut(tokens[0].value.?);
-                    result.value_ptr.defined = true;
-                    instruction = .{ .label = .{ .name = tokens[0].value.? } };
-                    try code_section.instr.append(allocator, instruction);
-                } else {
-                    // error - label already defined
+            const label = tokens[0].value.?;
+            // check if label is not in data section
+            if (program.data_section) |*data_section| {
+                const result = data_section.symbols.get(label);
+                if (result != null) {
+                    return ParserError.LabelAlreadyDefined;
                 }
-            } else {
-                // error - label already defined in data section
             }
+            // try to add to code symbols table
+            const result = try program.code_section.?.symbols.getOrPut(label);
+            if (result.found_existing) {
+                return ParserError.LabelAlreadyDefined;
+            }
+
+            instruction = .{ .label = label };
+            try program.code_section.?.instr.append(program.allocator, instruction);
         } else {
-            // error - expected colon
+            return ParserError.ExpectedColon;
         }
     } else if (tokens[0].type.isMnemonic()) {
-        // instruction.cpu.mnem = tokens[0].type;
-        instruction = .{ .cpu = .{ .mnem = tokens[0].type, .operands = .empty, .size = undefined } };
+        instruction = .{ .cpu = .{ .mnem = tokens[0].type, .operands = .empty } };
         var i: usize = 1;
-        var operand_number: usize = 0;
+        var operand_number: usize = 1;
         var oper_tokens: []lexer.Token = tokens[1..1];
         while (i < tokens.len) : (i += 1) {
             const token = tokens[i];
@@ -499,79 +792,80 @@ fn parseCodeInstruction(tokens: []lexer.Token, allocator: std.mem.Allocator, cod
                 if (i == tokens.len - 1) {
                     oper_tokens.len += 1;
                 }
-                const operand = try parseOperand(oper_tokens);
-                if (operand_number <= 3) {
-                    try instruction.cpu.operands.append(allocator, operand);
-                    operand_number += 1;
-                    oper_tokens = tokens[i + 1 .. i + 1];
+                if (oper_tokens.len > 0) {
+                    const operand = try parseOperand(oper_tokens);
+                    if (operand_number <= MAX_OPERAND_COUNT) {
+                        try instruction.cpu.operands.append(program.allocator, operand);
+                        operand_number += 1;
+                        oper_tokens = tokens[i + 1 .. i + 1];
+                    } else {
+                        return ParserError.TooManyOperands;
+                    }
                 } else {
-                    // error - too many operands on line
+                    return ParserError.InvalidOperand;
                 }
             } else {
                 oper_tokens.len += 1;
             }
         }
-        try code_section.instr.append(allocator, instruction);
+        try program.code_section.?.instr.append(program.allocator, instruction);
     } else {
-        // error - invalid symbol (must be label name or instr mnemonic)
+        return ParserError.UnexpectedSymbols;
     }
 }
 
-fn parseCodeSection(tokens: []lexer.Token, allocator: std.mem.Allocator) !usize {
-    var code_section = CodeSection.new();
+fn parseCodeSection(tokens: []lexer.Token, program: *object.Program) !usize {
+    program.code_section = CodeSection.new(program.allocator);
     const first = tokens[0];
-    try parseCodeSectionFlag(first, &code_section);
+    program.code_section.?.flags = try parseSectionFlags(first);
     if (tokens[1].type == .NewLine) {
         var current_instruction: []lexer.Token = tokens[2..2];
         var i: usize = 2;
         while (i < tokens.len) : (i += 1) {
             const token = tokens[i];
             if (token.type == .NewLine) {
-                try parseCodeInstruction(current_instruction, allocator, &code_section);
+                parseCodeInstruction(current_instruction, program) catch |err| {
+                    std.debug.print("Instruction {d} (", .{instr_count});
+                    for (current_instruction) |tok| {
+                        std.debug.print("{t} ", .{tok.type});
+                    }
+                    std.debug.print(") failed parsing\n", .{});
+                    return err;
+                };
+                instr_count += 1;
                 current_instruction.ptr = tokens[i + 1 .. i + 1].ptr;
                 current_instruction.len = 0;
             } else if (token.type == .Section) {
-                // calibration needed
-                const section: Section = .{ .type = .Code, .section = .{ .code = code_section } };
-                try program.sections.append(allocator, section);
                 return i;
             } else {
                 current_instruction.len += 1;
             }
         }
     } else {
-        // error - unexpected symbols on line
+        return ParserError.UnexpectedSymbols;
     }
-    const section: Section = .{ .type = .Code, .section = .{ .code = code_section } };
-    try program.sections.append(allocator, section);
     return tokens.len;
 }
 
-pub fn parseTokensToAST(allocator: std.mem.Allocator) !void {
-    dl_table = std.StringHashMap(Record).init(allocator);
-    cl_table = std.StringHashMap(Record).init(allocator);
-    var entry_found = false;
+pub fn parseTokensToAST(program: *object.Program) !void {
     var i: usize = 0;
-    while (i < lexer.tokens.items.len) : (i += 1) {
-        const token = lexer.tokens.items[i];
-        if (i == 0 and token.type != .Entry) {
-            // error - first instruction should be 'entry'
-        }
+    instr_count = 0;
+    while (i < program.tokens.items.len) : (i += 1) {
+        const token = program.tokens.items[i];
+
         if (token.type == .Entry) {
-            if (!entry_found) {
-                try parseEntry(lexer.tokens.items[i + 1 ..], allocator);
-                entry_found = true;
+            if (program.entry == null) {
+                try parseEntry(program.tokens.items[i + 1 ..], program);
                 i += 2;
-                continue;
             } else {
                 // error - second 'entry' keyword
             }
         } else if (token.type == .Section) {
-            if (lexer.tokens.items[i + 1].type == .Data) {
-                const len = try parseDataSection(lexer.tokens.items[i + 2 ..], allocator);
+            if (program.tokens.items[i + 1].type == .Data) {
+                const len = try parseDataSection(program.tokens.items[i + 2 ..], program);
                 i += (len + 1);
-            } else if (lexer.tokens.items[i + 1].type == .Code) {
-                const len = try parseCodeSection(lexer.tokens.items[i + 2 ..], allocator);
+            } else if (program.tokens.items[i + 1].type == .Code) {
+                const len = try parseCodeSection(program.tokens.items[i + 2 ..], program);
                 i += (len + 1);
             } else {
                 // error - unknown section type
@@ -580,86 +874,157 @@ pub fn parseTokensToAST(allocator: std.mem.Allocator) !void {
     }
 }
 
-const Record = struct {
-    defined: bool,
-    offset: usize,
-};
-
-pub var dl_table: std.StringHashMap(Record) = undefined;
-pub var cl_table: std.StringHashMap(Record) = undefined;
-
-pub fn printAST() void {
-    std.debug.print("entry: {s}\n", .{program.entry.name});
-    for (program.sections.items) |section| {
-        std.debug.print("section {}\n", .{section.type});
-        if (section.type == .Data) {
-            std.debug.print("flags: r - {}, w - {}, e - {}\n", .{ section.section.data.flags.read, section.section.data.flags.write, section.section.data.flags.exec });
-            for (section.section.data.instr.items) |instr| {
-                std.debug.print(" {s}: {} ", .{ instr.label.name, instr.type });
-                for (instr.data.items, 0..) |item, i| {
-                    switch (item) {
-                        .num_lit => {
-                            std.debug.print("{s}", .{item.num_lit});
-                        },
-                        .str_lit => {
-                            std.debug.print("\"{s}\"", .{item.str_lit});
-                        },
-                        .repeat => {
-                            switch (item.repeat.item) {
-                                .num_lit => {
-                                    std.debug.print("rep({s}, {s})", .{ item.repeat.count, item.repeat.item.num_lit });
-                                },
-                                .str_lit => {
-                                    std.debug.print("rep({s}, \"{s}\")", .{ item.repeat.count, item.repeat.item.str_lit });
-                                },
-                            }
-                        },
-                    }
-                    if (i < instr.data.items.len - 1) {
-                        std.debug.print(", ", .{});
-                    }
+pub fn printCPUInstruction(instr: CpuInstruction) void {
+    std.debug.print(" {t} ", .{instr.mnem});
+    for (instr.operands.items, 0..) |oper, i| {
+        switch (oper) {
+            .imm => {
+                switch (oper.imm) {
+                    .i => {
+                        std.debug.print("{d}", .{oper.imm.i});
+                    },
+                    .u => {
+                        std.debug.print("{d}", .{oper.imm.u});
+                    },
                 }
-                std.debug.print("\n", .{});
-            }
-        } else if (section.type == .Code) {
-            std.debug.print("flags: r - {}, w - {}, e - {}\n", .{ section.section.code.flags.read, section.section.code.flags.write, section.section.code.flags.exec });
-            for (section.section.code.instr.items) |instr| {
-                switch (instr) {
-                    .cpu => {
-                        std.debug.print(" {} ", .{instr.cpu.mnem});
-                        for (instr.cpu.operands.items, 0..) |oper, i| {
-                            switch (oper) {
-                                .imm => {
-                                    std.debug.print("{}", .{oper.imm});
-                                },
-                                .label => {
-                                    std.debug.print("{s}", .{oper.label.name});
-                                },
-                                .reg => {
-                                    std.debug.print("{}", .{oper.reg.name});
-                                },
-                                .mem => {
-                                    switch (oper.mem.mem) {
-                                        .label => {
-                                            std.debug.print("p{?} [{s}]", .{ oper.mem.size, oper.mem.mem.label });
-                                        },
-                                        .addr => {
-                                            std.debug.print("p{?} [{}+{?}*{?}]", .{ oper.mem.size, oper.mem.mem.addr.base.name, oper.mem.mem.addr.index, oper.mem.mem.addr.scale });
-                                        },
-                                    }
-                                },
-                            }
-                            if (i < instr.cpu.operands.items.len - 1) {
-                                std.debug.print(", ", .{});
-                            }
+            },
+            .label => {
+                std.debug.print("{s}", .{oper.label});
+            },
+            .reg => {
+                std.debug.print("{t}", .{oper.reg.name});
+            },
+            .mem => {
+                switch (oper.mem.mem) {
+                    .label => {
+                        if (oper.mem.size != null) {
+                            std.debug.print("p{d} ", .{oper.mem.size.?});
+                        }
+                        std.debug.print("[{s}]", .{oper.mem.mem.label});
+                    },
+                    .addr => {
+                        const base: ?lexer.TokenType = if (oper.mem.mem.addr.base) |bs| bs.name else null;
+                        const index: ?lexer.TokenType = if (oper.mem.mem.addr.index) |in| in.name else null;
+                        const scale: ?u8 = if (oper.mem.mem.addr.scale) |sc| sc.num else null;
+                        const disp: ?i32 = if (oper.mem.mem.addr.disp) |ds| ds.num else null;
+
+                        if (oper.mem.size != null) {
+                            std.debug.print("p{d} ", .{oper.mem.size.?});
+                        }
+                        std.debug.print("[", .{});
+                        if (base != null) {
+                            std.debug.print("<{t}>", .{base.?});
+                        }
+                        if (index != null) {
+                            std.debug.print("<{t}>", .{index.?});
+                        }
+                        if (scale != null) {
+                            std.debug.print("*({d})", .{scale.?});
+                        }
+                        if (disp != null) {
+                            std.debug.print("+|{d}|", .{disp.?});
+                        }
+                        std.debug.print("]", .{});
+                    },
+                }
+            },
+        }
+        if (i < instr.operands.items.len - 1) {
+            std.debug.print(", ", .{});
+        }
+    }
+}
+
+pub fn printAST(program: *object.Program) void {
+    if (program.entry) |entry| {
+        std.debug.print("entry: {s}\n", .{entry});
+    } else {
+        std.debug.print("entry: null\n", .{});
+    }
+
+    if (program.data_section) |*data_section| {
+        // data section
+        std.debug.print("section data\n", .{});
+        std.debug.print("flags: r - {}, w - {}, e - {}\n", .{ data_section.flags.read, data_section.flags.write, data_section.flags.exec });
+        for (data_section.instr.items) |instr| {
+            std.debug.print(" {s}: d{d} ", .{ instr.label, instr.size * 8 });
+            for (instr.data.items, 0..) |item, i| {
+                switch (item) {
+                    .num => {
+                        switch (item.num) {
+                            .i => {
+                                std.debug.print("{d}", .{item.num.i});
+                            },
+                            .u => {
+                                std.debug.print("{d}", .{item.num.u});
+                            },
                         }
                     },
-                    .label => {
-                        std.debug.print("label {s}:", .{instr.label.name});
+                    .str => {
+                        std.debug.print("\"{s}\"", .{item.str});
+                    },
+                    .repeat => {
+                        switch (item.repeat.item) {
+                            .num => {
+                                switch (item.repeat.item.num) {
+                                    .i => {
+                                        std.debug.print("rep({d}, {d})", .{ item.repeat.count.u, item.repeat.item.num.i });
+                                    },
+                                    .u => {
+                                        std.debug.print("rep({d}, {d})", .{ item.repeat.count.u, item.repeat.item.num.u });
+                                    },
+                                }
+                            },
+                            .str => {
+                                std.debug.print("rep({d}, \"{s}\")", .{ item.repeat.count.u, item.repeat.item.str });
+                            },
+                        }
                     },
                 }
-                std.debug.print("\n", .{});
+                if (i < instr.data.items.len - 1) {
+                    std.debug.print(", ", .{});
+                }
             }
+            std.debug.print("\n", .{});
+        }
+        std.debug.print("\n", .{});
+    }
+    if (program.code_section) |*code_section| {
+        // code section
+        std.debug.print("section code\n", .{});
+        std.debug.print("flags: r - {}, w - {}, e - {}\n", .{ code_section.flags.read, code_section.flags.write, code_section.flags.exec });
+        for (code_section.instr.items) |instr| {
+            switch (instr) {
+                .cpu => {
+                    printCPUInstruction(instr.cpu);
+                },
+                .label => {
+                    std.debug.print("label {s}:", .{instr.label});
+                },
+            }
+            std.debug.print("\n", .{});
+        }
+        std.debug.print("\n", .{});
+    }
+}
+
+pub fn printSymbolTables(program: *object.Program) void {
+    std.debug.print(" Symbols\n", .{});
+    if (program.data_section) |*data_section| {
+        // data section
+        std.debug.print("data section: \n", .{});
+        var iter = data_section.symbols.iterator();
+        while (iter.next()) |entry| {
+            std.debug.print(" {s}: {d} \n", .{ entry.key_ptr.*, entry.value_ptr.offset });
+        }
+        std.debug.print("\n", .{});
+    }
+    if (program.code_section) |*code_section| {
+        // code section
+        std.debug.print("code section: \n", .{});
+        var iter = code_section.symbols.iterator();
+        while (iter.next()) |entry| {
+            std.debug.print(" {s}: {d} \n", .{ entry.key_ptr.*, entry.value_ptr.offset });
         }
         std.debug.print("\n", .{});
     }

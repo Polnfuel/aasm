@@ -4,6 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const with_llvm = b.option(bool, "llvm", "Use LLVM backend") orelse false;
+
     const lexer = b.addModule("lexer", .{
         .root_source_file = b.path("src/lexer.zig"),
         .target = target,
@@ -20,6 +22,18 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const object = b.addModule("object", .{
+        .root_source_file = b.path("src/object.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "lexer", .module = lexer },
+            .{ .name = "parser", .module = parser },
+        },
+    });
+
+    parser.addImport("object", object);
+
     const datagen = b.addModule("datagen", .{
         .root_source_file = b.path("src/datagen.zig"),
         .target = target,
@@ -29,6 +43,8 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    object.addImport("datagen", datagen);
+
     const codegen = b.addModule("codegen", .{
         .root_source_file = b.path("src/codegen.zig"),
         .target = target,
@@ -36,38 +52,28 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "lexer", .module = lexer },
             .{ .name = "parser", .module = parser },
-            .{ .name = "datagen", .module = datagen },
         },
     });
 
-    const compositor = b.addModule("compositor", .{
-        .root_source_file = b.path("src/compositor.zig"),
+    object.addImport("codegen", codegen);
+
+    const main_module = b.addModule("main", .{
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "codegen", .module = codegen },
-            .{ .name = "datagen", .module = datagen },
-            .{ .name = "parser", .module = parser },
+            .{ .name = "object", .module = object },
         },
     });
 
     const exe = b.addExecutable(.{
         .name = "aasm",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "lexer", .module = lexer },
-                .{ .name = "parser", .module = parser },
-                .{ .name = "datagen", .module = datagen },
-                .{ .name = "codegen", .module = codegen },
-                .{ .name = "compositor", .module = compositor },
-            },
-        }),
+        .root_module = main_module,
     });
 
-    exe.use_llvm = true;
+    if (with_llvm) {
+        exe.use_llvm = true;
+    }
 
     b.installArtifact(exe);
 

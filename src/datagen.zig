@@ -1,151 +1,84 @@
 const std = @import("std");
 const parser = @import("parser");
 
-pub var data_buffer: std.ArrayList(u8) = .empty;
-
-fn convertNumberLiteral(comptime T: type, slice: []const u8) !T {
-    return try std.fmt.parseInt(T, slice, 10);
-}
-
 fn tillNextAlignedAddress(current: u64, alignment: u8) u64 {
     const aligned = (current + alignment - 1) & ~(alignment - 1);
     return aligned - current;
 }
 
+const DatagenError = error{
+    LabelIsNotDefined,
+    StringLiteralNotD8,
+};
+
+pub fn addImmediate(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, imm: parser.Immediate, bytes: u8) !void {
+    const value: u64 = switch (imm) {
+        .i => @bitCast(imm.i),
+        .u => imm.u,
+    };
+    try buffer.append(allocator, @as(u8, @truncate(value)));
+    if (bytes > 1) {
+        try buffer.append(allocator, @as(u8, @truncate(value >> 8)));
+    }
+    if (bytes > 2) {
+        try buffer.append(allocator, @as(u8, @truncate(value >> 16)));
+        try buffer.append(allocator, @as(u8, @truncate(value >> 24)));
+    }
+    if (bytes > 4) {
+        try buffer.append(allocator, @as(u8, @truncate(value >> 32)));
+        try buffer.append(allocator, @as(u8, @truncate(value >> 40)));
+        try buffer.append(allocator, @as(u8, @truncate(value >> 48)));
+        try buffer.append(allocator, @as(u8, @truncate(value >> 56)));
+    }
+}
+
 pub fn bufferizeDataSection(section: *parser.DataSection, allocator: std.mem.Allocator) !void {
     for (section.instr.items) |instruction| {
-        const name = instruction.label.name;
-        const dtype = instruction.type;
+        const name = instruction.label;
+        const data_size = instruction.size;
 
-        const alignment: u8 = switch (dtype) {
-            .D8 => 1,
-            .D16 => 2,
-            .D32 => 4,
-            .D64 => 8,
-            else => 1,
-        };
-
-        const padding = tillNextAlignedAddress(data_buffer.items.len, alignment);
+        const padding = tillNextAlignedAddress(section.buffer.items.len, data_size);
         for (0..padding) |_| {
-            try data_buffer.append(allocator, undefined);
+            try section.buffer.append(allocator, undefined);
         }
 
-        const result = try parser.dl_table.getOrPut(name);
-        if (result.found_existing) {
-            // error - label previously defined
+        const opt_symbol = section.symbols.getPtr(name);
+        if (opt_symbol) |symbol| {
+            symbol.offset = section.buffer.items.len;
+            // TODO: add global keyword for globally visible symbols
+            symbol.binding = .Local;
         } else {
-            result.value_ptr.defined = true;
-            result.value_ptr.offset = data_buffer.items.len;
+            return DatagenError.LabelIsNotDefined;
         }
 
         for (instruction.data.items) |data| {
             switch (data) {
-                .str_lit => {
-                    if (dtype == .D8) {
-                        try data_buffer.appendSlice(allocator, data.str_lit);
+                .str => {
+                    if (data_size == 1) {
+                        try section.buffer.appendSlice(allocator, data.str);
                     } else {
-                        // error - string literal must have type d8
+                        return DatagenError.StringLiteralNotD8;
                     }
                 },
-                .num_lit => {
-                    switch (dtype) {
-                        .D8 => {
-                            // const padding = tillNextAlignedAddress(data_buffer.items.len, 1);
-                            // for (0..padding) |_| {
-                            //     try data_buffer.append(allocator, undefined);
-                            // }
-                            const num = try convertNumberLiteral(u8, data.num_lit);
-                            try data_buffer.append(allocator, num);
-                        },
-                        .D16 => {
-                            // const padding = tillNextAlignedAddress(data_buffer.items.len, 1);
-                            // for (0..padding) |_| {
-                            //     try data_buffer.append(allocator, undefined);
-                            // }
-                            const num = try convertNumberLiteral(u16, data.num_lit);
-                            const lit_end: [2]u8 = .{ @truncate(num), @truncate(num >> 8) };
-                            try data_buffer.appendSlice(allocator, lit_end[0..2]);
-                        },
-                        .D32 => {
-                            // const padding = tillNextAlignedAddress(data_buffer.items.len, 1);
-                            // for (0..padding) |_| {
-                            //     try data_buffer.append(allocator, undefined);
-                            // }
-                            const num = try convertNumberLiteral(u32, data.num_lit);
-                            const lit_end: [4]u8 = .{ @truncate(num), @truncate(num >> 8), @truncate(num >> 16), @truncate(num >> 24) };
-                            try data_buffer.appendSlice(allocator, lit_end[0..4]);
-                        },
-                        .D64 => {
-                            // const padding = tillNextAlignedAddress(data_buffer.items.len, 1);
-                            // for (0..padding) |_| {
-                            //     try data_buffer.append(allocator, undefined);
-                            // }
-                            const num = try convertNumberLiteral(u64, data.num_lit);
-                            const lit_end: [8]u8 = .{ @truncate(num), @truncate(num >> 8), @truncate(num >> 16), @truncate(num >> 24), @truncate(num >> 32), @truncate(num >> 40), @truncate(num >> 48), @truncate(num >> 56) };
-                            try data_buffer.appendSlice(allocator, lit_end[0..8]);
-                        },
-                        else => {
-                            // error but should be unreachable
-                        },
-                    }
+                .num => {
+                    try addImmediate(&section.buffer, allocator, data.num, data_size);
                 },
                 .repeat => {
-                    const count = try convertNumberLiteral(usize, data.repeat.count);
+                    const count = data.repeat.count.u;
                     switch (data.repeat.item) {
-                        .str_lit => {
-                            if (dtype == .D8) {
-                                const chars = data.repeat.item.str_lit;
+                        .str => {
+                            if (data_size == 1) {
+                                const chars = data.repeat.item.str;
                                 for (0..count) |_| {
-                                    try data_buffer.appendSlice(allocator, chars);
+                                    try section.buffer.appendSlice(allocator, chars);
                                 }
                             } else {
-                                // error - string literal must have type d8
+                                return DatagenError.StringLiteralNotD8;
                             }
                         },
-                        .num_lit => {
-                            switch (dtype) {
-                                .D8 => {
-                                    const num = try convertNumberLiteral(u8, data.repeat.item.num_lit);
-                                    for (0..count) |_| {
-                                        try data_buffer.append(allocator, num);
-                                    }
-                                },
-                                .D16 => {
-                                    // const padding = tillNextAlignedAddress(data_buffer.items.len, 1);
-                                    // for (0..padding) |_| {
-                                    //     try data_buffer.append(allocator, undefined);
-                                    // }
-                                    const num = try convertNumberLiteral(u16, data.repeat.item.num_lit);
-                                    const lit_end: [2]u8 = .{ @truncate(num), @truncate(num >> 8) };
-                                    for (0..count) |_| {
-                                        try data_buffer.appendSlice(allocator, lit_end[0..2]);
-                                    }
-                                },
-                                .D32 => {
-                                    // const padding = tillNextAlignedAddress(data_buffer.items.len, 1);
-                                    // for (0..padding) |_| {
-                                    //     try data_buffer.append(allocator, undefined);
-                                    // }
-                                    const num = try convertNumberLiteral(u32, data.repeat.item.num_lit);
-                                    const lit_end: [4]u8 = .{ @truncate(num), @truncate(num >> 8), @truncate(num >> 16), @truncate(num >> 24) };
-                                    for (0..count) |_| {
-                                        try data_buffer.appendSlice(allocator, lit_end[0..4]);
-                                    }
-                                },
-                                .D64 => {
-                                    // const padding = tillNextAlignedAddress(data_buffer.items.len, 1);
-                                    // for (0..padding) |_| {
-                                    //     try data_buffer.append(allocator, undefined);
-                                    // }
-                                    const num = try convertNumberLiteral(u64, data.repeat.item.num_lit);
-                                    const lit_end: [8]u8 = .{ @truncate(num), @truncate(num >> 8), @truncate(num >> 16), @truncate(num >> 24), @truncate(num >> 32), @truncate(num >> 40), @truncate(num >> 48), @truncate(num >> 56) };
-                                    for (0..count) |_| {
-                                        try data_buffer.appendSlice(allocator, lit_end[0..8]);
-                                    }
-                                },
-                                else => {
-                                    // error but should be unreachable
-                                },
+                        .num => {
+                            for (0..count) |_| {
+                                try addImmediate(&section.buffer, allocator, data.repeat.item.num, data_size);
                             }
                         },
                     }
@@ -153,17 +86,4 @@ pub fn bufferizeDataSection(section: *parser.DataSection, allocator: std.mem.All
             }
         }
     }
-
-    std.debug.print("Data buffer:\n", .{});
-    for (data_buffer.items) |byte| {
-        std.debug.print("{x:02}", .{byte});
-    }
-    std.debug.print("\n", .{});
-
-    // std.debug.print("\n", .{});
-    // var iter = parser.dl_table.iterator();
-    // while (iter.next()) |entry| {
-    //     std.debug.print("{s}, {d}\n", .{ entry.key_ptr.*, entry.value_ptr.offset });
-    // }
-    // std.debug.print("\n", .{});
 }

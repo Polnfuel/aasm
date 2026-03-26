@@ -3,8 +3,8 @@ const std = @import("std");
 const String = struct {
     slice: []u8,
 
-    pub fn new(self: *String, ptr: [*]const u8) void {
-        self.slice = ptr[0..0];
+    pub fn new(ptr: [*]const u8) String {
+        return String{ .slice = ptr[0..0] };
     }
 
     pub fn addByte(self: *String) void {
@@ -136,17 +136,24 @@ pub const TokenType = enum(u8) {
     Ident,
     StringLiteral,
     NumberLiteral,
+    PosNumLiteral,
+    NegNumLiteral,
 
     //Punctuation
     Slash,
     Colon,
     Comma,
     Plus,
+    Minus,
+    Asteriks,
     OpenBracket,
     CloseBracket,
     OpenParenthes,
     CloseParenthes,
     NewLine,
+
+    //Special
+    NotPresent,
 
     pub fn isReg(self: TokenType) bool {
         const lower = @intFromEnum(TokenType.Rax);
@@ -189,14 +196,34 @@ pub const TokenType = enum(u8) {
             (r >= @intFromEnum(TokenType.R8b) and r <= @intFromEnum(TokenType.R15b));
         return is;
     }
+
+    pub fn isDataDirective(self: TokenType) bool {
+        const lower = @intFromEnum(TokenType.D8);
+        const upper = @intFromEnum(TokenType.D64);
+        const d = @intFromEnum(self);
+        if (d >= lower and d <= upper) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    pub fn isAccumulator(self: TokenType) bool {
+        switch (self) {
+            TokenType.Al, TokenType.Ax, TokenType.Eax, TokenType.Rax => {
+                return true;
+            },
+            else => {
+                return false;
+            },
+        }
+    }
 };
 
 pub const Token = struct {
     type: TokenType,
     value: ?[]u8,
 };
-
-pub var tokens: std.ArrayList(Token) = undefined;
 
 fn analyzeWord(word: String) Token {
     // Keywords
@@ -236,6 +263,10 @@ fn analyzeWord(word: String) Token {
         return Token{ .type = .Je, .value = null };
     } else if (word.is("jne")) {
         return Token{ .type = .Jne, .value = null };
+    } else if (word.is("ja")) {
+        return Token{ .type = .Ja, .value = null };
+    } else if (word.is("jz")) {
+        return Token{ .type = .Jz, .value = null };
     } else if (word.is("call")) {
         return Token{ .type = .Call, .value = null };
     } else if (word.is("ret")) {
@@ -413,193 +444,499 @@ fn analyzeWord(word: String) Token {
     }
 }
 
-pub fn tokenizeContent(content: []const u8, allocator: std.mem.Allocator) !void {
-    tokens = .empty;
-    var word: String = undefined;
-    word.new(content.ptr);
-    var in_word = true;
-    var in_strlit = false;
-    var in_numlit = false;
-    var in_comment = false;
-    var i: usize = 0;
-    while (i < content.len) : (i += 1) {
-        const byte = content[i];
-        if (in_comment and byte != '\n') {
-            continue;
-        }
-        if (in_strlit and byte != '"' and byte != '\n') {
-            word.addByte();
-            continue;
+const LexerState = enum {
+    TopLevel,
+    Word,
+    String,
+    Number,
+    Comment,
+
+    PlusSign,
+    MinusSign,
+    PosNumber,
+    NegNumber,
+};
+
+const LexerError = error{
+    InvalidCharacher,
+    NotClosedString,
+    InvalidIdentifierName,
+};
+
+pub fn tokenizeContent(content: []const u8, allocator: std.mem.Allocator) !std.ArrayList(Token) {
+    var tokens: std.ArrayList(Token) = .empty;
+
+    var line: usize = 1;
+    errdefer {
+        std.debug.print("lexer error on line {d}\n", .{line});
+        tokens.deinit(allocator);
+    }
+
+    var state: LexerState = .TopLevel;
+    var word: String = String.new(content.ptr);
+
+    for (content, 0..) |byte, i| {
+        if (byte != '\n') {
+            if (byte != '"' and state == .String) {
+                word.addByte();
+                continue;
+            } else if (state == .Comment) {
+                continue;
+            }
         }
         switch (byte) {
-            ' ' => {
-                if (in_word) {
-                    if (in_numlit) {
-                        try tokens.append(allocator, .{ .type = .NumberLiteral, .value = word.slice });
-                        in_word = false;
-                        in_numlit = false;
-                    } else {
-                        const token = analyzeWord(word);
-                        try tokens.append(allocator, token);
-                        in_word = false;
-                    }
+            'A'...'Z', 'a'...'z', '_' => {
+                switch (state) {
+                    .Word => {
+                        word.addByte();
+                    },
+                    .TopLevel => {
+                        word = String.new(content[i..i].ptr);
+                        word.addByte();
+                        state = .Word;
+                    },
+                    .Number, .PosNumber, .NegNumber => {
+                        return LexerError.InvalidIdentifierName;
+                    },
+                    .MinusSign => {
+                        const minus = Token{ .type = .Minus, .value = null };
+                        try tokens.append(allocator, minus);
+                        word = String.new(content[i..i].ptr);
+                        word.addByte();
+                        state = .Word;
+                    },
+                    .PlusSign => {
+                        const plus = Token{ .type = .Plus, .value = null };
+                        try tokens.append(allocator, plus);
+                        word = String.new(content[i..i].ptr);
+                        word.addByte();
+                        state = .Word;
+                    },
+                    .Comment, .String => unreachable,
                 }
-            },
-            '\n' => {
-                if (in_word) {
-                    if (in_numlit) {
-                        try tokens.append(allocator, .{ .type = .NumberLiteral, .value = word.slice });
-                        in_word = false;
-                        in_numlit = false;
-                    } else if (in_strlit) {
-                        // not closed string literal  -- error
-                    } else {
-                        const token = analyzeWord(word);
-                        try tokens.append(allocator, token);
-                        in_word = false;
-                    }
-                    try tokens.append(allocator, Token{ .type = .NewLine, .value = null });
-                } else if (in_comment) {
-                    in_comment = false;
-                } else if (tokens.getLastOrNull().?.type == .NewLine) {
-                    // skip empty string
-                    continue;
-                } else {
-                    try tokens.append(allocator, Token{ .type = .NewLine, .value = null });
-                }
-            },
-            '/' => {
-                if (in_word) {
-                    const token = analyzeWord(word);
-                    try tokens.append(allocator, token);
-                    in_word = false;
-                }
-                try tokens.append(allocator, .{ .type = .Slash, .value = null });
-            },
-            ':' => {
-                if (in_word) {
-                    const token = analyzeWord(word);
-                    try tokens.append(allocator, token);
-                    in_word = false;
-                }
-                try tokens.append(allocator, .{ .type = .Colon, .value = null });
-            },
-            ',' => {
-                if (in_word) {
-                    if (in_numlit) {
-                        try tokens.append(allocator, .{ .type = .NumberLiteral, .value = word.slice });
-                        in_word = false;
-                        in_numlit = false;
-                    } else {
-                        const token = analyzeWord(word);
-                        try tokens.append(allocator, token);
-                        in_word = false;
-                    }
-                }
-                try tokens.append(allocator, .{ .type = .Comma, .value = null });
-            },
-            '[' => {
-                if (in_word) {
-                    const token = analyzeWord(word);
-                    try tokens.append(allocator, token);
-                    in_word = false;
-                }
-                try tokens.append(allocator, .{ .type = .OpenBracket, .value = null });
-            },
-            ']' => {
-                if (in_word) {
-                    const token = analyzeWord(word);
-                    try tokens.append(allocator, token);
-                    in_word = false;
-                }
-                try tokens.append(allocator, .{ .type = .CloseBracket, .value = null });
-            },
-            '(' => {
-                if (in_word) {
-                    const token = analyzeWord(word);
-                    try tokens.append(allocator, token);
-                    in_word = false;
-                }
-                try tokens.append(allocator, .{ .type = .OpenParenthes, .value = null });
-            },
-            ')' => {
-                if (in_word) {
-                    if (in_numlit) {
-                        try tokens.append(allocator, .{ .type = .NumberLiteral, .value = word.slice });
-                        in_word = false;
-                        in_numlit = false;
-                    } else {
-                        // should not be -- error?
-                    }
-                }
-                try tokens.append(allocator, .{ .type = .CloseParenthes, .value = null });
-            },
-            '"' => {
-                if (!in_strlit) {
-                    //string literal starts
-                    in_strlit = true;
-                    word.new(content[i..i].ptr + 1);
-                } else {
-                    //string literal ends
-                    try tokens.append(allocator, .{ .type = .StringLiteral, .value = word.slice });
-                    in_strlit = false;
-                    in_word = false;
-                }
-            },
-            ';' => {
-                in_comment = true;
-                if (in_word) {
-                    const token = analyzeWord(word);
-                    try tokens.append(allocator, token);
-                }
-                in_word = false;
-            },
-            'A'...'Z', 'a'...'z' => {
-                if (!in_word) {
-                    word.new(content[i..i].ptr);
-                }
-                if (in_numlit) {
-                    in_numlit = false;
-                    //9d   - error
-                }
-                word.addByte();
-                in_word = true;
             },
             '0'...'9' => {
-                if (!in_word) {
-                    in_numlit = true;
-                    word.new(content[i..i].ptr);
+                switch (state) {
+                    .TopLevel => {
+                        word = String.new(content[i..i].ptr);
+                        word.addByte();
+                        state = .Number;
+                    },
+                    .Word, .Number, .NegNumber, .PosNumber => {
+                        word.addByte();
+                    },
+                    .MinusSign => {
+                        word = String.new(content[i..i].ptr);
+                        word.addByte();
+                        state = .NegNumber;
+                    },
+                    .PlusSign => {
+                        word = String.new(content[i..i].ptr);
+                        word.addByte();
+                        state = .PosNumber;
+                    },
+                    .Comment, .String => unreachable,
                 }
-                word.addByte();
-                in_word = true;
+            },
+            '"' => {
+                switch (state) {
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                        word = String.new(content[i..i].ptr + 1);
+                        state = .String;
+                    },
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                        word = String.new(content[i..i].ptr + 1);
+                        state = .String;
+                    },
+                    .NegNumber => {
+                        const token = Token{ .type = .NegNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                        word = String.new(content[i..i].ptr + 1);
+                        state = .String;
+                    },
+                    .PosNumber => {
+                        const token = Token{ .type = .PosNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                        word = String.new(content[i..i].ptr + 1);
+                        state = .String;
+                    },
+                    .MinusSign => {
+                        const minus = Token{ .type = .Minus, .value = null };
+                        try tokens.append(allocator, minus);
+                    },
+                    .PlusSign => {
+                        const plus = Token{ .type = .Minus, .value = null };
+                        try tokens.append(allocator, plus);
+                    },
+                    .TopLevel => {
+                        word = String.new(content[i..i].ptr + 1);
+                        state = .String;
+                    },
+                    .String => {
+                        const token = Token{ .type = .StringLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                        state = .TopLevel;
+                    },
+                    .Comment => unreachable,
+                }
+            },
+            ' ' => {
+                switch (state) {
+                    .TopLevel => {},
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber => {
+                        const token = Token{ .type = .NegNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .PosNumber => {
+                        const token = Token{ .type = .PosNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .MinusSign, .PlusSign => {
+                        continue;
+                    },
+                    .Comment, .String => unreachable,
+                }
+                state = .TopLevel;
+            },
+            '\n' => {
+                switch (state) {
+                    .TopLevel => {
+                        if (tokens.getLastOrNull()) |last| {
+                            if (last.type == .NewLine) {
+                                line += 1;
+                                continue;
+                            }
+                        }
+                    },
+                    .Comment => {
+                        line += 1;
+                        state = .TopLevel;
+                        continue;
+                    },
+                    .String => {
+                        return LexerError.NotClosedString;
+                    },
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber => {
+                        const token = Token{ .type = .NegNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .PosNumber => {
+                        const token = Token{ .type = .PosNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .MinusSign, .PlusSign => {
+                        return LexerError.InvalidCharacher;
+                    },
+                }
+                const newline = Token{ .type = .NewLine, .value = null };
+                try tokens.append(allocator, newline);
+                line += 1;
+                state = .TopLevel;
+            },
+            '-' => {
+                switch (state) {
+                    .TopLevel => {},
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber => {
+                        const token = Token{ .type = .NegNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .PosNumber => {
+                        const token = Token{ .type = .PosNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .MinusSign, .PlusSign => {
+                        return LexerError.InvalidCharacher;
+                    },
+                    .Comment, .String => unreachable,
+                }
+                state = .MinusSign;
             },
             '+' => {
-                if (in_word) {
-                    const token = analyzeWord(word);
-                    try tokens.append(allocator, token);
-                    in_word = false;
+                switch (state) {
+                    .TopLevel => {},
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber => {
+                        const token = Token{ .type = .NegNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .PosNumber => {
+                        const token = Token{ .type = .PosNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .MinusSign, .PlusSign => {
+                        return LexerError.InvalidCharacher;
+                    },
+                    .Comment, .String => unreachable,
                 }
-                try tokens.append(allocator, .{ .type = .Plus, .value = null });
+                state = .PlusSign;
+            },
+            '*' => {
+                switch (state) {
+                    .TopLevel => {},
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber => {
+                        const token = Token{ .type = .NegNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .PosNumber => {
+                        const token = Token{ .type = .PosNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .MinusSign, .PlusSign => {
+                        return LexerError.InvalidCharacher;
+                    },
+                    .Comment, .String => unreachable,
+                }
+                const asteriks = Token{ .type = .Asteriks, .value = null };
+                try tokens.append(allocator, asteriks);
+                state = .TopLevel;
+            },
+            ':' => {
+                switch (state) {
+                    .TopLevel => {},
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber => {
+                        const token = Token{ .type = .NegNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .PosNumber => {
+                        const token = Token{ .type = .PosNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .MinusSign, .PlusSign => {
+                        return LexerError.InvalidCharacher;
+                    },
+                    .Comment, .String => unreachable,
+                }
+                const colon = Token{ .type = .Colon, .value = null };
+                try tokens.append(allocator, colon);
+                state = .TopLevel;
+            },
+            ',' => {
+                switch (state) {
+                    .TopLevel => {},
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber => {
+                        const token = Token{ .type = .NegNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .PosNumber => {
+                        const token = Token{ .type = .PosNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .MinusSign, .PlusSign => {
+                        return LexerError.InvalidCharacher;
+                    },
+                    .Comment, .String => unreachable,
+                }
+                const comma = Token{ .type = .Comma, .value = null };
+                try tokens.append(allocator, comma);
+                state = .TopLevel;
+            },
+            '[' => {
+                switch (state) {
+                    .TopLevel => {},
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber, .PosNumber, .MinusSign, .PlusSign => {
+                        return LexerError.InvalidCharacher;
+                    },
+                    .Comment, .String => unreachable,
+                }
+                const obrac = Token{ .type = .OpenBracket, .value = null };
+                try tokens.append(allocator, obrac);
+                state = .TopLevel;
+            },
+            ']' => {
+                switch (state) {
+                    .TopLevel => {},
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber => {
+                        const token = Token{ .type = .NegNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .PosNumber => {
+                        const token = Token{ .type = .PosNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .MinusSign, .PlusSign => {
+                        return LexerError.InvalidCharacher;
+                    },
+                    .Comment, .String => unreachable,
+                }
+                const cbrac = Token{ .type = .CloseBracket, .value = null };
+                try tokens.append(allocator, cbrac);
+                state = .TopLevel;
+            },
+            '(' => {
+                switch (state) {
+                    .TopLevel => {},
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber, .PosNumber, .MinusSign, .PlusSign => {
+                        return LexerError.InvalidCharacher;
+                    },
+                    .Comment, .String => unreachable,
+                }
+                const oparen = Token{ .type = .OpenParenthes, .value = null };
+                try tokens.append(allocator, oparen);
+                state = .TopLevel;
+            },
+            ')' => {
+                switch (state) {
+                    .TopLevel => {},
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber => {
+                        const token = Token{ .type = .NegNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .PosNumber => {
+                        const token = Token{ .type = .PosNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .MinusSign, .PlusSign => {
+                        return LexerError.InvalidCharacher;
+                    },
+                    .Comment, .String => unreachable,
+                }
+                const cparen = Token{ .type = .CloseParenthes, .value = null };
+                try tokens.append(allocator, cparen);
+                state = .TopLevel;
+            },
+            ';' => {
+                switch (state) {
+                    .TopLevel => {},
+                    .Word => {
+                        const token = analyzeWord(word);
+                        try tokens.append(allocator, token);
+                    },
+                    .Number => {
+                        const token = Token{ .type = .NumberLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .NegNumber => {
+                        const token = Token{ .type = .NegNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .PosNumber => {
+                        const token = Token{ .type = .PosNumLiteral, .value = word.slice };
+                        try tokens.append(allocator, token);
+                    },
+                    .MinusSign, .PlusSign => {
+                        return LexerError.InvalidCharacher;
+                    },
+                    .Comment, .String => unreachable,
+                }
+                state = .Comment;
             },
             else => {
-                if (in_word) {
-                    word.addByte();
-                }
+                return LexerError.InvalidCharacher;
             },
         }
     }
+    return tokens;
 }
 
-pub fn printTokens() void {
+pub fn printTokens(tokens: std.ArrayList(Token)) void {
     for (tokens.items) |token| {
         if (token.type.isMnemonic()) {
-            std.debug.print("\x1b[34m{any}\x1b[0m\n", .{token.type});
+            std.debug.print("\x1b[34m{t}\x1b[0m\n", .{token.type});
         } else if (token.type.isReg()) {
-            std.debug.print("\x1b[35m{any}\x1b[0m\n", .{token.type});
+            std.debug.print("\x1b[35m{t}\x1b[0m\n", .{token.type});
         } else if (token.type == .NewLine) {
             std.debug.print("\n", .{});
+        } else if (token.type == .StringLiteral) {
+            std.debug.print("{t}  \x1b[36m{s}\x1b[0m\n", .{ token.type, token.value.? });
+        } else if (token.type == .NumberLiteral) {
+            std.debug.print("{t}  \x1b[31m{s}\x1b[0m\n", .{ token.type, token.value.? });
+        } else if (token.type == .NegNumLiteral) {
+            std.debug.print("{t}  \x1b[32m-{s}\x1b[0m\n", .{ token.type, token.value.? });
+        } else if (token.type == .PosNumLiteral) {
+            std.debug.print("{t}  \x1b[33m+{s}\x1b[0m\n", .{ token.type, token.value.? });
         } else {
-            std.debug.print("{any}  {s}\n", .{ token.type, token.value orelse "" });
+            std.debug.print("{t}  {s}\n", .{ token.type, token.value orelse "" });
         }
     }
 }
