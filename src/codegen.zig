@@ -1,6 +1,8 @@
 const std = @import("std");
 const lexer = @import("lexer");
 const parser = @import("parser");
+const Program = @import("program").Program;
+const stdbuffers = @import("stdbuffers");
 
 fn regCode(reg: lexer.TokenType) u3 {
     switch (reg) {
@@ -64,7 +66,9 @@ fn digitToReg(digit: u8) parser.Register {
     }
 }
 
-const CodegenError = error{
+pub const CodegenError = error{CodeGenFailed} || std.mem.Allocator.Error;
+
+const InternalError = error{
     InvalidIndex,
     DiffOperSizes,
     InvalidNumberOfOperands,
@@ -73,7 +77,7 @@ const CodegenError = error{
     UnspecifiedMemoryPointerSize,
     WrongMemoryPointerSize,
     WrongRegisterSize,
-};
+} || std.mem.Allocator.Error;
 
 const ModRmByte = packed struct {
     rm: u3,
@@ -420,7 +424,7 @@ const InstrBytes = struct {
         self.modrm = ModRmByte{ .mod = mod, .reg = reg_code, .rm = rm_code };
     }
 
-    fn checkAndSwapBaseIndex(self: *const InstrBytes, mem: parser.ComplexAddress) !parser.ComplexAddress {
+    fn checkAndSwapBaseIndex(self: *const InstrBytes, mem: parser.ComplexAddress) InternalError!parser.ComplexAddress {
         _ = self;
         var output = mem;
         if (mem.index) |index| {
@@ -440,20 +444,20 @@ const InstrBytes = struct {
                             output.base = output.index;
                             output.index = temp;
                         } else {
-                            return CodegenError.InvalidIndex;
+                            return InternalError.InvalidIndex;
                         }
                     } else {
-                        return CodegenError.InvalidIndex;
+                        return InternalError.InvalidIndex;
                     }
                 } else {
-                    return CodegenError.InvalidIndex;
+                    return InternalError.InvalidIndex;
                 }
             }
         }
         return output;
     }
 
-    pub fn def(self: *InstrBytes, reg: parser.Register, rm: parser.Operand, opcode: u8) !void {
+    pub fn def(self: *InstrBytes, reg: parser.Register, rm: parser.Operand, opcode: u8) InternalError!void {
         self.reset();
         self.opcode = opcode;
         var checked: parser.Operand = rm;
@@ -489,7 +493,7 @@ const Codegen = struct {
             .section = section,
         };
     }
-    pub fn addToBuffer(self: *Codegen) !void {
+    pub fn addToBuffer(self: *Codegen) std.mem.Allocator.Error!void {
         if (self.ibytes.as) {
             try self.section.buffer.append(self.allocator, 0x67);
         }
@@ -511,7 +515,7 @@ const Codegen = struct {
         }
     }
 
-    pub fn addImmediate(self: *Codegen, imm: parser.Immediate, bytes: u8) !void {
+    pub fn addImmediate(self: *Codegen, imm: parser.Immediate, bytes: u8) std.mem.Allocator.Error!void {
         const value: u64 = switch (imm) {
             .i => @bitCast(imm.i),
             .u => imm.u,
@@ -532,7 +536,7 @@ const Codegen = struct {
         }
     }
 
-    pub fn addDisplacement(self: *Codegen, disp: parser.Displacement, bytes: u8) !void {
+    pub fn addDisplacement(self: *Codegen, disp: parser.Displacement, bytes: u8) std.mem.Allocator.Error!void {
         const value: u32 = @bitCast(disp.num);
         try self.section.buffer.append(self.allocator, @as(u8, @truncate(value)));
         if (bytes > 1) {
@@ -544,7 +548,7 @@ const Codegen = struct {
         }
     }
 
-    pub fn addRelocation(self: *Codegen, label: []u8, l_type: parser.RelType, till_next_instr: u8) !void {
+    pub fn addRelocation(self: *Codegen, label: []u8, l_type: parser.RelType, till_next_instr: u8) std.mem.Allocator.Error!void {
         const rel_size: u8 = switch (l_type) {
             .Rel32D, .Rel32C, .Abs32D => 4,
             .Abs64D => 8,
@@ -566,14 +570,14 @@ const Codegen = struct {
 
 var gen: Codegen = undefined;
 
-fn memEncoding(rmop: parser.Operand, opcode: u8, digit: u8, sizes_mask: u4, discard_rexw: bool) !void {
+fn memEncoding(rmop: parser.Operand, opcode: u8, digit: u8, sizes_mask: u4, discard_rexw: bool) InternalError!void {
     var rm_size: u8 = undefined;
     switch (rmop) {
         .mem => {
             if (rmop.mem.size) |size| {
                 rm_size = size;
             } else {
-                return CodegenError.UnspecifiedMemoryPointerSize;
+                return InternalError.UnspecifiedMemoryPointerSize;
             }
         },
         .reg => {
@@ -607,17 +611,17 @@ fn memEncoding(rmop: parser.Operand, opcode: u8, digit: u8, sizes_mask: u4, disc
             else => unreachable,
         }
     } else {
-        return CodegenError.WrongMemoryPointerSize;
+        return InternalError.WrongMemoryPointerSize;
     }
 }
 
-fn memRegEncoding(rmop: parser.Operand, regop: parser.Register, opcode: u8) !void {
+fn memRegEncoding(rmop: parser.Operand, regop: parser.Register, opcode: u8) InternalError!void {
     const reg_size = regop.size;
     var rm_size: u8 = undefined;
     switch (rmop) {
         .reg => rm_size = rmop.reg.size,
         .mem => rm_size = rmop.mem.size orelse reg_size,
-        else => return CodegenError.InvalidOperand,
+        else => return InternalError.InvalidOperand,
     }
     if (rm_size == reg_size) {
         try gen.ibytes.def(regop, rmop, opcode);
@@ -639,17 +643,17 @@ fn memRegEncoding(rmop: parser.Operand, regop: parser.Register, opcode: u8) !voi
             else => unreachable,
         }
     } else {
-        return CodegenError.DiffOperSizes;
+        return InternalError.DiffOperSizes;
     }
 }
 
-fn regMemEncoding(regop: parser.Register, rmop: parser.Operand, opcode: u8, sizes_mask: u4) !void {
+fn regMemEncoding(regop: parser.Register, rmop: parser.Operand, opcode: u8, sizes_mask: u4) InternalError!void {
     const reg_size = regop.size;
     var rm_size: u8 = undefined;
     switch (rmop) {
         .reg => rm_size = rmop.reg.size,
         .mem => rm_size = rmop.mem.size orelse reg_size,
-        else => return CodegenError.InvalidOperand,
+        else => return InternalError.InvalidOperand,
     }
     if (rm_size == reg_size) {
         if (rm_size & sizes_mask == rm_size) {
@@ -672,14 +676,14 @@ fn regMemEncoding(regop: parser.Register, rmop: parser.Operand, opcode: u8, size
                 else => unreachable,
             }
         } else {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         }
     } else {
-        return CodegenError.DiffOperSizes;
+        return InternalError.DiffOperSizes;
     }
 }
 
-fn opEncoding(reg: parser.Register, opcode: u8, sizes_mask: u4, discard_rexw: bool) !void {
+fn opEncoding(reg: parser.Register, opcode: u8, sizes_mask: u4, discard_rexw: bool) InternalError!void {
     const reg_size = reg.size;
     if (reg_size & sizes_mask == reg_size) {
         gen.ibytes.reset();
@@ -694,11 +698,11 @@ fn opEncoding(reg: parser.Register, opcode: u8, sizes_mask: u4, discard_rexw: bo
         }
         try gen.addToBuffer();
     } else {
-        return CodegenError.WrongRegisterSize;
+        return InternalError.WrongRegisterSize;
     }
 }
 
-fn opImmEncoding(reg: parser.Register, opcode: u8, imm: parser.Operand) !void {
+fn opImmEncoding(reg: parser.Register, opcode: u8, imm: parser.Operand) InternalError!void {
     const reg_size = reg.size;
     var is_label: bool = undefined;
     var imm_size: u8 = undefined;
@@ -729,11 +733,11 @@ fn opImmEncoding(reg: parser.Register, opcode: u8, imm: parser.Operand) !void {
             }
         }
     } else {
-        return CodegenError.ImmValueIsTooLarge;
+        return InternalError.ImmValueIsTooLarge;
     }
 }
 
-fn memImmEncodingG1(rmop: parser.Operand, opcode: u8, digit: u8, imm: parser.Immediate) !void {
+fn memImmEncodingG1(rmop: parser.Operand, opcode: u8, digit: u8, imm: parser.Immediate) InternalError!void {
     const imm_size = parser.immMinSize(imm);
     var rm_size: u8 = undefined;
     switch (rmop) {
@@ -744,7 +748,7 @@ fn memImmEncodingG1(rmop: parser.Operand, opcode: u8, digit: u8, imm: parser.Imm
             if (rmop.mem.size) |size| {
                 rm_size = size;
             } else {
-                return CodegenError.UnspecifiedMemoryPointerSize;
+                return InternalError.UnspecifiedMemoryPointerSize;
             }
         },
         else => unreachable,
@@ -775,11 +779,11 @@ fn memImmEncodingG1(rmop: parser.Operand, opcode: u8, digit: u8, imm: parser.Imm
             else => unreachable,
         }
     } else {
-        return CodegenError.ImmValueIsTooLarge;
+        return InternalError.ImmValueIsTooLarge;
     }
 }
 
-fn memImmEncodingG2(rmop: parser.Operand, opcode: u8, digit: u8, imm: parser.Immediate) !void {
+fn memImmEncodingG2(rmop: parser.Operand, opcode: u8, digit: u8, imm: parser.Immediate) InternalError!void {
     var rm_size: u8 = undefined;
     switch (rmop) {
         .reg => {
@@ -789,7 +793,7 @@ fn memImmEncodingG2(rmop: parser.Operand, opcode: u8, digit: u8, imm: parser.Imm
             if (rmop.mem.size) |size| {
                 rm_size = size;
             } else {
-                return CodegenError.UnspecifiedMemoryPointerSize;
+                return InternalError.UnspecifiedMemoryPointerSize;
             }
         },
         else => unreachable,
@@ -819,7 +823,7 @@ fn memImmEncodingG2(rmop: parser.Operand, opcode: u8, digit: u8, imm: parser.Imm
     }
 }
 
-fn immEncoding(opcode: u8, imm: parser.Operand, sizes_mask: u4, discard_os: bool) !void {
+fn immEncoding(opcode: u8, imm: parser.Operand, sizes_mask: u4, discard_os: bool) InternalError!void {
     var is_label: bool = undefined;
     var imm_size: u8 = undefined;
     switch (imm) {
@@ -845,11 +849,11 @@ fn immEncoding(opcode: u8, imm: parser.Operand, sizes_mask: u4, discard_os: bool
             try gen.addImmediate(imm.imm, imm_size);
         }
     } else {
-        return CodegenError.InvalidOperand;
+        return InternalError.InvalidOperand;
     }
 }
 
-fn accImmEncoding(acc: parser.Register, opcode: u8, imm: parser.Immediate) !void {
+fn accImmEncoding(acc: parser.Register, opcode: u8, imm: parser.Immediate) InternalError!void {
     const acc_size = acc.size;
     const imm_size = parser.immMinSize(imm);
     if (acc_size >= imm_size and imm_size <= 4) {
@@ -861,25 +865,25 @@ fn accImmEncoding(acc: parser.Register, opcode: u8, imm: parser.Immediate) !void
         try gen.addToBuffer();
         try gen.addImmediate(imm, imm_bytes);
     } else {
-        return CodegenError.ImmValueIsTooLarge;
+        return InternalError.ImmValueIsTooLarge;
     }
 }
 
-fn zeroEncoding(opcode_bytes: []const u8) !void {
+fn zeroEncoding(opcode_bytes: []const u8) std.mem.Allocator.Error!void {
     try gen.section.buffer.appendSlice(gen.allocator, opcode_bytes);
 }
 
-fn syscall(instr: parser.CpuInstruction) !void {
+fn syscall(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 0) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const buffer: [2]u8 = .{ 0x0F, 0x05 };
     try zeroEncoding(buffer[0..]);
 }
 
-fn mov(instr: parser.CpuInstruction) !void {
+fn mov(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 2) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     const second = instr.operands.items[1];
@@ -911,29 +915,29 @@ fn mov(instr: parser.CpuInstruction) !void {
                     if (first.mem.size) |size| {
                         ptr_size = size;
                     } else {
-                        return CodegenError.UnspecifiedMemoryPointerSize;
+                        return InternalError.UnspecifiedMemoryPointerSize;
                     }
                     const opcode: u8 = if (ptr_size == 1) 0xC6 else 0xC7;
                     try memImmEncodingG1(first, opcode, 0, second.imm);
                 },
                 .label => {
                     // unsupported for now
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
                 .mem => {
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
             }
         },
         else => {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         },
     }
 }
 
-fn push(instr: parser.CpuInstruction) !void {
+fn push(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 1) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     switch (first) {
@@ -953,9 +957,9 @@ fn push(instr: parser.CpuInstruction) !void {
     }
 }
 
-fn pop(instr: parser.CpuInstruction) !void {
+fn pop(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 1) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     switch (first) {
@@ -968,14 +972,14 @@ fn pop(instr: parser.CpuInstruction) !void {
             try memEncoding(first, opcode, 0, 0b1010, true);
         },
         else => {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         },
     }
 }
 
-fn inc(instr: parser.CpuInstruction) !void {
+fn inc(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 1) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     var opcode: u8 = undefined;
@@ -987,16 +991,16 @@ fn inc(instr: parser.CpuInstruction) !void {
             opcode = if (first.mem.size == 1) 0xFE else 0xFF;
         },
         else => {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         },
     }
 
     try memEncoding(first, opcode, 0, 0b1111, false);
 }
 
-fn dec(instr: parser.CpuInstruction) !void {
+fn dec(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 1) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     var opcode: u8 = undefined;
@@ -1008,16 +1012,16 @@ fn dec(instr: parser.CpuInstruction) !void {
             opcode = if (first.mem.size == 1) 0xFE else 0xFF;
         },
         else => {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         },
     }
 
     try memEncoding(first, opcode, 1, 0b1111, false);
 }
 
-fn lea(instr: parser.CpuInstruction) !void {
+fn lea(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 2) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     const second = instr.operands.items[1];
@@ -1029,19 +1033,19 @@ fn lea(instr: parser.CpuInstruction) !void {
                     try regMemEncoding(first.reg, second, opcode, 0b1110);
                 },
                 else => {
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
             }
         },
         else => {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         },
     }
 }
 
-fn div(instr: parser.CpuInstruction) !void {
+fn div(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 1) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
 
@@ -1054,16 +1058,16 @@ fn div(instr: parser.CpuInstruction) !void {
             opcode = if (first.mem.size == 1) 0xF6 else 0xF7;
         },
         else => {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         },
     }
 
     try memEncoding(first, opcode, 6, 0b1111, false);
 }
 
-fn testi(instr: parser.CpuInstruction) !void {
+fn testi(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 2) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     const second = instr.operands.items[1];
@@ -1084,13 +1088,13 @@ fn testi(instr: parser.CpuInstruction) !void {
                     if (first.mem.size) |size| {
                         ptr_size = size;
                     } else {
-                        return CodegenError.UnspecifiedMemoryPointerSize;
+                        return InternalError.UnspecifiedMemoryPointerSize;
                     }
                     const opcode: u8 = if (ptr_size == 1) 0xF6 else 0xF7;
                     try memImmEncodingG1(first, opcode, 0, second.imm);
                 },
                 else => {
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
             }
         },
@@ -1101,39 +1105,19 @@ fn testi(instr: parser.CpuInstruction) !void {
                     try memRegEncoding(first, second.reg, opcode);
                 },
                 else => {
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
             }
         },
         else => {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         },
     }
-    // switch (first) {
-    //     .reg => {
-    //         switch (second) {
-    //             .imm => {
-    //                 if (first.reg.name.isAccumulator()) {
-    //                     const opcode: u8 = if (first.reg.size == 1) 0xA8 else 0xA9;
-    //                     try accImmEncoding(first.reg, opcode, second.imm);
-    //                 }
-    //             },
-    //             .reg => {},
-    //             else => {
-    //                 return CodegenError.InvalidOperand;
-    //             },
-    //         }
-    //     },
-    //     .mem => {},
-    //     else => {
-    //         return CodegenError.InvalidOperand;
-    //     },
-    // }
 }
 
-fn add(instr: parser.CpuInstruction) !void {
+fn add(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 2) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     const second = instr.operands.items[1];
@@ -1165,7 +1149,7 @@ fn add(instr: parser.CpuInstruction) !void {
                     }
                 },
                 .label => {
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
             }
         },
@@ -1180,7 +1164,7 @@ fn add(instr: parser.CpuInstruction) !void {
                     if (first.mem.size) |size| {
                         ptr_size = size;
                     } else {
-                        return CodegenError.UnspecifiedMemoryPointerSize;
+                        return InternalError.UnspecifiedMemoryPointerSize;
                     }
                     const imm_size = parser.immMinSize(second.imm);
                     if (imm_size == 1 and ptr_size > 1) {
@@ -1193,22 +1177,22 @@ fn add(instr: parser.CpuInstruction) !void {
                 },
                 .label => {
                     // not supported for now
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
                 .mem => {
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
             }
         },
         else => {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         },
     }
 }
 
-fn xor(instr: parser.CpuInstruction) !void {
+fn xor(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 2) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     const second = instr.operands.items[1];
@@ -1240,7 +1224,7 @@ fn xor(instr: parser.CpuInstruction) !void {
                     }
                 },
                 .label => {
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
             }
         },
@@ -1255,7 +1239,7 @@ fn xor(instr: parser.CpuInstruction) !void {
                     if (first.mem.size) |size| {
                         ptr_size = size;
                     } else {
-                        return CodegenError.UnspecifiedMemoryPointerSize;
+                        return InternalError.UnspecifiedMemoryPointerSize;
                     }
                     const imm_size = parser.immMinSize(second.imm);
                     if (imm_size == 1 and ptr_size > 1) {
@@ -1268,22 +1252,22 @@ fn xor(instr: parser.CpuInstruction) !void {
                 },
                 .label => {
                     // not supported for now
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
                 .mem => {
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
             }
         },
         else => {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         },
     }
 }
 
-fn jmp(instr: parser.CpuInstruction) !void {
+fn jmp(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 1) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     switch (first) {
@@ -1298,14 +1282,14 @@ fn jmp(instr: parser.CpuInstruction) !void {
             try gen.addRelocation(first.label, .Rel32C, 0);
         },
         else => {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         },
     }
 }
 
-fn jcc(instr: parser.CpuInstruction, mnem: lexer.TokenType) !void {
+fn jcc(instr: parser.CpuInstruction, mnem: lexer.TokenType) InternalError!void {
     if (instr.operands.items.len != 1) {
-        return CodegenError.InvalidNumberOfOperands;
+        return InternalError.InvalidNumberOfOperands;
     }
     const first = instr.operands.items[0];
     switch (first) {
@@ -1316,7 +1300,7 @@ fn jcc(instr: parser.CpuInstruction, mnem: lexer.TokenType) !void {
                 .Je, .Jz => 0x84,
                 .Jne => 0x85,
                 else => {
-                    return CodegenError.InvalidOperand;
+                    return InternalError.InvalidOperand;
                 },
             };
             try gen.section.buffer.append(gen.allocator, opcode_pref);
@@ -1325,23 +1309,27 @@ fn jcc(instr: parser.CpuInstruction, mnem: lexer.TokenType) !void {
             try gen.addRelocation(first.label, .Rel32C, 0);
         },
         else => {
-            return CodegenError.InvalidOperand;
+            return InternalError.InvalidOperand;
         },
     }
 }
 
 var peek: usize = 0;
 
-fn genInstruction(instruction: parser.CodeInstruction, section: *parser.CodeSection) !void {
+fn genInstruction(instruction: parser.CodeInstruction, program: *Program) InternalError!void {
     switch (instruction) {
         .label => {
-            const cl_ptr = section.symbols.getPtr(instruction.label);
+            const label = instruction.label.name;
+            const cl_ptr = program.symbols.getPtr(label);
             if (cl_ptr) |cl| {
-                cl.offset = section.buffer.items.len;
-                // TODO: add global keyword for globally visible symbols
-                cl.binding = .Local;
+                cl.offset = program.code_section.?.buffer.items.len;
+                if (program.entry) |ent| {
+                    if (std.mem.eql(u8, ent, label)) {
+                        cl.type = .Export;
+                    }
+                }
             } else {
-                // error - label not found (should be unreachable at this stage)
+                unreachable;
             }
         },
         .cpu => {
@@ -1389,29 +1377,49 @@ fn genInstruction(instruction: parser.CodeInstruction, section: *parser.CodeSect
                     //
                 },
             }
-            // var count: u8 = 0;
-            // std.debug.print("{d: >4}: ", .{peek});
-            // for (section.buffer.items[peek..]) |byte| {
-            //     std.debug.print("{x:02} ", .{byte});
-            //     count += 1;
-            // }
-            // std.debug.print("\x1b[40G", .{});
-            // parser.printCPUInstruction(instruction.cpu);
-            // peek += count;
-            // std.debug.print("\n", .{});
         },
     }
 }
 
-pub fn bufferizeCodeSection(section: *parser.CodeSection, allocator: std.mem.Allocator) !void {
-    gen = Codegen.init(section, allocator);
-    for (section.instr.items, 0..) |instruction, i| {
-        genInstruction(instruction, section) catch |err| {
-            std.debug.print("Instruction {d} (", .{i});
-            parser.printCPUInstruction(instruction.cpu);
-            std.debug.print(") failed code generation\n", .{});
-            // std.debug.print("{s}\n", .{@errorName(err)});
-            return err;
+pub fn bufferizeCodeSection(program: *Program) CodegenError!void {
+    const section = &program.code_section.?;
+    gen = Codegen.init(section, program.allocator);
+    for (section.instr.items) |instruction| {
+        genInstruction(instruction, program) catch |err| {
+            const line = switch (instruction) {
+                .cpu => instruction.cpu.line,
+                .label => instruction.label.line,
+            };
+            switch (err) {
+                std.mem.Allocator.Error.OutOfMemory => {
+                    return std.mem.Allocator.Error.OutOfMemory;
+                },
+                InternalError.DiffOperSizes => {
+                    stdbuffers.printSourceError(program.file_name, "operands have different sizes", program.content, line);
+                },
+                InternalError.ImmValueIsTooLarge => {
+                    stdbuffers.printSourceError(program.file_name, "immediate value is too large", program.content, line);
+                },
+                InternalError.InvalidIndex => {
+                    stdbuffers.printSourceError(program.file_name, "invalid index", program.content, line);
+                },
+                InternalError.InvalidNumberOfOperands => {
+                    stdbuffers.printSourceErrorFormatted(program.file_name, "invalid number of operand for '{t}' instruction", .{instruction.cpu.mnem}, program.content, line);
+                },
+                InternalError.InvalidOperand => {
+                    stdbuffers.printSourceError(program.file_name, "invalid operand", program.content, line);
+                },
+                InternalError.UnspecifiedMemoryPointerSize => {
+                    stdbuffers.printSourceError(program.file_name, "memory operand pointer size must be explicitly specified", program.content, line);
+                },
+                InternalError.WrongMemoryPointerSize => {
+                    stdbuffers.printSourceError(program.file_name, "wrong memory operand pointer size", program.content, line);
+                },
+                InternalError.WrongRegisterSize => {
+                    stdbuffers.printSourceError(program.file_name, "wrong register size", program.content, line);
+                },
+            }
+            return CodegenError.CodeGenFailed;
         };
     }
 }

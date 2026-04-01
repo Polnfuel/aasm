@@ -6,11 +6,29 @@ pub fn build(b: *std.Build) void {
 
     const with_llvm = b.option(bool, "llvm", "Use LLVM backend") orelse false;
 
+    const buffers = b.addModule("stdbuffers", .{
+        .root_source_file = b.path("src/stdbuffers.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{},
+    });
+
+    const cliparser = b.addModule("cli", .{
+        .root_source_file = b.path("src/cliparser.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "stdbuffers", .module = buffers },
+        },
+    });
+
     const lexer = b.addModule("lexer", .{
         .root_source_file = b.path("src/lexer.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{},
+        .imports = &.{
+            .{ .name = "stdbuffers", .module = buffers },
+        },
     });
 
     const parser = b.addModule("parser", .{
@@ -19,20 +37,23 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "lexer", .module = lexer },
+            .{ .name = "stdbuffers", .module = buffers },
         },
     });
 
-    const object = b.addModule("object", .{
-        .root_source_file = b.path("src/object.zig"),
+    const program = b.addModule("program", .{
+        .root_source_file = b.path("src/program.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "lexer", .module = lexer },
             .{ .name = "parser", .module = parser },
+            .{ .name = "stdbuffers", .module = buffers },
         },
     });
 
-    parser.addImport("object", object);
+    lexer.addImport("program", program);
+    parser.addImport("program", program);
 
     const datagen = b.addModule("datagen", .{
         .root_source_file = b.path("src/datagen.zig"),
@@ -40,10 +61,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "parser", .module = parser },
+            .{ .name = "program", .module = program },
+            .{ .name = "stdbuffers", .module = buffers },
         },
     });
 
-    object.addImport("datagen", datagen);
+    program.addImport("datagen", datagen);
 
     const codegen = b.addModule("codegen", .{
         .root_source_file = b.path("src/codegen.zig"),
@@ -52,17 +75,33 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "lexer", .module = lexer },
             .{ .name = "parser", .module = parser },
+            .{ .name = "program", .module = program },
+            .{ .name = "stdbuffers", .module = buffers },
         },
     });
 
-    object.addImport("codegen", codegen);
+    program.addImport("codegen", codegen);
+
+    const assembler = b.addModule("assembler", .{
+        .root_source_file = b.path("src/assembler.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "lexer", .module = lexer },
+            .{ .name = "parser", .module = parser },
+            .{ .name = "program", .module = program },
+            .{ .name = "stdbuffers", .module = buffers },
+        },
+    });
 
     const main_module = b.addModule("main", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "object", .module = object },
+            .{ .name = "cli", .module = cliparser },
+            .{ .name = "assembler", .module = assembler },
+            .{ .name = "stdbuffers", .module = buffers },
         },
     });
 
@@ -75,9 +114,19 @@ pub fn build(b: *std.Build) void {
         exe.use_llvm = true;
     }
 
+    if (optimize == .ReleaseFast) {
+        exe.root_module.error_tracing = false;
+        exe.root_module.omit_frame_pointer = true;
+        exe.root_module.strip = true;
+        exe.root_module.stack_protector = false;
+        exe.root_module.stack_check = false;
+    }
+
     b.installArtifact(exe);
 
-    const inst4 = b.addInstallFile(b.path("test-asm/long.asm"), "bin/long.asm");
+    const inst1 = b.addInstallFile(b.path("test-asm/long.asm"), "bin/long.asm");
+    const inst2 = b.addInstallFile(b.path("test-asm/print.asm"), "bin/print.asm");
     const install_step = b.getInstallStep();
-    install_step.dependOn(&inst4.step);
+    install_step.dependOn(&inst1.step);
+    install_step.dependOn(&inst2.step);
 }

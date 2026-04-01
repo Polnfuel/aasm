@@ -1,5 +1,11 @@
 entry start
 
+section export 
+    exit, print_newline
+
+section import
+    print
+
 section data rw
 msg:        d8 "Sum of array: ", 0
 newline:    d8 10
@@ -10,9 +16,7 @@ count:      d64 5
 buffer:     d8 repeat(32, 0)
 
 section code rx
-
 start:
-
     ; rbx = pointer to array
     mov rbx, array
 

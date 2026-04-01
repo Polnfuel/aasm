@@ -1,13 +1,14 @@
 const std = @import("std");
 const lexer = @import("lexer");
-const object = @import("object");
+const Program = @import("program").Program;
+const stdbuffers = @import("stdbuffers");
 
 const MAX_OPERAND_COUNT = 3;
 
 pub const Register = struct {
     name: lexer.TokenType,
     size: u8,
-    // Caller must be sure that reg param is actually register name
+    /// Caller must be sure that reg param is actually register name
     pub fn init(reg: lexer.TokenType) Register {
         const r = @intFromEnum(reg);
         const r64_end = @intFromEnum(lexer.TokenType.R15);
@@ -52,7 +53,7 @@ pub const Immediate = union(enum) {
     u: u64,
     i: i64,
 
-    pub fn invert(self: *Immediate) !void {
+    pub fn invert(self: *Immediate) std.fmt.ParseIntError!void {
         switch (self.*) {
             .u => {
                 const unsigned = self.u;
@@ -60,7 +61,7 @@ pub const Immediate = union(enum) {
                     const signed: i64 = @intCast(unsigned);
                     self.* = .{ .i = -signed };
                 } else {
-                    // error - integer doesn't fit in 64 bit
+                    return std.fmt.ParseIntError.Overflow;
                 }
             },
             .i => {
@@ -81,6 +82,7 @@ pub const Operand = union(enum) {
 pub const CpuInstruction = struct {
     mnem: lexer.TokenType,
     operands: std.ArrayList(Operand),
+    line: u16,
 };
 
 const DataInitialization = union(enum) {
@@ -99,10 +101,16 @@ const DataInstruction = struct {
     label: []u8,
     size: u8,
     data: std.ArrayList(DataInitialization),
+    line: u16,
+};
+
+const LabelInstruction = struct {
+    name: []u8,
+    line: u16,
 };
 
 pub const CodeInstruction = union(enum) {
-    label: []u8,
+    label: LabelInstruction,
     cpu: CpuInstruction,
 };
 
@@ -116,14 +124,22 @@ const SectionFlags = struct {
     }
 };
 
-pub const SymBinding = enum {
+pub const SymType = enum {
     Local,
-    Global,
+    Export,
+    Import,
+};
+
+const SectionType = enum {
+    Data,
+    Code,
+    Undef,
 };
 
 pub const Symbol = struct {
     offset: u64,
-    binding: SymBinding,
+    type: SymType,
+    section: SectionType,
 };
 
 pub const RelType = enum {
@@ -143,14 +159,12 @@ pub const Relocation = struct {
 pub const DataSection = struct {
     flags: SectionFlags,
     instr: std.ArrayList(DataInstruction),
-    symbols: std.StringHashMap(Symbol),
     buffer: std.ArrayList(u8),
 
-    pub fn new(allocator: std.mem.Allocator) DataSection {
+    pub fn new() DataSection {
         return DataSection{
             .flags = SectionFlags.empty(),
             .instr = .empty,
-            .symbols = std.StringHashMap(Symbol).init(allocator),
             .buffer = .empty,
         };
     }
@@ -159,70 +173,39 @@ pub const DataSection = struct {
 pub const CodeSection = struct {
     flags: SectionFlags,
     instr: std.ArrayList(CodeInstruction),
-    symbols: std.StringHashMap(Symbol),
     relocations: std.ArrayList(Relocation),
     buffer: std.ArrayList(u8),
 
-    pub fn new(allocator: std.mem.Allocator) CodeSection {
+    pub fn new() CodeSection {
         return CodeSection{
             .flags = SectionFlags.empty(),
             .instr = .empty,
-            .symbols = std.StringHashMap(Symbol).init(allocator),
             .buffer = .empty,
             .relocations = .empty,
         };
     }
 };
 
-const ParserError = error{
-    InvalidEntryName,
-    WrongFlag,
-    IncompleteDataInstr,
-    LabelAlreadyDefined,
+pub const ParserError = error{ParsingFailed} || std.mem.Allocator.Error || std.fmt.ParseIntError;
 
-    UnexpectedSymbols,
-    UnexpectedComma,
-
-    ExpectedFlag,
-    ExpectedNumOrString,
-    ExpectedNonNegNum,
-    ExpectedOpenedParenth,
-    ExpectedClosedParenth,
-    ExpectedComma,
-    ExpectedSizeDirective,
-    ExpectedLabelName,
-    ExpectedColon,
-
-    InvalidScale,
-    InvalidDispSize,
-    InvalidIndexSize,
-    InvalidBaseSize,
-    InvalidOperand,
-    InvalidStrLitLen,
-
-    TooManyOperands,
-    DispIsZero,
-
-    InvalidDataSize,
-    RepeatCountTooLarge,
-};
-
-fn parseEntry(tokens: []lexer.Token, program: *object.Program) !void {
+fn parseEntry(tokens: []lexer.Token, program: *Program) ParserError!void {
     const next = tokens[0];
     if (next.type == .Ident) {
-        program.entry = next.value.?;
+        program.entry = next.value;
     } else {
-        return ParserError.InvalidEntryName;
+        stdbuffers.printSourceError(program.file_name, "expected identifier after entry keyword", program.content, next.line);
+        return ParserError.ParsingFailed;
     }
     if (tokens[1].type != .NewLine) {
-        return ParserError.UnexpectedSymbols;
+        stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, tokens[1].line);
+        return ParserError.ParsingFailed;
     }
 }
 
-fn parseSectionFlags(token: lexer.Token) !SectionFlags {
+fn parseSectionFlags(token: lexer.Token, program: *Program) ParserError!SectionFlags {
     var flags = SectionFlags.empty();
-    if (token.type == .Ident and token.value.?.len <= 3) {
-        for (token.value.?) |char| {
+    if (token.type == .Ident and token.value.len <= 3) {
+        for (token.value) |char| {
             switch (char) {
                 'r' => {
                     flags.read = true;
@@ -234,25 +217,27 @@ fn parseSectionFlags(token: lexer.Token) !SectionFlags {
                     flags.exec = true;
                 },
                 else => {
-                    return ParserError.WrongFlag;
+                    stdbuffers.printSourceError(program.file_name, "wrong section flag", program.content, token.line);
+                    return ParserError.ParsingFailed;
                 },
             }
         }
     } else {
-        return ParserError.ExpectedFlag;
+        stdbuffers.printSourceError(program.file_name, "expected section flags", program.content, token.line);
+        return ParserError.ParsingFailed;
     }
     return flags;
 }
 
-fn immFromNumToken(token: lexer.Token) !Immediate {
+fn immFromNumToken(token: lexer.Token) std.fmt.ParseIntError!Immediate {
     switch (token.type) {
         .NumberLiteral, .PosNumLiteral => {
-            const value = try std.fmt.parseInt(u64, token.value.?, 10);
+            const value = try std.fmt.parseInt(u64, token.value, 10);
             const imm = Immediate{ .u = value };
             return imm;
         },
         .NegNumLiteral => {
-            const value = try std.fmt.parseInt(u64, token.value.?, 10);
+            const value = try std.fmt.parseInt(u64, token.value, 10);
             var imm = Immediate{ .u = value };
             try imm.invert();
             return imm;
@@ -270,7 +255,7 @@ pub fn immMinSize(imm: Immediate) u8 {
                 return 2;
             } else if (imm.i >= std.math.minInt(i32) and imm.i <= std.math.maxInt(i32)) {
                 return 4;
-            } else if (imm.i >= std.math.minInt(i64) and imm.i <= std.math.maxInt(i64)) {
+            } else {
                 return 8;
             }
         },
@@ -281,16 +266,15 @@ pub fn immMinSize(imm: Immediate) u8 {
                 return 2;
             } else if (imm.u <= std.math.maxInt(u32)) {
                 return 4;
-            } else if (imm.u <= std.math.maxInt(u64)) {
+            } else {
                 return 8;
             }
         },
     }
-    return 8; // but actually must be unreachable
 }
 
-fn dispFromNumToken(token: lexer.Token) !Displacement {
-    const int = try std.fmt.parseInt(i64, token.value.?, 10);
+fn dispFromNumToken(token: lexer.Token, program: *Program) ParserError!Displacement {
+    const int = try std.fmt.parseInt(i64, token.value, 10);
     if (int >= 0) {
         var value: i32 = undefined;
         if (int >= std.math.minInt(i32) and int <= std.math.maxInt(i32)) {
@@ -301,7 +285,8 @@ fn dispFromNumToken(token: lexer.Token) !Displacement {
         } else if (int == std.math.maxInt(i32) + 1 and token.type == .NegNumLiteral) {
             value = std.math.minInt(i32);
         } else {
-            return ParserError.InvalidDispSize;
+            stdbuffers.printSourceError(program.file_name, "displacement value doesn't fit in 32 bits", program.content, token.line);
+            return ParserError.ParsingFailed;
         }
         const disp = Displacement{ .num = value };
         return disp;
@@ -315,26 +300,25 @@ pub fn dispMinSize(disp: Displacement) u8 {
         return 1;
     } else if (disp.num >= std.math.minInt(i16) and disp.num <= std.math.maxInt(i16)) {
         return 2;
-    } else if (disp.num >= std.math.minInt(i32) and disp.num <= std.math.maxInt(i32)) {
-        return 4;
     } else {
-        return 8; // should be unreachable
+        return 4;
     }
 }
 
-fn scaleFromNumToken(token: lexer.Token) !Scale {
-    const int = try std.fmt.parseInt(u8, token.value.?, 10);
+fn scaleFromNumToken(token: lexer.Token, program: *Program) ParserError!Scale {
+    const int = try std.fmt.parseInt(u8, token.value, 10);
     switch (int) {
         1, 2, 4, 8 => {
             return Scale{ .num = int };
         },
         else => {
-            return ParserError.InvalidScale;
+            stdbuffers.printSourceErrorFormatted(program.file_name, "expected scale 1, 2, 4 or 8; found {d}", .{int}, program.content, token.line);
+            return ParserError.ParsingFailed;
         },
     }
 }
 
-fn parseRepeat(tokens: []lexer.Token, data_size: u8) !DataInitialization {
+fn parseRepeat(tokens: []lexer.Token, data_size: u8, program: *Program, line: u16) ParserError!DataInitialization {
     var data_init: DataInitialization = undefined;
     if (tokens[0].type == .OpenParenthes) {
         switch (tokens[1].type) {
@@ -342,7 +326,8 @@ fn parseRepeat(tokens: []lexer.Token, data_size: u8) !DataInitialization {
                 const count = try immFromNumToken(tokens[1]);
                 const count_value = count.u;
                 if (count_value * data_size > 16378) {
-                    return ParserError.RepeatCountTooLarge;
+                    stdbuffers.printSourceError(program.file_name, "repeat count is too large for this data size", program.content, line);
+                    return ParserError.ParsingFailed;
                 }
                 switch (count) {
                     .u => {
@@ -354,46 +339,50 @@ fn parseRepeat(tokens: []lexer.Token, data_size: u8) !DataInitialization {
                                     if (value_size <= data_size) {
                                         data_init = .{ .repeat = .{ .count = count, .item = .{ .num = value } } };
                                     } else {
-                                        return ParserError.InvalidDataSize;
+                                        stdbuffers.printSourceError(program.file_name, "value doesn't fit in given data size", program.content, tokens[3].line);
+                                        return ParserError.ParsingFailed;
                                     }
                                 },
                                 .StringLiteral => {
                                     if (data_size == 1) {
-                                        data_init = .{ .repeat = .{ .count = count, .item = .{ .str = tokens[3].value.? } } };
+                                        data_init = .{ .repeat = .{ .count = count, .item = .{ .str = tokens[3].value } } };
                                     } else {
-                                        return ParserError.InvalidDataSize;
+                                        stdbuffers.printSourceError(program.file_name, "string value must have data size d8", program.content, line);
+                                        return ParserError.ParsingFailed;
                                     }
                                 },
                                 else => {
-                                    return ParserError.ExpectedNumOrString;
+                                    stdbuffers.printSourceError(program.file_name, "expected number or string literal", program.content, line);
+                                    return ParserError.ParsingFailed;
                                 },
                             }
                             if (tokens[4].type == .CloseParenthes) {
                                 return data_init;
                             } else {
-                                return ParserError.ExpectedClosedParenth;
+                                stdbuffers.printSourceError(program.file_name, "expected ')'", program.content, line);
+                                return ParserError.ParsingFailed;
                             }
                         } else {
-                            return ParserError.ExpectedComma;
+                            stdbuffers.printSourceError(program.file_name, "expected ','", program.content, line);
+                            return ParserError.ParsingFailed;
                         }
                     },
                     .i => unreachable,
                 }
             },
             else => {
-                return ParserError.ExpectedNonNegNum;
+                stdbuffers.printSourceError(program.file_name, "expected non-negative number", program.content, line);
+                return ParserError.ParsingFailed;
             },
         }
     } else {
-        return ParserError.ExpectedOpenedParenth;
+        stdbuffers.printSourceError(program.file_name, "expected '('", program.content, line);
+        return ParserError.ParsingFailed;
     }
 }
 
-fn parseDataInstruction(tokens: []lexer.Token, program: *object.Program) !void {
+fn parseDataInstruction(tokens: []lexer.Token, program: *Program) ParserError!void {
     var instruction: DataInstruction = undefined;
-    if (tokens.len < 4) {
-        return ParserError.IncompleteDataInstr;
-    }
     if (tokens[0].type == .Ident) {
         if (tokens[1].type == .Colon) {
             if (tokens[2].type.isDataDirective()) {
@@ -404,9 +393,10 @@ fn parseDataInstruction(tokens: []lexer.Token, program: *object.Program) !void {
                     .D64 => 8,
                     else => unreachable,
                 };
-                instruction.label = tokens[0].value.?;
+                instruction.label = tokens[0].value;
                 instruction.size = data_size;
                 instruction.data = .empty;
+                errdefer instruction.data.deinit(program.allocator);
                 var expect_value = true;
                 var i: usize = 3;
                 while (i < tokens.len) {
@@ -416,20 +406,23 @@ fn parseDataInstruction(tokens: []lexer.Token, program: *object.Program) !void {
                             if (expect_value) {
                                 expect_value = false;
                             } else {
-                                return ParserError.ExpectedComma;
+                                stdbuffers.printSourceError(program.file_name, "expected ','", program.content, token.line);
+                                return ParserError.ParsingFailed;
                             }
                             if (data_size == 1) {
-                                const data_init: DataInitialization = .{ .str = token.value.? };
+                                const data_init: DataInitialization = .{ .str = token.value };
                                 try instruction.data.append(program.allocator, data_init);
                             } else {
-                                return ParserError.InvalidDataSize;
+                                stdbuffers.printSourceError(program.file_name, "wrong data size", program.content, token.line);
+                                return ParserError.ParsingFailed;
                             }
                         },
                         .NumberLiteral, .NegNumLiteral, .PosNumLiteral => {
                             if (expect_value) {
                                 expect_value = false;
                             } else {
-                                return ParserError.ExpectedComma;
+                                stdbuffers.printSourceError(program.file_name, "expected ','", program.content, token.line);
+                                return ParserError.ParsingFailed;
                             }
                             const num = try immFromNumToken(token);
                             const num_size = immMinSize(num);
@@ -437,66 +430,77 @@ fn parseDataInstruction(tokens: []lexer.Token, program: *object.Program) !void {
                                 const data_init: DataInitialization = .{ .num = num };
                                 try instruction.data.append(program.allocator, data_init);
                             } else {
-                                return ParserError.InvalidDataSize;
+                                stdbuffers.printSourceError(program.file_name, "wrong data size", program.content, token.line);
+                                return ParserError.ParsingFailed;
                             }
                         },
                         .Repeat => {
                             if (expect_value) {
                                 expect_value = false;
                             } else {
-                                return ParserError.ExpectedComma;
+                                stdbuffers.printSourceError(program.file_name, "expected ','", program.content, token.line);
+                                return ParserError.ParsingFailed;
                             }
-                            const data_init = try parseRepeat(tokens[i + 1 ..], data_size);
+                            const data_init = try parseRepeat(tokens[i + 1 ..], data_size, program, token.line);
                             try instruction.data.append(program.allocator, data_init);
                             i += 5;
                         },
-                        .Comma => {
+                        .Comma, .NewLine => {
                             if (!expect_value) {
                                 expect_value = true;
                             } else {
-                                return ParserError.UnexpectedComma;
+                                stdbuffers.printSourceError(program.file_name, "expected ','", program.content, token.line);
+                                return ParserError.ParsingFailed;
                             }
                         },
                         else => {
-                            return ParserError.UnexpectedSymbols;
+                            if (expect_value) {
+                                stdbuffers.printSourceError(program.file_name, "expected string or number literal or 'repeat' statement", program.content, token.line);
+                                return ParserError.ParsingFailed;
+                            } else {
+                                stdbuffers.printSourceError(program.file_name, "expected ',' or end of line", program.content, token.line);
+                                return ParserError.ParsingFailed;
+                            }
                         },
                     }
                     i += 1;
                 }
-                // check if label is not in code section
-                if (program.code_section) |*code_section| {
-                    const result = code_section.symbols.get(instruction.label);
-                    if (result != null) {
-                        return ParserError.LabelAlreadyDefined;
-                    }
-                }
-                // try to add to data symbols table
-                const result = try program.data_section.?.symbols.getOrPut(instruction.label);
+
+                const result = try program.symbols.getOrPut(instruction.label);
                 if (result.found_existing) {
-                    return ParserError.LabelAlreadyDefined;
+                    stdbuffers.printSourceErrorFormatted(program.file_name, "label '{s}' already defined in this file", .{instruction.label}, program.content, tokens[0].line);
+                    return ParserError.ParsingFailed;
+                } else {
+                    result.value_ptr.type = .Local;
+                    result.value_ptr.section = .Data;
                 }
+
                 try program.data_section.?.instr.append(program.allocator, instruction);
             } else {
-                return ParserError.ExpectedSizeDirective;
+                stdbuffers.printSourceError(program.file_name, "expected data size directive", program.content, tokens[2].line);
+                return ParserError.ParsingFailed;
             }
         } else {
-            return ParserError.ExpectedColon;
+            stdbuffers.printSourceError(program.file_name, "expected ':'", program.content, tokens[1].line);
+            return ParserError.ParsingFailed;
         }
     } else {
-        return ParserError.ExpectedLabelName;
+        stdbuffers.printSourceError(program.file_name, "expected label name", program.content, tokens[0].line);
+        return ParserError.ParsingFailed;
     }
 }
 
-fn parseDataSection(tokens: []lexer.Token, program: *object.Program) !usize {
-    program.data_section = DataSection.new(program.allocator);
+fn parseDataSection(tokens: []lexer.Token, program: *Program) ParserError!usize {
+    program.data_section = DataSection.new();
     const first = tokens[0];
-    program.data_section.?.flags = try parseSectionFlags(first);
+    program.data_section.?.flags = try parseSectionFlags(first, program);
     if (tokens[1].type == .NewLine) {
         var current_instruction: []lexer.Token = tokens[2..2];
         var i: usize = 2;
         while (i < tokens.len) : (i += 1) {
             const token = tokens[i];
             if (token.type == .NewLine) {
+                current_instruction.len += 1;
                 try parseDataInstruction(current_instruction, program);
                 current_instruction.ptr = tokens[i + 1 .. i + 1].ptr;
                 current_instruction.len = 0;
@@ -507,12 +511,13 @@ fn parseDataSection(tokens: []lexer.Token, program: *object.Program) !usize {
             }
         }
     } else {
-        return ParserError.UnexpectedSymbols;
+        stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, tokens[1].line);
+        return ParserError.ParsingFailed;
     }
     return tokens.len;
 }
 
-fn checkMemoryOperand(oper: *MemOperand) !void {
+fn checkMemoryOperand(oper: *MemOperand, program: *Program, line: u16) ParserError!void {
     switch (oper.mem) {
         .addr => {
             if (oper.mem.addr.disp) |disp| {
@@ -526,11 +531,13 @@ fn checkMemoryOperand(oper: *MemOperand) !void {
                     if (oper.mem.addr.index) |index| {
                         const i_size = index.size;
                         if (b_size != i_size) {
-                            return ParserError.InvalidIndexSize;
+                            stdbuffers.printSourceError(program.file_name, "base and index registers' sizes doesn't match", program.content, line);
+                            return ParserError.ParsingFailed;
                         }
                     }
                 } else {
-                    return ParserError.InvalidBaseSize;
+                    stdbuffers.printSourceError(program.file_name, "invalid base register size", program.content, line);
+                    return ParserError.ParsingFailed;
                 }
             }
         },
@@ -538,7 +545,7 @@ fn checkMemoryOperand(oper: *MemOperand) !void {
     }
 }
 
-fn parseMemoryOperand(tokens: []lexer.Token) !MemOperand {
+fn parseMemoryOperand(tokens: []lexer.Token, program: *Program) ParserError!MemOperand {
     var oper: ?MemOperand = null;
 
     var toks: [7]lexer.TokenType = .{ .NotPresent, .NotPresent, .NotPresent, .NotPresent, .NotPresent, .NotPresent, .NotPresent };
@@ -557,39 +564,39 @@ fn parseMemoryOperand(tokens: []lexer.Token) !MemOperand {
         if (t2 == .Asteriks and t3 == .NumberLiteral) {
             if (t4 == .PosNumLiteral or t4 == .NegNumLiteral) {
                 if (t5 == .Plus and t6.isReg()) {
-                    const disp = try dispFromNumToken(tokens[3]);
-                    const scale = try scaleFromNumToken(tokens[2]);
+                    const disp = try dispFromNumToken(tokens[3], program);
+                    const scale = try scaleFromNumToken(tokens[2], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t6), .index = Register.init(t1), .scale = scale, .disp = disp } }, .size = null };
                 } else if (t5 == .NotPresent) {
-                    const disp = try dispFromNumToken(tokens[3]);
-                    const scale = try scaleFromNumToken(tokens[2]);
+                    const disp = try dispFromNumToken(tokens[3], program);
+                    const scale = try scaleFromNumToken(tokens[2], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t1), .scale = scale, .disp = disp } }, .size = null };
                 }
             } else if (t4 == .Plus and t5.isReg()) {
                 if (t6 == .PosNumLiteral or t6 == .NegNumLiteral) {
-                    const disp = try dispFromNumToken(tokens[5]);
-                    const scale = try scaleFromNumToken(tokens[2]);
+                    const disp = try dispFromNumToken(tokens[5], program);
+                    const scale = try scaleFromNumToken(tokens[2], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t5), .index = Register.init(t1), .scale = scale, .disp = disp } }, .size = null };
                 } else if (t6 == .NotPresent) {
-                    const scale = try scaleFromNumToken(tokens[2]);
+                    const scale = try scaleFromNumToken(tokens[2], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t5), .index = Register.init(t1), .scale = scale, .disp = null } }, .size = null };
                 }
             } else if (t4 == .NotPresent) {
-                const scale = try scaleFromNumToken(tokens[2]);
+                const scale = try scaleFromNumToken(tokens[2], program);
                 oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t1), .scale = scale, .disp = null } }, .size = null };
             }
         } else if (t2 == .Plus and t3.isReg()) {
             if (t4 == .Asteriks and t5 == .NumberLiteral) {
                 if (t6 == .PosNumLiteral or t6 == .NegNumLiteral) {
-                    const disp = try dispFromNumToken(tokens[5]);
-                    const scale = try scaleFromNumToken(tokens[4]);
+                    const disp = try dispFromNumToken(tokens[5], program);
+                    const scale = try scaleFromNumToken(tokens[4], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
                 } else if (t6 == .NotPresent) {
-                    const scale = try scaleFromNumToken(tokens[4]);
+                    const scale = try scaleFromNumToken(tokens[4], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t3), .scale = scale, .disp = null } }, .size = null };
                 }
             } else if (t4 == .PosNumLiteral or t4 == .NegNumLiteral) {
-                const disp = try dispFromNumToken(tokens[3]);
+                const disp = try dispFromNumToken(tokens[3], program);
                 oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t3), .scale = null, .disp = disp } }, .size = null };
             } else if (t4 == .NotPresent) {
                 oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t3), .scale = null, .disp = null } }, .size = null };
@@ -597,19 +604,19 @@ fn parseMemoryOperand(tokens: []lexer.Token) !MemOperand {
         } else if (t2 == .PosNumLiteral) {
             if (t3 == .Asteriks and t4.isReg()) {
                 if (t5 == .PosNumLiteral or t5 == .NegNumLiteral) {
-                    const disp = try dispFromNumToken(tokens[4]);
-                    const scale = try scaleFromNumToken(tokens[1]);
+                    const disp = try dispFromNumToken(tokens[4], program);
+                    const scale = try scaleFromNumToken(tokens[1], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t4), .scale = scale, .disp = disp } }, .size = null };
                 } else if (t5 == .NotPresent) {
-                    const scale = try scaleFromNumToken(tokens[1]);
+                    const scale = try scaleFromNumToken(tokens[1], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = Register.init(t4), .scale = scale, .disp = null } }, .size = null };
                 }
             } else if (t3 == .NotPresent) {
-                const disp = try dispFromNumToken(tokens[1]);
+                const disp = try dispFromNumToken(tokens[1], program);
                 oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = null, .scale = null, .disp = disp } }, .size = null };
             }
         } else if (t2 == .NegNumLiteral) {
-            const disp = try dispFromNumToken(tokens[1]);
+            const disp = try dispFromNumToken(tokens[1], program);
             oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = null, .scale = null, .disp = disp } }, .size = null };
         } else if (t2 == .NotPresent) {
             oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t1), .index = null, .scale = null, .disp = null } }, .size = null };
@@ -618,89 +625,91 @@ fn parseMemoryOperand(tokens: []lexer.Token) !MemOperand {
         if (t2 == .Asteriks and t3.isReg()) {
             if (t4 == .PosNumLiteral or t4 == .NegNumLiteral) {
                 if (t5 == .Plus and t6.isReg()) {
-                    const disp = try dispFromNumToken(tokens[3]);
-                    const scale = try scaleFromNumToken(tokens[0]);
+                    const disp = try dispFromNumToken(tokens[3], program);
+                    const scale = try scaleFromNumToken(tokens[0], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t6), .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
                 } else if (t5 == .NotPresent) {
-                    const disp = try dispFromNumToken(tokens[3]);
-                    const scale = try scaleFromNumToken(tokens[0]);
+                    const disp = try dispFromNumToken(tokens[3], program);
+                    const scale = try scaleFromNumToken(tokens[0], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
                 }
             } else if (t4 == .Plus and t5.isReg()) {
                 if (t6 == .PosNumLiteral or t6 == .NegNumLiteral) {
-                    const disp = try dispFromNumToken(tokens[5]);
-                    const scale = try scaleFromNumToken(tokens[0]);
+                    const disp = try dispFromNumToken(tokens[5], program);
+                    const scale = try scaleFromNumToken(tokens[0], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t5), .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
                 } else if (t6 == .NotPresent) {
-                    const scale = try scaleFromNumToken(tokens[0]);
+                    const scale = try scaleFromNumToken(tokens[0], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t5), .index = Register.init(t3), .scale = scale, .disp = null } }, .size = null };
                 }
             } else if (t4 == .NotPresent) {
-                const scale = try scaleFromNumToken(tokens[0]);
+                const scale = try scaleFromNumToken(tokens[0], program);
                 oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t3), .scale = scale, .disp = null } }, .size = null };
             }
         } else if (t2 == .Plus and t3.isReg()) {
             if (t4 == .Asteriks and t5 == .NumberLiteral and t6 == .Plus and t7.isReg()) {
-                const disp = try dispFromNumToken(tokens[0]);
-                const scale = try scaleFromNumToken(tokens[4]);
+                const disp = try dispFromNumToken(tokens[0], program);
+                const scale = try scaleFromNumToken(tokens[4], program);
                 oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t7), .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
             } else if (t4 == .NotPresent) {
-                const disp = try dispFromNumToken(tokens[0]);
+                const disp = try dispFromNumToken(tokens[0], program);
                 oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t3), .index = null, .scale = null, .disp = disp } }, .size = null };
             }
         } else if (t2 == .PosNumLiteral and t3 == .Asteriks and t4.isReg()) {
             if (t5 == .Plus and t6.isReg()) {
-                const disp = try dispFromNumToken(tokens[0]);
-                const scale = try scaleFromNumToken(tokens[1]);
+                const disp = try dispFromNumToken(tokens[0], program);
+                const scale = try scaleFromNumToken(tokens[1], program);
                 oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t6), .index = Register.init(t4), .scale = scale, .disp = disp } }, .size = null };
             } else if (t5 == .NotPresent) {
-                const disp = try dispFromNumToken(tokens[0]);
-                const scale = try scaleFromNumToken(tokens[1]);
+                const disp = try dispFromNumToken(tokens[0], program);
+                const scale = try scaleFromNumToken(tokens[1], program);
                 oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t4), .scale = scale, .disp = disp } }, .size = null };
             }
         } else if (t2 == .NotPresent) {
-            const disp = try dispFromNumToken(tokens[0]);
+            const disp = try dispFromNumToken(tokens[0], program);
             oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = null, .scale = null, .disp = disp } }, .size = null };
         }
     } else if (t1 == .PosNumLiteral or t1 == .NegNumLiteral) {
         if (t2 == .Plus) {
             if (t3.isReg()) {
                 if (t4 == .Asteriks and t5 == .NumberLiteral and t6 == .Plus and t7.isReg()) {
-                    const disp = try dispFromNumToken(tokens[0]);
-                    const scale = try scaleFromNumToken(tokens[4]);
+                    const disp = try dispFromNumToken(tokens[0], program);
+                    const scale = try scaleFromNumToken(tokens[4], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t7), .index = Register.init(t3), .scale = scale, .disp = disp } }, .size = null };
                 } else if (t4 == .NotPresent) {
-                    const disp = try dispFromNumToken(tokens[0]);
+                    const disp = try dispFromNumToken(tokens[0], program);
                     oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t3), .index = null, .scale = null, .disp = disp } }, .size = null };
                 }
             }
         } else if (t2 == .PosNumLiteral and t3 == .Asteriks and t4.isReg()) {
             if (t5 == .Plus and t6.isReg()) {
-                const disp = try dispFromNumToken(tokens[0]);
-                const scale = try scaleFromNumToken(tokens[1]);
+                const disp = try dispFromNumToken(tokens[0], program);
+                const scale = try scaleFromNumToken(tokens[1], program);
                 oper = MemOperand{ .mem = .{ .addr = .{ .base = Register.init(t6), .index = Register.init(t4), .scale = scale, .disp = disp } }, .size = null };
             } else if (t5 == .NotPresent) {
-                const disp = try dispFromNumToken(tokens[0]);
-                const scale = try scaleFromNumToken(tokens[1]);
+                const disp = try dispFromNumToken(tokens[0], program);
+                const scale = try scaleFromNumToken(tokens[1], program);
                 oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = Register.init(t4), .scale = scale, .disp = disp } }, .size = null };
             }
         } else if (t2 == .NotPresent) {
-            const disp = try dispFromNumToken(tokens[0]);
+            const disp = try dispFromNumToken(tokens[0], program);
             oper = MemOperand{ .mem = .{ .addr = .{ .base = null, .index = null, .scale = null, .disp = disp } }, .size = null };
         }
     } else if (t1 == .Ident) {
-        oper = MemOperand{ .mem = .{ .label = tokens[0].value.? }, .size = null };
+        oper = MemOperand{ .mem = .{ .label = tokens[0].value }, .size = null };
     }
 
+    const line = tokens[0].line;
     if (oper) |*operand| {
-        try checkMemoryOperand(operand);
+        try checkMemoryOperand(operand, program, line);
         return operand.*;
     } else {
-        return ParserError.InvalidOperand;
+        stdbuffers.printSourceError(program.file_name, "invalid operand", program.content, line);
+        return ParserError.ParsingFailed;
     }
 }
 
-fn parseOperand(tokens: []lexer.Token) !Operand {
+fn parseOperand(tokens: []lexer.Token, program: *Program) ParserError!Operand {
     var oper: Operand = undefined;
     const first = tokens[0];
     switch (tokens.len) {
@@ -709,18 +718,20 @@ fn parseOperand(tokens: []lexer.Token) !Operand {
             if (token.type.isReg()) {
                 oper = .{ .reg = Register.init(token.type) };
             } else if (token.type == .Ident) {
-                oper = .{ .label = token.value.? };
+                oper = .{ .label = token.value };
             } else if (token.type == .NumberLiteral or token.type == .NegNumLiteral or token.type == .PosNumLiteral) {
                 oper = .{ .imm = try immFromNumToken(token) };
             } else if (token.type == .StringLiteral) {
-                if (token.value.?.len == 1) {
-                    const value = token.value.?[0];
+                if (token.value.len == 1) {
+                    const value = token.value[0];
                     oper = .{ .imm = .{ .u = value } };
                 } else {
-                    return ParserError.InvalidStrLitLen;
+                    stdbuffers.printSourceError(program.file_name, "string literal operand must be 1 character long", program.content, token.line);
+                    return ParserError.ParsingFailed;
                 }
             } else {
-                return ParserError.InvalidOperand;
+                stdbuffers.printSourceError(program.file_name, "expected register, number or character", program.content, token.line);
+                return ParserError.ParsingFailed;
             }
         },
         else => {
@@ -728,7 +739,7 @@ fn parseOperand(tokens: []lexer.Token) !Operand {
             const last = tokens[tokens.len - 1];
             if (first.type.isPointerSize() and tokens.len > 3) {
                 if (second.type == .OpenBracket and last.type == .CloseBracket) {
-                    var mem_operand = try parseMemoryOperand(tokens[2 .. tokens.len - 1]);
+                    var mem_operand = try parseMemoryOperand(tokens[2 .. tokens.len - 1], program);
                     const ptr_size: u8 = switch (first.type) {
                         .P8 => 1,
                         .P16 => 2,
@@ -739,17 +750,20 @@ fn parseOperand(tokens: []lexer.Token) !Operand {
                     mem_operand.size = ptr_size;
                     oper = .{ .mem = mem_operand };
                 } else {
-                    return ParserError.InvalidOperand;
+                    stdbuffers.printSourceError(program.file_name, "expected operand in [] brackets", program.content, second.line);
+                    return ParserError.ParsingFailed;
                 }
             } else if (first.type == .OpenBracket and last.type == .CloseBracket) {
                 if (tokens.len > 2) {
-                    const mem_operand = try parseMemoryOperand(tokens[1 .. tokens.len - 1]);
+                    const mem_operand = try parseMemoryOperand(tokens[1 .. tokens.len - 1], program);
                     oper = .{ .mem = mem_operand };
                 } else {
-                    return ParserError.InvalidOperand;
+                    stdbuffers.printSourceError(program.file_name, "expected operand in [] brackets", program.content, first.line);
+                    return ParserError.ParsingFailed;
                 }
             } else {
-                return ParserError.InvalidOperand;
+                stdbuffers.printSourceError(program.file_name, "unexpected symbols", program.content, first.line);
+                return ParserError.ParsingFailed;
             }
         },
     }
@@ -758,31 +772,30 @@ fn parseOperand(tokens: []lexer.Token) !Operand {
 
 var instr_count: usize = 0;
 
-fn parseCodeInstruction(tokens: []lexer.Token, program: *object.Program) !void {
+fn parseCodeInstruction(tokens: []lexer.Token, program: *Program) ParserError!void {
     var instruction: CodeInstruction = undefined;
     if (tokens[0].type == .Ident) {
-        if (tokens[1].type == .Colon) {
-            const label = tokens[0].value.?;
-            // check if label is not in data section
-            if (program.data_section) |*data_section| {
-                const result = data_section.symbols.get(label);
-                if (result != null) {
-                    return ParserError.LabelAlreadyDefined;
-                }
-            }
-            // try to add to code symbols table
-            const result = try program.code_section.?.symbols.getOrPut(label);
+        if (tokens.len > 1 and tokens[1].type == .Colon) {
+            const label = tokens[0].value;
+
+            const result = try program.symbols.getOrPut(label);
             if (result.found_existing) {
-                return ParserError.LabelAlreadyDefined;
+                stdbuffers.printSourceErrorFormatted(program.file_name, "label '{s}' already defined in this file", .{label}, program.content, tokens[0].line);
+                return ParserError.ParsingFailed;
+            } else {
+                result.value_ptr.type = .Local;
+                result.value_ptr.section = .Code;
             }
 
-            instruction = .{ .label = label };
+            instruction = .{ .label = .{ .name = label, .line = tokens[0].line } };
             try program.code_section.?.instr.append(program.allocator, instruction);
         } else {
-            return ParserError.ExpectedColon;
+            stdbuffers.printSourceError(program.file_name, "expected ':'", program.content, tokens[0].line);
+            return ParserError.ParsingFailed;
         }
     } else if (tokens[0].type.isMnemonic()) {
-        instruction = .{ .cpu = .{ .mnem = tokens[0].type, .operands = .empty } };
+        instruction = .{ .cpu = .{ .mnem = tokens[0].type, .operands = .empty, .line = tokens[0].line } };
+        errdefer instruction.cpu.operands.deinit(program.allocator);
         var i: usize = 1;
         var operand_number: usize = 1;
         var oper_tokens: []lexer.Token = tokens[1..1];
@@ -793,16 +806,18 @@ fn parseCodeInstruction(tokens: []lexer.Token, program: *object.Program) !void {
                     oper_tokens.len += 1;
                 }
                 if (oper_tokens.len > 0) {
-                    const operand = try parseOperand(oper_tokens);
+                    const operand = try parseOperand(oper_tokens, program);
                     if (operand_number <= MAX_OPERAND_COUNT) {
                         try instruction.cpu.operands.append(program.allocator, operand);
                         operand_number += 1;
                         oper_tokens = tokens[i + 1 .. i + 1];
                     } else {
-                        return ParserError.TooManyOperands;
+                        stdbuffers.printSourceError(program.file_name, "too many operands for instruction", program.content, token.line);
+                        return ParserError.ParsingFailed;
                     }
                 } else {
-                    return ParserError.InvalidOperand;
+                    stdbuffers.printSourceError(program.file_name, "expected instruction operand", program.content, token.line);
+                    return ParserError.ParsingFailed;
                 }
             } else {
                 oper_tokens.len += 1;
@@ -810,28 +825,22 @@ fn parseCodeInstruction(tokens: []lexer.Token, program: *object.Program) !void {
         }
         try program.code_section.?.instr.append(program.allocator, instruction);
     } else {
-        return ParserError.UnexpectedSymbols;
+        stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, tokens[0].line);
+        return ParserError.ParsingFailed;
     }
 }
 
-fn parseCodeSection(tokens: []lexer.Token, program: *object.Program) !usize {
-    program.code_section = CodeSection.new(program.allocator);
+fn parseCodeSection(tokens: []lexer.Token, program: *Program) ParserError!usize {
+    program.code_section = CodeSection.new();
     const first = tokens[0];
-    program.code_section.?.flags = try parseSectionFlags(first);
+    program.code_section.?.flags = try parseSectionFlags(first, program);
     if (tokens[1].type == .NewLine) {
         var current_instruction: []lexer.Token = tokens[2..2];
         var i: usize = 2;
         while (i < tokens.len) : (i += 1) {
             const token = tokens[i];
             if (token.type == .NewLine) {
-                parseCodeInstruction(current_instruction, program) catch |err| {
-                    std.debug.print("Instruction {d} (", .{instr_count});
-                    for (current_instruction) |tok| {
-                        std.debug.print("{t} ", .{tok.type});
-                    }
-                    std.debug.print(") failed parsing\n", .{});
-                    return err;
-                };
+                try parseCodeInstruction(current_instruction, program);
                 instr_count += 1;
                 current_instruction.ptr = tokens[i + 1 .. i + 1].ptr;
                 current_instruction.len = 0;
@@ -842,34 +851,134 @@ fn parseCodeSection(tokens: []lexer.Token, program: *object.Program) !usize {
             }
         }
     } else {
-        return ParserError.UnexpectedSymbols;
+        stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, tokens[1].line);
+        return ParserError.ParsingFailed;
     }
     return tokens.len;
 }
 
-pub fn parseTokensToAST(program: *object.Program) !void {
+fn parseExportSection(tokens: []lexer.Token, program: *Program) ParserError!usize {
+    if (tokens[0].type != .NewLine) {
+        stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, tokens[0].line);
+        return ParserError.ParsingFailed;
+    }
+    var expect_symbol = true;
+    for (tokens[1..], 1..) |token, i| {
+        if (expect_symbol) {
+            if (token.type == .Ident) {
+                const result = try program.exports.getOrPut(token.value);
+                if (result.found_existing) {
+                    stdbuffers.printSourceErrorFormatted(program.file_name, "label '{s}' already defined in this file", .{token.value}, program.content, token.line);
+                    return ParserError.ParsingFailed;
+                }
+                expect_symbol = false;
+            } else if (token.type == .Section) {
+                return i;
+            } else {
+                stdbuffers.printSourceError(program.file_name, "expected label name", program.content, token.line);
+                return ParserError.ParsingFailed;
+            }
+        } else {
+            if (token.type == .Comma or token.type == .NewLine) {
+                expect_symbol = true;
+            } else if (token.type == .Section) {
+                return i;
+            } else {
+                stdbuffers.printSourceError(program.file_name, "expected ','", program.content, token.line);
+                return ParserError.ParsingFailed;
+            }
+        }
+    }
+    return tokens.len;
+}
+
+fn parseImportSection(tokens: []lexer.Token, program: *Program) !usize {
+    if (tokens[0].type != .NewLine) {
+        stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, tokens[0].line);
+        return ParserError.ParsingFailed;
+    }
+    var expect_symbol = true;
+    for (tokens[1..], 1..) |token, i| {
+        if (expect_symbol) {
+            if (token.type == .Ident) {
+                const result = try program.symbols.getOrPut(token.value);
+                if (result.found_existing) {
+                    stdbuffers.printSourceErrorFormatted(program.file_name, "label '{s}' already defined in this file", .{token.value}, program.content, token.line);
+                    return ParserError.ParsingFailed;
+                } else {
+                    result.value_ptr.section = .Undef;
+                    result.value_ptr.type = .Import;
+                    result.value_ptr.offset = 0;
+                }
+                expect_symbol = false;
+            } else if (token.type == .Section) {
+                return i;
+            } else {
+                stdbuffers.printSourceError(program.file_name, "expected label name", program.content, token.line);
+                return ParserError.ParsingFailed;
+            }
+        } else {
+            if (token.type == .Comma or token.type == .NewLine) {
+                expect_symbol = true;
+            } else if (token.type == .Section) {
+                return i;
+            } else {
+                stdbuffers.printSourceError(program.file_name, "expected ','", program.content, token.line);
+                return ParserError.ParsingFailed;
+            }
+        }
+    }
+    return tokens.len;
+}
+
+pub fn parseTokens(program: *Program) ParserError!void {
     var i: usize = 0;
     instr_count = 0;
+    var skip_entry = false;
+    var datsec_defined = false;
+    var codsec_defined = false;
     while (i < program.tokens.items.len) : (i += 1) {
         const token = program.tokens.items[i];
 
-        if (token.type == .Entry) {
+        if (token.type == .Entry and !skip_entry) {
             if (program.entry == null) {
                 try parseEntry(program.tokens.items[i + 1 ..], program);
                 i += 2;
             } else {
-                // error - second 'entry' keyword
+                stdbuffers.printSourceError(program.file_name, "entry label already defined in this file", program.content, token.line);
+                return ParserError.ParsingFailed;
             }
         } else if (token.type == .Section) {
+            skip_entry = true;
             if (program.tokens.items[i + 1].type == .Data) {
+                if (datsec_defined) {
+                    stdbuffers.printSourceError(program.file_name, "data section already present in this file", program.content, token.line);
+                    return ParserError.ParsingFailed;
+                }
                 const len = try parseDataSection(program.tokens.items[i + 2 ..], program);
                 i += (len + 1);
+                datsec_defined = true;
             } else if (program.tokens.items[i + 1].type == .Code) {
+                if (codsec_defined) {
+                    stdbuffers.printSourceError(program.file_name, "code section already present in this file", program.content, token.line);
+                    return ParserError.ParsingFailed;
+                }
                 const len = try parseCodeSection(program.tokens.items[i + 2 ..], program);
                 i += (len + 1);
+                codsec_defined = true;
+            } else if (program.tokens.items[i + 1].type == .Export) {
+                const len = try parseExportSection(program.tokens.items[i + 2 ..], program);
+                i += (len + 1);
+            } else if (program.tokens.items[i + 1].type == .Import) {
+                const len = try parseImportSection(program.tokens.items[i + 2 ..], program);
+                i += (len + 1);
             } else {
-                // error - unknown section type
+                stdbuffers.printSourceError(program.file_name, "unknown section type", program.content, token.line);
+                return ParserError.ParsingFailed;
             }
+        } else {
+            stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, token.line);
+            return ParserError.ParsingFailed;
         }
     }
 }
@@ -935,7 +1044,7 @@ pub fn printCPUInstruction(instr: CpuInstruction) void {
     }
 }
 
-pub fn printAST(program: *object.Program) void {
+pub fn printAST(program: *Program) void {
     if (program.entry) |entry| {
         std.debug.print("entry: {s}\n", .{entry});
     } else {
@@ -1008,24 +1117,24 @@ pub fn printAST(program: *object.Program) void {
     }
 }
 
-pub fn printSymbolTables(program: *object.Program) void {
+pub fn printSymbolTable(program: *Program) void {
     std.debug.print(" Symbols\n", .{});
-    if (program.data_section) |*data_section| {
-        // data section
-        std.debug.print("data section: \n", .{});
-        var iter = data_section.symbols.iterator();
-        while (iter.next()) |entry| {
-            std.debug.print(" {s}: {d} \n", .{ entry.key_ptr.*, entry.value_ptr.offset });
-        }
-        std.debug.print("\n", .{});
+    var iter = program.symbols.iterator();
+    while (iter.next()) |sym| {
+        std.debug.print("{s} {s} {s}: {d}\n", .{
+            switch (sym.value_ptr.section) {
+                .Code => " c",
+                .Data => "d ",
+                .Undef => "--",
+            },
+            switch (sym.value_ptr.type) {
+                .Local => "LOC",
+                .Export => "EXP",
+                .Import => "IMP",
+            },
+            sym.key_ptr.*,
+            sym.value_ptr.offset,
+        });
     }
-    if (program.code_section) |*code_section| {
-        // code section
-        std.debug.print("code section: \n", .{});
-        var iter = code_section.symbols.iterator();
-        while (iter.next()) |entry| {
-            std.debug.print(" {s}: {d} \n", .{ entry.key_ptr.*, entry.value_ptr.offset });
-        }
-        std.debug.print("\n", .{});
-    }
+    std.debug.print("\n", .{});
 }
