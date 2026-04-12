@@ -43,6 +43,7 @@ pub const TokenType = enum(u8) {
     Ja,
     Je,
     Jne,
+    Jnz,
     Jz,
     Jmp,
     Call,
@@ -275,6 +276,8 @@ fn analyzeWord(word: String, line: u16) Token {
         token_type = .Jne;
     } else if (word.is("ja")) {
         token_type = .Ja;
+    } else if (word.is("jnz")) {
+        token_type = .Jnz;
     } else if (word.is("jz")) {
         token_type = .Jz;
     } else if (word.is("call")) {
@@ -907,7 +910,14 @@ pub fn tokenizeContent(allocator: std.mem.Allocator, content: []const u8, file_n
             },
             ';' => {
                 switch (state) {
-                    .TopLevel => {},
+                    .TopLevel => {
+                        if (tokens.getLastOrNull()) |last| {
+                            if (last.type != .NewLine) {
+                                const newline = Token{ .type = .NewLine, .value = content[0..0], .line = line };
+                                try tokens.append(allocator, newline);
+                            }
+                        }
+                    },
                     .Word => {
                         const token = analyzeWord(word, line);
                         try tokens.append(allocator, token);

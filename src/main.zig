@@ -3,8 +3,10 @@ const builtin = @import("builtin");
 const cli = @import("cli");
 const assembler = @import("assembler");
 const stdbuffers = @import("stdbuffers");
+const linker = @import("linker");
 
 const Assembler = assembler.Assembler;
+const Linker = linker.Linker;
 
 fn startAASM() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
@@ -30,30 +32,43 @@ fn startAASM() !void {
         stdbuffers.printMessage("Help");
         return;
     } else if (cli_args.o) {
-        // Generate object files for each input file
+        // Generate object files data for each input source file
+        var object_files: std.ArrayList(Assembler) = .empty;
+        defer {
+            for (object_files.items) |*file| {
+                file.deinit();
+            }
+            object_files.deinit(allocator);
+        }
+
         for (cli_args.input_files.items) |input| {
             const abs_input = try cwd.realpathAlloc(allocator, input);
             defer allocator.free(abs_input);
             const input_name = std.fs.path.stem(abs_input);
-            if (cli_args.output_file.len == 0) {
-                var source = try Assembler.new(abs_input, input_name, allocator);
-                defer source.deinit();
 
-                try source.genObj();
-            }
+            var source = try Assembler.new(abs_input, input_name, allocator);
+            try source.genObj();
+            try object_files.append(allocator, source);
+            try source.writeObj();
         }
         switch (cli_args.format) {
             .Object => {
-                // Object files generated already, nothing to do next
+                // Object files data generated already, can create files
+                for (object_files.items) |*file| {
+                    try file.writeObj();
+                }
+            },
+            .Executable => {
+                // Linking object files data into one executable
+                var ld = Linker.new(allocator, object_files.items, cli_args.output_file);
+                defer ld.deinit();
+                try ld.linkExe();
             },
             .StaticArchive => {
                 // Archive object files with ar
             },
             .SharedObject => {
                 // Link object files with ld
-            },
-            .Executable => {
-                // Link object files with ld specifying entry symbol
             },
         }
     } else {

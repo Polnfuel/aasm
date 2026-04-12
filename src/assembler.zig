@@ -2,6 +2,7 @@ const std = @import("std");
 const LexerError = @import("lexer").LexerError;
 const ParserError = @import("parser").ParserError;
 const program = @import("program");
+const Program = program.Program;
 const stdbuffers = @import("stdbuffers");
 
 const elf = std.elf;
@@ -16,8 +17,8 @@ pub const ObjFile = struct {
     elf_header: elf.Elf64_Ehdr,
     text_section: ?elf.Elf64_Shdr,
     data_section: ?elf.Elf64_Shdr,
-    code_buffer: ?*std.ArrayList(u8),
-    data_buffer: ?*std.ArrayList(u8),
+    code_buffer: ?std.ArrayList(u8),
+    data_buffer: ?std.ArrayList(u8),
     shnstrtab: std.ArrayList(u8),
     strtab: std.ArrayList(u8),
     symtab: std.ArrayList(elf.Elf64_Sym),
@@ -53,29 +54,83 @@ pub const ObjFile = struct {
     }
 
     pub fn printStrTabSymTab(self: ObjFile) void {
-        std.debug.print(" Section Names Table \n", .{});
+        std.debug.print(" Section Names Table \n ", .{});
         for (self.shnstrtab.items) |str| {
             std.debug.print("{c}", .{if (str > 0) str else ' '});
         }
         std.debug.print("\n", .{});
 
-        std.debug.print(" Strings Table \n", .{});
+        std.debug.print(" Strings Table \n ", .{});
         for (self.strtab.items) |str| {
             std.debug.print("{c}", .{if (str > 0) str else ' '});
         }
         std.debug.print("\n", .{});
 
         std.debug.print(" Symbols Table \n", .{});
-        for (self.symtab.items) |symbol| {
-            std.debug.print("  stind: {d:3}   value: {d:5}   scind: {d:1}\n", .{ symbol.st_name, symbol.st_value, symbol.st_shndx });
+        std.debug.print("{s:>6}: {s:^16} {s:>5} {s:<7} {s:<6} {s:<7} {s:>4} \n", .{ "Num", "Value", "Size", "Type", "Link", "Vis", "Ind" });
+        for (self.symtab.items, 0..) |symbol, i| {
+            const sym_name: [*:0]u8 = @ptrCast(self.strtab.items[symbol.st_name..]);
+            const t = switch (symbol.st_type()) {
+                0 => "NOTYPE",
+                1 => "OBJECT",
+                2 => "FUNC",
+                3 => "SECTION",
+                4 => "FILE",
+                5 => "COMMON",
+                else => "",
+            };
+            const l = switch (symbol.st_bind()) {
+                0 => "LOCAL",
+                1 => "GLOBAL",
+                2 => "WEAK",
+                else => "",
+            };
+            const v = switch (symbol.st_other) {
+                0 => "DEFAULT",
+                1 => "INTERNAL",
+                2 => "HIDDEN",
+                3 => "PROTECTED",
+                else => "",
+            };
+            std.debug.print("{d:>6}: {x:0>16} {d:>5} {s:<7} {s:<6} {s:<7} {d:>4} {s:<}\n", .{ i, symbol.st_value, symbol.st_size, t, l, v, symbol.st_shndx, sym_name });
         }
 
-        std.debug.print("  Relocations Table \n", .{});
+        std.debug.print(" Relocations Table \n", .{});
+        std.debug.print("{s:^12}  {s:^12} {s:^16} {s:^16} {s:<} \n", .{ "Offset", "Info", "Type", "Value", "Name + Addend" });
         for (self.relatab.items) |rela| {
             const sym_name: [*:0]u8 = @ptrCast(self.strtab.items[self.symtab.items[rela.r_sym()].st_name..]);
-            std.debug.print(" symname: {s:15} type: {d:3} offset: {d:3}\n", .{ sym_name, rela.r_type(), rela.r_offset });
+            const t = switch (rela.r_type()) {
+                1 => "R_X86_64_64",
+                2 => "R_X86_64_PC32",
+                else => "",
+            };
+            std.debug.print("{x:0>12}  {x:0>12} {s:<17} {x:0>16} {s:<} {s} {d} \n", .{
+                rela.r_offset,
+                rela.r_info,
+                t,
+                self.symtab.items[rela.r_sym()].st_value,
+                sym_name,
+                if (rela.r_addend < 0) "-" else "+",
+                @abs(rela.r_addend),
+            });
         }
         std.debug.print("\n", .{});
+    }
+};
+
+const AsmFlags = packed struct {
+    text: bool,
+    data: bool,
+    symbols: bool,
+    relocations: bool,
+
+    pub fn new() AsmFlags {
+        return AsmFlags{
+            .text = false,
+            .data = false,
+            .symbols = false,
+            .relocations = false,
+        };
     }
 };
 
@@ -84,6 +139,9 @@ pub const Assembler = struct {
     allocator: std.mem.Allocator,
     program: program.Program,
     objfile: ObjFile,
+
+    flags: AsmFlags,
+    file_size: usize,
 
     fn loadFromFile(self: *Assembler, input_file: []const u8) LoadFileError![]const u8 {
         const file = try std.fs.openFileAbsolute(input_file, .{ .mode = .read_only });
@@ -109,13 +167,16 @@ pub const Assembler = struct {
 
     pub fn new(input_abs_path: []const u8, output_name: []const u8, allocator: std.mem.Allocator) LoadFileError!Assembler {
         var assembler = Assembler{
-            .output_file = output_name,
+            .output_file = undefined,
             .allocator = allocator,
             .program = undefined,
             .objfile = ObjFile.new(),
+            .flags = AsmFlags.new(),
+            .file_size = 0,
         };
+        assembler.output_file = try assembler.allocator.dupe(u8, output_name);
         const content = try assembler.loadFromFile(input_abs_path);
-        assembler.program = program.Program.new(std.fs.path.basename(input_abs_path), content, assembler.allocator);
+        assembler.program = try Program.new(std.fs.path.basename(input_abs_path), content, assembler.allocator);
         return assembler;
     }
 
@@ -141,7 +202,7 @@ pub const Assembler = struct {
             .sh_size = undefined,
             .sh_link = 0,
             .sh_info = 0,
-            .sh_addralign = 0,
+            .sh_addralign = 1,
             .sh_entsize = 0,
         };
 
@@ -152,7 +213,7 @@ pub const Assembler = struct {
 
         str_start = strtab_size;
         if (self.program.code_section) |*code_section| {
-            self.objfile.code_buffer = &code_section.buffer;
+            self.objfile.code_buffer = code_section.buffer;
             self.objfile.text_section = elf.Elf64_Shdr{
                 .sh_name = shnstrtab_size,
                 .sh_type = elf.SHT_PROGBITS,
@@ -162,7 +223,7 @@ pub const Assembler = struct {
                 .sh_size = self.objfile.code_buffer.?.items.len * @sizeOf(u8),
                 .sh_link = 0,
                 .sh_info = 0,
-                .sh_addralign = 0x40,
+                .sh_addralign = 0x8,
                 .sh_entsize = 0,
             };
             try self.objfile.shnstrtab.appendSlice(self.allocator, @ptrCast(".text"));
@@ -186,7 +247,7 @@ pub const Assembler = struct {
 
         str_start = strtab_size;
         if (self.program.data_section) |*data_section| {
-            self.objfile.data_buffer = &data_section.buffer;
+            self.objfile.data_buffer = data_section.buffer;
             self.objfile.data_section = elf.Elf64_Shdr{
                 .sh_name = shnstrtab_size,
                 .sh_type = elf.SHT_PROGBITS,
@@ -196,7 +257,7 @@ pub const Assembler = struct {
                 .sh_size = self.objfile.data_buffer.?.items.len * @sizeOf(u8),
                 .sh_link = 0,
                 .sh_info = 0,
-                .sh_addralign = 0x40,
+                .sh_addralign = 0x8,
                 .sh_entsize = 0,
             };
             try self.objfile.shnstrtab.appendSlice(self.allocator, @ptrCast(".data"));
@@ -335,7 +396,7 @@ pub const Assembler = struct {
                 .sh_size = self.objfile.strtab.items.len * @sizeOf(u8),
                 .sh_link = 0,
                 .sh_info = 0,
-                .sh_addralign = 0,
+                .sh_addralign = 1,
                 .sh_entsize = 0,
             };
 
@@ -352,7 +413,7 @@ pub const Assembler = struct {
                 .sh_size = self.objfile.symtab.items.len * @sizeOf(elf.Elf64_Sym),
                 .sh_link = undefined,
                 .sh_info = @truncate(first_global),
-                .sh_addralign = 0,
+                .sh_addralign = 1,
                 .sh_entsize = @sizeOf(elf.Elf64_Sym),
             };
 
@@ -371,7 +432,7 @@ pub const Assembler = struct {
                 .sh_size = self.objfile.relatab.items.len * @sizeOf(elf.Elf64_Rela),
                 .sh_link = undefined,
                 .sh_info = undefined,
-                .sh_addralign = 0,
+                .sh_addralign = 1,
                 .sh_entsize = @sizeOf(elf.Elf64_Rela),
             };
 
@@ -410,29 +471,29 @@ pub const Assembler = struct {
         try self.defineObjFileTables();
         // self.objfile.printStrTabSymTab();
 
-        const with_text = if (self.objfile.text_section != null) true else false;
-        const with_data = if (self.objfile.data_section != null) true else false;
-        const with_symbols = if (self.objfile.symtab.items.len > 1) true else false;
-        const with_relocations = if (self.objfile.relatab.items.len > 0) true else false;
+        self.flags.text = if (self.objfile.text_section != null) true else false;
+        self.flags.data = if (self.objfile.data_section != null) true else false;
+        self.flags.symbols = if (self.objfile.symtab.items.len > 1) true else false;
+        self.flags.relocations = if (self.objfile.relatab.items.len > 0) true else false;
 
         var text_index: u16 = 0;
-        if (with_text) text_index += 1;
+        if (self.flags.text) text_index += 1;
         var data_index: u16 = text_index;
-        if (with_data) data_index += 1;
+        if (self.flags.data) data_index += 1;
 
         const shstrtab_index: u16 = data_index + 1;
         var strtab_index: u16 = shstrtab_index;
         var symtab_index: u16 = shstrtab_index;
-        if (with_symbols) {
+        if (self.flags.symbols) {
             strtab_index = shstrtab_index + 1;
             symtab_index = strtab_index + 1;
         }
         var relatext_index: u16 = symtab_index;
-        if (with_relocations) {
+        if (self.flags.relocations) {
             relatext_index = symtab_index + 1;
         }
 
-        var file_pos: usize = 0;
+        self.file_size = 0;
 
         // Elf Header
         self.objfile.elf_header = elf.Elf64_Ehdr{
@@ -452,71 +513,73 @@ pub const Assembler = struct {
             .e_shstrndx = shstrtab_index,
         };
 
-        file_pos += self.objfile.elf_header.e_ehsize;
-        self.objfile.elf_header.e_shoff = file_pos;
+        self.file_size += self.objfile.elf_header.e_ehsize;
+        self.objfile.elf_header.e_shoff = self.file_size;
 
         // Section Header Table Entry 0
-        file_pos += self.objfile.elf_header.e_shentsize;
+        self.file_size += self.objfile.elf_header.e_shentsize;
 
         // Section Header Table Entry 1 - .text
-        if (with_text) {
-            file_pos += self.objfile.elf_header.e_shentsize;
+        if (self.flags.text) {
+            self.file_size += self.objfile.elf_header.e_shentsize;
         }
 
         // Section Header Table Entry 2 - .data
-        if (with_data) {
-            file_pos += self.objfile.elf_header.e_shentsize;
+        if (self.flags.data) {
+            self.file_size += self.objfile.elf_header.e_shentsize;
         }
 
         // Section Header Table Entry 3 - .shstrtab
-        file_pos += self.objfile.elf_header.e_shentsize;
+        self.file_size += self.objfile.elf_header.e_shentsize;
 
         // Section Header Table Entry 4-5 - .strtab and .symtab
-        if (with_symbols) {
-            file_pos += self.objfile.elf_header.e_shentsize;
-            file_pos += self.objfile.elf_header.e_shentsize;
+        if (self.flags.symbols) {
+            self.file_size += self.objfile.elf_header.e_shentsize;
+            self.file_size += self.objfile.elf_header.e_shentsize;
         }
 
         // Section Header Table Entry 5 - .rela.text
-        if (with_relocations) {
-            file_pos += self.objfile.elf_header.e_shentsize;
+        if (self.flags.relocations) {
+            self.file_size += self.objfile.elf_header.e_shentsize;
         }
 
-        // now file_pos is first byte after Section Header Table
+        // now self.file_size is first byte after Section Header Table
 
         // Code buffer
-        if (with_text) {
-            self.objfile.text_section.?.sh_offset = file_pos;
-            file_pos += self.objfile.text_section.?.sh_size;
+        if (self.flags.text) {
+            self.objfile.text_section.?.sh_offset = self.file_size;
+            self.file_size += self.objfile.text_section.?.sh_size;
         }
         // Data buffer
-        if (with_data) {
-            self.objfile.data_section.?.sh_offset = file_pos;
-            file_pos += self.objfile.data_section.?.sh_size;
+        if (self.flags.data) {
+            self.objfile.data_section.?.sh_offset = self.file_size;
+            self.file_size += self.objfile.data_section.?.sh_size;
         }
         // Section Name String Table buffer
-        self.objfile.shnstrtab_section.sh_offset = file_pos;
-        file_pos += self.objfile.shnstrtab_section.sh_size;
+        self.objfile.shnstrtab_section.sh_offset = self.file_size;
+        self.file_size += self.objfile.shnstrtab_section.sh_size;
         // String Table and Symbol Table buffers
-        if (with_symbols) {
-            self.objfile.strtab_section.?.sh_offset = file_pos;
-            file_pos += self.objfile.strtab_section.?.sh_size;
+        if (self.flags.symbols) {
+            self.objfile.strtab_section.?.sh_offset = self.file_size;
+            self.file_size += self.objfile.strtab_section.?.sh_size;
 
-            self.objfile.symtab_section.?.sh_offset = file_pos;
-            file_pos += self.objfile.symtab_section.?.sh_size;
+            self.objfile.symtab_section.?.sh_offset = self.file_size;
+            self.file_size += self.objfile.symtab_section.?.sh_size;
 
             self.objfile.symtab_section.?.sh_link = strtab_index;
         }
         // Relocation Table buffer
-        if (with_relocations) {
-            self.objfile.relatab_section.?.sh_offset = file_pos;
-            file_pos += self.objfile.relatab_section.?.sh_size;
+        if (self.flags.relocations) {
+            self.objfile.relatab_section.?.sh_offset = self.file_size;
+            self.file_size += self.objfile.relatab_section.?.sh_size;
 
             self.objfile.relatab_section.?.sh_link = symtab_index;
             self.objfile.relatab_section.?.sh_info = text_index;
         }
+    }
 
-        const file_buffer = try self.allocator.alloc(u8, file_pos);
+    fn writeObjectFile(self: *const Assembler) !void {
+        const file_buffer = try self.allocator.alloc(u8, self.file_size);
         defer self.allocator.free(file_buffer);
 
         const cwd = std.fs.cwd();
@@ -543,33 +606,33 @@ pub const Assembler = struct {
             .sh_offset = 0,
             .sh_size = 0,
         });
-        if (with_text) {
+        if (self.flags.text) {
             try Assembler.writeElf64_Shdr(writer, &self.objfile.text_section.?);
         }
-        if (with_data) {
+        if (self.flags.data) {
             try Assembler.writeElf64_Shdr(writer, &self.objfile.data_section.?);
         }
         try Assembler.writeElf64_Shdr(writer, &self.objfile.shnstrtab_section);
-        if (with_symbols) {
+        if (self.flags.symbols) {
             try Assembler.writeElf64_Shdr(writer, &self.objfile.strtab_section.?);
             try Assembler.writeElf64_Shdr(writer, &self.objfile.symtab_section.?);
         }
-        if (with_relocations) {
+        if (self.flags.relocations) {
             try Assembler.writeElf64_Shdr(writer, &self.objfile.relatab_section.?);
         }
 
-        if (with_text) {
+        if (self.flags.text) {
             _ = try writer.write(self.objfile.code_buffer.?.items);
         }
-        if (with_data) {
+        if (self.flags.data) {
             _ = try writer.write(self.objfile.data_buffer.?.items);
         }
         _ = try writer.write(self.objfile.shnstrtab.items);
-        if (with_symbols) {
+        if (self.flags.symbols) {
             _ = try writer.write(self.objfile.strtab.items);
             try Assembler.writeSymbolsBuffer(writer, self.objfile.symtab.items);
         }
-        if (with_relocations) {
+        if (self.flags.relocations) {
             try Assembler.writeRelocationsBuffer(writer, self.objfile.relatab.items);
         }
 
@@ -584,11 +647,16 @@ pub const Assembler = struct {
         try self.program.defineExportLabels();
         try self.program.genDataCodeBuffers();
 
-        // Create object file from program data
+        // Create object file data from program data
         try self.genObjectFile();
     }
 
+    pub fn writeObj(self: *Assembler) AssemblerError!void {
+        try self.writeObjectFile();
+    }
+
     pub fn deinit(self: *Assembler) void {
+        self.allocator.free(self.output_file);
         self.program.deinit();
         self.objfile.deinit(self.allocator);
     }

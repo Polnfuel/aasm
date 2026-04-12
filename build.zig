@@ -94,6 +94,16 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const linker = b.addModule("linker", .{
+        .root_source_file = b.path("src/linker.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "assembler", .module = assembler },
+            .{ .name = "stdbuffers", .module = buffers },
+        },
+    });
+
     const main_module = b.addModule("main", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -102,6 +112,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "cli", .module = cliparser },
             .{ .name = "assembler", .module = assembler },
             .{ .name = "stdbuffers", .module = buffers },
+            .{ .name = "linker", .module = linker },
         },
     });
 
@@ -126,7 +137,13 @@ pub fn build(b: *std.Build) void {
 
     const inst1 = b.addInstallFile(b.path("test-asm/long.asm"), "bin/long.asm");
     const inst2 = b.addInstallFile(b.path("test-asm/print.asm"), "bin/print.asm");
+    const inst3 = b.addInstallFile(b.path("test-asm/main.asm"), "bin/main.asm");
+    const inst4 = b.addInstallFile(b.path("test-asm/parse.asm"), "bin/parse.asm");
+    const inst5 = b.addInstallFile(b.path("test-asm/printf.asm"), "bin/printf.asm");
     const install_step = b.getInstallStep();
     install_step.dependOn(&inst1.step);
     install_step.dependOn(&inst2.step);
+    install_step.dependOn(&inst3.step);
+    install_step.dependOn(&inst4.step);
+    install_step.dependOn(&inst5.step);
 }

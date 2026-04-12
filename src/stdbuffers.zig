@@ -78,7 +78,7 @@ fn panicInternalError(err: anyerror) void {
 
 pub fn handleError(err: anyerror) void {
     switch (err) {
-        error.CliParseFailed, error.LexerAnalyzisFailed, error.ParsingFailed, error.DataGenFailed, error.CodeGenFailed, error.ProgramFailed, error.ObjectError => {
+        error.CliParseFailed, error.LexerAnalyzisFailed, error.ParsingFailed, error.DataGenFailed, error.CodeGenFailed, error.ProgramFailed, error.ObjectError, error.LinkingFailed => {
             std.process.exit(1);
         },
         else => {

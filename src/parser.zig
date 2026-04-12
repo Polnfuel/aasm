@@ -770,8 +770,6 @@ fn parseOperand(tokens: []lexer.Token, program: *Program) ParserError!Operand {
     return oper;
 }
 
-var instr_count: usize = 0;
-
 fn parseCodeInstruction(tokens: []lexer.Token, program: *Program) ParserError!void {
     var instruction: CodeInstruction = undefined;
     if (tokens[0].type == .Ident) {
@@ -841,7 +839,6 @@ fn parseCodeSection(tokens: []lexer.Token, program: *Program) ParserError!usize 
             const token = tokens[i];
             if (token.type == .NewLine) {
                 try parseCodeInstruction(current_instruction, program);
-                instr_count += 1;
                 current_instruction.ptr = tokens[i + 1 .. i + 1].ptr;
                 current_instruction.len = 0;
             } else if (token.type == .Section) {
@@ -933,7 +930,6 @@ fn parseImportSection(tokens: []lexer.Token, program: *Program) !usize {
 
 pub fn parseTokens(program: *Program) ParserError!void {
     var i: usize = 0;
-    instr_count = 0;
     var skip_entry = false;
     var datsec_defined = false;
     var codsec_defined = false;
@@ -956,6 +952,9 @@ pub fn parseTokens(program: *Program) ParserError!void {
                     return ParserError.ParsingFailed;
                 }
                 const len = try parseDataSection(program.tokens.items[i + 2 ..], program);
+                if (program.data_section.?.instr.items.len == 0) {
+                    program.data_section = null;
+                }
                 i += (len + 1);
                 datsec_defined = true;
             } else if (program.tokens.items[i + 1].type == .Code) {
@@ -964,6 +963,9 @@ pub fn parseTokens(program: *Program) ParserError!void {
                     return ParserError.ParsingFailed;
                 }
                 const len = try parseCodeSection(program.tokens.items[i + 2 ..], program);
+                if (program.code_section.?.instr.items.len == 0) {
+                    program.code_section = null;
+                }
                 i += (len + 1);
                 codsec_defined = true;
             } else if (program.tokens.items[i + 1].type == .Export) {

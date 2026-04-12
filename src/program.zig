@@ -19,9 +19,9 @@ pub const Program = struct {
     exports: std.StringHashMap(void),
     allocator: std.mem.Allocator,
 
-    pub fn new(file_name: []const u8, content: []const u8, allocator: std.mem.Allocator) Program {
-        const program = Program{
-            .file_name = file_name,
+    pub fn new(file_name: []const u8, content: []const u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!Program {
+        var program = Program{
+            .file_name = undefined,
             .content = content,
             .tokens = .empty,
             .entry = null,
@@ -31,6 +31,7 @@ pub const Program = struct {
             .exports = std.StringHashMap(void).init(allocator),
             .allocator = allocator,
         };
+        program.file_name = try program.allocator.dupe(u8, file_name);
         return program;
     }
 
@@ -93,6 +94,7 @@ pub const Program = struct {
     }
 
     pub fn deinit(self: *Program) void {
+        self.allocator.free(self.file_name);
         self.allocator.free(self.content);
         self.tokens.deinit(self.allocator);
         if (self.data_section) |*data_section| {

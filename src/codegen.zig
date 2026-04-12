@@ -77,6 +77,7 @@ const InternalError = error{
     UnspecifiedMemoryPointerSize,
     WrongMemoryPointerSize,
     WrongRegisterSize,
+    UnsupportedInstruction,
 } || std.mem.Allocator.Error;
 
 const ModRmByte = packed struct {
@@ -837,7 +838,7 @@ fn immEncoding(opcode: u8, imm: parser.Operand, sizes_mask: u4, discard_os: bool
         },
         else => unreachable,
     }
-    if (imm_size % sizes_mask == imm_size) {
+    if (imm_size & sizes_mask == imm_size) {
         if (!discard_os and imm_size == 2) {
             try gen.section.buffer.append(gen.allocator, 0x66);
         }
@@ -873,20 +874,19 @@ fn zeroEncoding(opcode_bytes: []const u8) std.mem.Allocator.Error!void {
     try gen.section.buffer.appendSlice(gen.allocator, opcode_bytes);
 }
 
-fn syscall(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 0) {
+fn syscall(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 0) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const buffer: [2]u8 = .{ 0x0F, 0x05 };
-    try zeroEncoding(buffer[0..]);
+    try zeroEncoding(&.{ 0x0F, 0x05 });
 }
 
-fn mov(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 2) {
+fn mov(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 2) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const first = instr.operands.items[0];
-    const second = instr.operands.items[1];
+    const first = operands.items[0];
+    const second = operands.items[1];
     switch (first) {
         .reg => {
             switch (second) {
@@ -935,11 +935,11 @@ fn mov(instr: parser.CpuInstruction) InternalError!void {
     }
 }
 
-fn push(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 1) {
+fn push(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 1) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const first = instr.operands.items[0];
+    const first = operands.items[0];
     switch (first) {
         .reg => {
             const opcode: u8 = 0x50;
@@ -957,11 +957,11 @@ fn push(instr: parser.CpuInstruction) InternalError!void {
     }
 }
 
-fn pop(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 1) {
+fn pop(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 1) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const first = instr.operands.items[0];
+    const first = operands.items[0];
     switch (first) {
         .reg => {
             const opcode: u8 = 0x58;
@@ -977,11 +977,11 @@ fn pop(instr: parser.CpuInstruction) InternalError!void {
     }
 }
 
-fn inc(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 1) {
+fn inc(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 1) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const first = instr.operands.items[0];
+    const first = operands.items[0];
     var opcode: u8 = undefined;
     switch (first) {
         .reg => {
@@ -998,11 +998,11 @@ fn inc(instr: parser.CpuInstruction) InternalError!void {
     try memEncoding(first, opcode, 0, 0b1111, false);
 }
 
-fn dec(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 1) {
+fn dec(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 1) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const first = instr.operands.items[0];
+    const first = operands.items[0];
     var opcode: u8 = undefined;
     switch (first) {
         .reg => {
@@ -1019,12 +1019,12 @@ fn dec(instr: parser.CpuInstruction) InternalError!void {
     try memEncoding(first, opcode, 1, 0b1111, false);
 }
 
-fn lea(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 2) {
+fn lea(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 2) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const first = instr.operands.items[0];
-    const second = instr.operands.items[1];
+    const first = operands.items[0];
+    const second = operands.items[1];
     switch (first) {
         .reg => {
             switch (second) {
@@ -1043,11 +1043,11 @@ fn lea(instr: parser.CpuInstruction) InternalError!void {
     }
 }
 
-fn div(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 1) {
+fn div(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 1) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const first = instr.operands.items[0];
+    const first = operands.items[0];
 
     var opcode: u8 = undefined;
     switch (first) {
@@ -1065,12 +1065,12 @@ fn div(instr: parser.CpuInstruction) InternalError!void {
     try memEncoding(first, opcode, 6, 0b1111, false);
 }
 
-fn testi(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 2) {
+fn testi(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 2) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const first = instr.operands.items[0];
-    const second = instr.operands.items[1];
+    const first = operands.items[0];
+    const second = operands.items[1];
     switch (second) {
         .imm => {
             switch (first) {
@@ -1115,12 +1115,12 @@ fn testi(instr: parser.CpuInstruction) InternalError!void {
     }
 }
 
-fn add(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 2) {
+fn add(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 2) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const first = instr.operands.items[0];
-    const second = instr.operands.items[1];
+    const first = operands.items[0];
+    const second = operands.items[1];
     switch (first) {
         .reg => {
             switch (second) {
@@ -1190,12 +1190,12 @@ fn add(instr: parser.CpuInstruction) InternalError!void {
     }
 }
 
-fn xor(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 2) {
+fn xor(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 2) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const first = instr.operands.items[0];
-    const second = instr.operands.items[1];
+    const first = operands.items[0];
+    const second = operands.items[1];
     switch (first) {
         .reg => {
             switch (second) {
@@ -1265,11 +1265,11 @@ fn xor(instr: parser.CpuInstruction) InternalError!void {
     }
 }
 
-fn jmp(instr: parser.CpuInstruction) InternalError!void {
-    if (instr.operands.items.len != 1) {
+fn jmp(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 1) {
         return InternalError.InvalidNumberOfOperands;
     }
-    const first = instr.operands.items[0];
+    const first = operands.items[0];
     switch (first) {
         .reg, .mem => {
             const opcode: u8 = 0xFF;
@@ -1287,7 +1287,7 @@ fn jmp(instr: parser.CpuInstruction) InternalError!void {
     }
 }
 
-fn jcc(instr: parser.CpuInstruction, mnem: lexer.TokenType) InternalError!void {
+fn jcc(instr: parser.CpuInstruction) InternalError!void {
     if (instr.operands.items.len != 1) {
         return InternalError.InvalidNumberOfOperands;
     }
@@ -1295,10 +1295,10 @@ fn jcc(instr: parser.CpuInstruction, mnem: lexer.TokenType) InternalError!void {
     switch (first) {
         .label => {
             const opcode_pref: u8 = 0x0F;
-            const opcode: u8 = switch (mnem) {
+            const opcode: u8 = switch (instr.mnem) {
                 .Ja => 0x87,
                 .Je, .Jz => 0x84,
-                .Jne => 0x85,
+                .Jne, .Jnz => 0x85,
                 else => {
                     return InternalError.InvalidOperand;
                 },
@@ -1314,7 +1314,126 @@ fn jcc(instr: parser.CpuInstruction, mnem: lexer.TokenType) InternalError!void {
     }
 }
 
-var peek: usize = 0;
+fn call(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 1) {
+        return InternalError.InvalidNumberOfOperands;
+    }
+    const first = operands.items[0];
+    switch (first) {
+        .reg, .mem => {
+            const opcode: u8 = 0xFF;
+            try memEncoding(first, opcode, 2, 0b1000, true);
+        },
+        .label => {
+            const opcode: u8 = 0xE8;
+            try gen.section.buffer.append(gen.allocator, opcode);
+            try gen.addImmediate(.{ .u = 0 }, 4);
+            try gen.addRelocation(first.label, .Rel32C, 0);
+        },
+        else => {
+            return InternalError.InvalidOperand;
+        },
+    }
+}
+
+fn ret(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len == 0) {
+        try zeroEncoding(&.{0xC3});
+    } else if (operands.items.len == 1) {
+        const oper = operands.items[0];
+        switch (oper) {
+            .imm => {
+                const imm_size = parser.immMinSize(oper.imm);
+                if (imm_size <= 2) {
+                    try zeroEncoding(&.{0xC2});
+                    try gen.addImmediate(oper.imm, 2);
+                } else {
+                    return InternalError.ImmValueIsTooLarge;
+                }
+            },
+            else => {
+                return InternalError.InvalidOperand;
+            },
+        }
+    } else {
+        return InternalError.InvalidNumberOfOperands;
+    }
+}
+
+fn cmp(operands: std.ArrayList(parser.Operand)) InternalError!void {
+    if (operands.items.len != 2) {
+        return InternalError.InvalidNumberOfOperands;
+    }
+    const first = operands.items[0];
+    const second = operands.items[1];
+    switch (first) {
+        .reg => {
+            switch (second) {
+                .reg => {
+                    const opcode: u8 = if (first.reg.size == 1) 0x38 else 0x39;
+                    try memRegEncoding(first, second.reg, opcode);
+                },
+                .mem => {
+                    const opcode: u8 = if (first.reg.size == 1) 0x3A else 0x3B;
+                    try regMemEncoding(first.reg, second, opcode, 0b1111);
+                },
+                .imm => {
+                    if (first.reg.name.isAccumulator()) {
+                        const opcode: u8 = if (first.reg.name == .Al) 0x3C else 0x3D;
+                        try accImmEncoding(first.reg, opcode, second.imm);
+                    } else {
+                        const reg_size = first.reg.size;
+                        const imm_size = parser.immMinSize(second.imm);
+                        if (imm_size == 1 and reg_size > 1) {
+                            const opcode: u8 = 0x83;
+                            try memImmEncodingG2(first, opcode, 7, second.imm);
+                        } else {
+                            const opcode: u8 = if (reg_size == 1) 0x80 else 0x81;
+                            try memImmEncodingG1(first, opcode, 7, second.imm);
+                        }
+                    }
+                },
+                .label => {
+                    return InternalError.InvalidOperand;
+                },
+            }
+        },
+        .mem => {
+            switch (second) {
+                .reg => {
+                    const opcode: u8 = if (second.reg.size == 1) 0x38 else 0x39;
+                    try memRegEncoding(first, second.reg, opcode);
+                },
+                .imm => {
+                    var ptr_size: u8 = undefined;
+                    if (first.mem.size) |size| {
+                        ptr_size = size;
+                    } else {
+                        return InternalError.UnspecifiedMemoryPointerSize;
+                    }
+                    const imm_size = parser.immMinSize(second.imm);
+                    if (imm_size == 1 and ptr_size > 1) {
+                        const opcode: u8 = 0x83;
+                        try memImmEncodingG2(first, opcode, 7, second.imm);
+                    } else {
+                        const opcode: u8 = if (ptr_size == 1) 0x80 else 0x81;
+                        try memImmEncodingG1(first, opcode, 7, second.imm);
+                    }
+                },
+                .label => {
+                    // not supported for now
+                    return InternalError.InvalidOperand;
+                },
+                .mem => {
+                    return InternalError.InvalidOperand;
+                },
+            }
+        },
+        else => {
+            return InternalError.InvalidOperand;
+        },
+    }
+}
 
 fn genInstruction(instruction: parser.CodeInstruction, program: *Program) InternalError!void {
     switch (instruction) {
@@ -1335,46 +1454,55 @@ fn genInstruction(instruction: parser.CodeInstruction, program: *Program) Intern
         .cpu => {
             switch (instruction.cpu.mnem) {
                 .Mov => {
-                    try mov(instruction.cpu);
+                    try mov(instruction.cpu.operands);
                 },
                 .Xor => {
-                    try xor(instruction.cpu);
+                    try xor(instruction.cpu.operands);
                 },
                 .Add => {
-                    try add(instruction.cpu);
+                    try add(instruction.cpu.operands);
                 },
                 .Inc => {
-                    try inc(instruction.cpu);
+                    try inc(instruction.cpu.operands);
                 },
                 .Dec => {
-                    try dec(instruction.cpu);
+                    try dec(instruction.cpu.operands);
                 },
-                .Ja, .Je, .Jne, .Jz => {
-                    try jcc(instruction.cpu, instruction.cpu.mnem);
+                .Ja, .Je, .Jne, .Jnz, .Jz => {
+                    try jcc(instruction.cpu);
                 },
                 .Syscall => {
-                    try syscall(instruction.cpu);
+                    try syscall(instruction.cpu.operands);
                 },
                 .Div => {
-                    try div(instruction.cpu);
+                    try div(instruction.cpu.operands);
                 },
                 .Test => {
-                    try testi(instruction.cpu);
+                    try testi(instruction.cpu.operands);
                 },
                 .Lea => {
-                    try lea(instruction.cpu);
+                    try lea(instruction.cpu.operands);
                 },
                 .Push => {
-                    try push(instruction.cpu);
+                    try push(instruction.cpu.operands);
                 },
                 .Pop => {
-                    try pop(instruction.cpu);
+                    try pop(instruction.cpu.operands);
                 },
                 .Jmp => {
-                    try jmp(instruction.cpu);
+                    try jmp(instruction.cpu.operands);
+                },
+                .Call => {
+                    try call(instruction.cpu.operands);
+                },
+                .Ret => {
+                    try ret(instruction.cpu.operands);
+                },
+                .Cmp => {
+                    try cmp(instruction.cpu.operands);
                 },
                 else => {
-                    //
+                    return InternalError.UnsupportedInstruction;
                 },
             }
         },
@@ -1417,6 +1545,9 @@ pub fn bufferizeCodeSection(program: *Program) CodegenError!void {
                 },
                 InternalError.WrongRegisterSize => {
                     stdbuffers.printSourceError(program.file_name, "wrong register size", program.content, line);
+                },
+                InternalError.UnsupportedInstruction => {
+                    stdbuffers.printSourceError(program.file_name, "unsupported cpu instruction", program.content, line);
                 },
             }
             return CodegenError.CodeGenFailed;
