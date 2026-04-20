@@ -6,28 +6,28 @@ const stdbuffers = @import("stdbuffers");
 
 fn regCode(reg: lexer.TokenType) u3 {
     switch (reg) {
-        .Rax, .Eax, .Ax, .Al, .R8, .R8d, .R8w, .R8b => {
+        .rax, .eax, .ax, .al, .r8, .r8d, .r8w, .r8b => {
             return 0b000;
         },
-        .Rcx, .Ecx, .Cx, .Cl, .R9, .R9d, .R9w, .R9b => {
+        .rcx, .ecx, .cx, .cl, .r9, .r9d, .r9w, .r9b => {
             return 0b001;
         },
-        .Rdx, .Edx, .Dx, .Dl, .R10, .R10d, .R10w, .R10b => {
+        .rdx, .edx, .dx, .dl, .r10, .r10d, .r10w, .r10b => {
             return 0b010;
         },
-        .Rbx, .Ebx, .Bx, .Bl, .R11, .R11d, .R11w, .R11b => {
+        .rbx, .ebx, .bx, .bl, .r11, .r11d, .r11w, .r11b => {
             return 0b011;
         },
-        .Rsp, .Esp, .Sp, .Ah, .R12, .R12d, .R12w, .R12b => {
+        .rsp, .esp, .sp, .ah, .r12, .r12d, .r12w, .r12b => {
             return 0b100;
         },
-        .Rbp, .Ebp, .Bp, .Ch, .R13, .R13d, .R13w, .R13b => {
+        .rbp, .ebp, .bp, .ch, .r13, .r13d, .r13w, .r13b => {
             return 0b101;
         },
-        .Rsi, .Esi, .Si, .Dh, .R14, .R14d, .R14w, .R14b => {
+        .rsi, .esi, .si, .dh, .r14, .r14d, .r14w, .r14b => {
             return 0b110;
         },
-        .Rdi, .Edi, .Di, .Bh, .R15, .R15d, .R15w, .R15b => {
+        .rdi, .edi, .di, .bh, .r15, .r15d, .r15w, .r15b => {
             return 0b111;
         },
         else => {
@@ -39,28 +39,28 @@ fn regCode(reg: lexer.TokenType) u3 {
 fn digitToReg(digit: u8) parser.Register {
     switch (digit) {
         0 => {
-            return parser.Register.init(.Eax);
+            return parser.Register.init(.eax);
         },
         1 => {
-            return parser.Register.init(.Ecx);
+            return parser.Register.init(.ecx);
         },
         2 => {
-            return parser.Register.init(.Edx);
+            return parser.Register.init(.edx);
         },
         3 => {
-            return parser.Register.init(.Ebx);
+            return parser.Register.init(.ebx);
         },
         4 => {
-            return parser.Register.init(.Esp);
+            return parser.Register.init(.esp);
         },
         5 => {
-            return parser.Register.init(.Ebp);
+            return parser.Register.init(.ebp);
         },
         6 => {
-            return parser.Register.init(.Esi);
+            return parser.Register.init(.esi);
         },
         7 => {
-            return parser.Register.init(.Edi);
+            return parser.Register.init(.edi);
         },
         else => unreachable,
     }
@@ -485,31 +485,31 @@ const InstrBytes = struct {
 const Codegen = struct {
     ibytes: InstrBytes,
     allocator: std.mem.Allocator,
-    section: *parser.CodeSection,
+    block: *parser.CodeBlock,
 
-    pub fn init(section: *parser.CodeSection, allocator: std.mem.Allocator) Codegen {
+    pub fn init(block: *parser.CodeBlock, allocator: std.mem.Allocator) Codegen {
         return Codegen{
             .ibytes = InstrBytes.init(),
             .allocator = allocator,
-            .section = section,
+            .block = block,
         };
     }
     pub fn addToBuffer(self: *Codegen) std.mem.Allocator.Error!void {
         if (self.ibytes.as) {
-            try self.section.buffer.append(self.allocator, 0x67);
+            try self.block.buffer.append(self.allocator, 0x67);
         }
         if (self.ibytes.os) {
-            try self.section.buffer.append(self.allocator, 0x66);
+            try self.block.buffer.append(self.allocator, 0x66);
         }
         if (self.ibytes.rex.byte() > 0x40) {
-            try self.section.buffer.append(self.allocator, self.ibytes.rex.byte());
+            try self.block.buffer.append(self.allocator, self.ibytes.rex.byte());
         }
-        try self.section.buffer.append(self.allocator, self.ibytes.opcode);
+        try self.block.buffer.append(self.allocator, self.ibytes.opcode);
         if (self.ibytes.modrm) |modrm| {
-            try self.section.buffer.append(self.allocator, modrm.byte());
+            try self.block.buffer.append(self.allocator, modrm.byte());
         }
         if (self.ibytes.sib) |sib| {
-            try self.section.buffer.append(self.allocator, sib.byte());
+            try self.block.buffer.append(self.allocator, sib.byte());
         }
         if (self.ibytes.disp) |disp| {
             try self.addDisplacement(disp, self.ibytes.disp_bytes);
@@ -521,31 +521,31 @@ const Codegen = struct {
             .i => @bitCast(imm.i),
             .u => imm.u,
         };
-        try self.section.buffer.append(self.allocator, @as(u8, @truncate(value)));
+        try self.block.buffer.append(self.allocator, @as(u8, @truncate(value)));
         if (bytes > 1) {
-            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 8)));
+            try self.block.buffer.append(self.allocator, @as(u8, @truncate(value >> 8)));
         }
         if (bytes > 2) {
-            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 16)));
-            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 24)));
+            try self.block.buffer.append(self.allocator, @as(u8, @truncate(value >> 16)));
+            try self.block.buffer.append(self.allocator, @as(u8, @truncate(value >> 24)));
         }
         if (bytes > 4) {
-            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 32)));
-            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 40)));
-            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 48)));
-            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 56)));
+            try self.block.buffer.append(self.allocator, @as(u8, @truncate(value >> 32)));
+            try self.block.buffer.append(self.allocator, @as(u8, @truncate(value >> 40)));
+            try self.block.buffer.append(self.allocator, @as(u8, @truncate(value >> 48)));
+            try self.block.buffer.append(self.allocator, @as(u8, @truncate(value >> 56)));
         }
     }
 
     pub fn addDisplacement(self: *Codegen, disp: parser.Displacement, bytes: u8) std.mem.Allocator.Error!void {
         const value: u32 = @bitCast(disp.num);
-        try self.section.buffer.append(self.allocator, @as(u8, @truncate(value)));
+        try self.block.buffer.append(self.allocator, @as(u8, @truncate(value)));
         if (bytes > 1) {
-            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 8)));
+            try self.block.buffer.append(self.allocator, @as(u8, @truncate(value >> 8)));
         }
         if (bytes > 2) {
-            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 16)));
-            try self.section.buffer.append(self.allocator, @as(u8, @truncate(value >> 24)));
+            try self.block.buffer.append(self.allocator, @as(u8, @truncate(value >> 16)));
+            try self.block.buffer.append(self.allocator, @as(u8, @truncate(value >> 24)));
         }
     }
 
@@ -554,7 +554,7 @@ const Codegen = struct {
             .Rel32D, .Rel32C, .Abs32D => 4,
             .Abs64D => 8,
         };
-        const offset = self.section.buffer.items.len - rel_size;
+        const offset = self.block.buffer.items.len - rel_size;
         const addend = switch (l_type) {
             .Rel32D, .Rel32C => -@as(i32, (till_next_instr + rel_size)),
             .Abs32D, .Abs64D => 0,
@@ -565,7 +565,7 @@ const Codegen = struct {
             .offset = offset,
             .addend = addend,
         };
-        try self.section.relocations.append(self.allocator, relocation);
+        try self.block.relocations.append(self.allocator, relocation);
     }
 };
 
@@ -722,7 +722,7 @@ fn opImmEncoding(reg: parser.Register, opcode: u8, imm: parser.Operand) Internal
         if (reg_size == 8 and imm_size <= 4) {
             try memImmEncodingG1(.{ .reg = reg }, 0xC7, 0, imm.imm);
         } else {
-            try gen.ibytes.def(reg, .{ .reg = parser.Register.init(.Eax) }, opcode);
+            try gen.ibytes.def(reg, .{ .reg = parser.Register.init(.eax) }, opcode);
             gen.ibytes.plusR(reg.name);
             gen.ibytes.modrm = null;
             try gen.addToBuffer();
@@ -840,9 +840,9 @@ fn immEncoding(opcode: u8, imm: parser.Operand, sizes_mask: u4, discard_os: bool
     }
     if (imm_size & sizes_mask == imm_size) {
         if (!discard_os and imm_size == 2) {
-            try gen.section.buffer.append(gen.allocator, 0x66);
+            try gen.block.buffer.append(gen.allocator, 0x66);
         }
-        try gen.section.buffer.append(gen.allocator, opcode);
+        try gen.block.buffer.append(gen.allocator, opcode);
         if (is_label) {
             try gen.addImmediate(.{ .u = 0 }, imm_size);
             try gen.addRelocation(imm.label, .Abs32D, 0);
@@ -871,7 +871,7 @@ fn accImmEncoding(acc: parser.Register, opcode: u8, imm: parser.Immediate) Inter
 }
 
 fn zeroEncoding(opcode_bytes: []const u8) std.mem.Allocator.Error!void {
-    try gen.section.buffer.appendSlice(gen.allocator, opcode_bytes);
+    try gen.block.buffer.appendSlice(gen.allocator, opcode_bytes);
 }
 
 fn syscall(operands: std.ArrayList(parser.Operand)) InternalError!void {
@@ -1076,7 +1076,7 @@ fn testi(operands: std.ArrayList(parser.Operand)) InternalError!void {
             switch (first) {
                 .reg => {
                     if (first.reg.name.isAccumulator()) {
-                        const opcode: u8 = if (first.reg.name == .Al) 0xA8 else 0xA9;
+                        const opcode: u8 = if (first.reg.name == .al) 0xA8 else 0xA9;
                         try accImmEncoding(first.reg, opcode, second.imm);
                     } else {
                         const opcode: u8 = if (first.reg.size == 1) 0xF6 else 0xF7;
@@ -1134,7 +1134,7 @@ fn add(operands: std.ArrayList(parser.Operand)) InternalError!void {
                 },
                 .imm => {
                     if (first.reg.name.isAccumulator()) {
-                        const opcode: u8 = if (first.reg.name == .Al) 0x04 else 0x05;
+                        const opcode: u8 = if (first.reg.name == .al) 0x04 else 0x05;
                         try accImmEncoding(first.reg, opcode, second.imm);
                     } else {
                         const reg_size = first.reg.size;
@@ -1209,7 +1209,7 @@ fn xor(operands: std.ArrayList(parser.Operand)) InternalError!void {
                 },
                 .imm => {
                     if (first.reg.name.isAccumulator()) {
-                        const opcode: u8 = if (first.reg.name == .Al) 0x34 else 0x35;
+                        const opcode: u8 = if (first.reg.name == .al) 0x34 else 0x35;
                         try accImmEncoding(first.reg, opcode, second.imm);
                     } else {
                         const reg_size = first.reg.size;
@@ -1277,7 +1277,7 @@ fn jmp(operands: std.ArrayList(parser.Operand)) InternalError!void {
         },
         .label => {
             const opcode: u8 = 0xE9;
-            try gen.section.buffer.append(gen.allocator, opcode);
+            try gen.block.buffer.append(gen.allocator, opcode);
             try gen.addImmediate(.{ .u = 0 }, 4);
             try gen.addRelocation(first.label, .Rel32C, 0);
         },
@@ -1296,15 +1296,15 @@ fn jcc(instr: parser.CpuInstruction) InternalError!void {
         .label => {
             const opcode_pref: u8 = 0x0F;
             const opcode: u8 = switch (instr.mnem) {
-                .Ja => 0x87,
-                .Je, .Jz => 0x84,
-                .Jne, .Jnz => 0x85,
+                .ja => 0x87,
+                .je, .jz => 0x84,
+                .jne, .jnz => 0x85,
                 else => {
                     return InternalError.InvalidOperand;
                 },
             };
-            try gen.section.buffer.append(gen.allocator, opcode_pref);
-            try gen.section.buffer.append(gen.allocator, opcode);
+            try gen.block.buffer.append(gen.allocator, opcode_pref);
+            try gen.block.buffer.append(gen.allocator, opcode);
             try gen.addImmediate(.{ .u = 0 }, 4);
             try gen.addRelocation(first.label, .Rel32C, 0);
         },
@@ -1326,7 +1326,7 @@ fn call(operands: std.ArrayList(parser.Operand)) InternalError!void {
         },
         .label => {
             const opcode: u8 = 0xE8;
-            try gen.section.buffer.append(gen.allocator, opcode);
+            try gen.block.buffer.append(gen.allocator, opcode);
             try gen.addImmediate(.{ .u = 0 }, 4);
             try gen.addRelocation(first.label, .Rel32C, 0);
         },
@@ -1379,7 +1379,7 @@ fn cmp(operands: std.ArrayList(parser.Operand)) InternalError!void {
                 },
                 .imm => {
                     if (first.reg.name.isAccumulator()) {
-                        const opcode: u8 = if (first.reg.name == .Al) 0x3C else 0x3D;
+                        const opcode: u8 = if (first.reg.name == .al) 0x3C else 0x3D;
                         try accImmEncoding(first.reg, opcode, second.imm);
                     } else {
                         const reg_size = first.reg.size;
@@ -1441,7 +1441,7 @@ fn genInstruction(instruction: parser.CodeInstruction, program: *Program) Intern
             const label = instruction.label.name;
             const cl_ptr = program.symbols.getPtr(label);
             if (cl_ptr) |cl| {
-                cl.offset = program.code_section.?.buffer.items.len;
+                cl.offset = program.code_block.?.buffer.items.len;
                 if (program.entry) |ent| {
                     if (std.mem.eql(u8, ent, label)) {
                         cl.type = .Export;
@@ -1453,52 +1453,52 @@ fn genInstruction(instruction: parser.CodeInstruction, program: *Program) Intern
         },
         .cpu => {
             switch (instruction.cpu.mnem) {
-                .Mov => {
+                .mov => {
                     try mov(instruction.cpu.operands);
                 },
-                .Xor => {
+                .xor => {
                     try xor(instruction.cpu.operands);
                 },
-                .Add => {
+                .add => {
                     try add(instruction.cpu.operands);
                 },
-                .Inc => {
+                .inc => {
                     try inc(instruction.cpu.operands);
                 },
-                .Dec => {
+                .dec => {
                     try dec(instruction.cpu.operands);
                 },
-                .Ja, .Je, .Jne, .Jnz, .Jz => {
+                .ja, .je, .jne, .jnz, .jz => {
                     try jcc(instruction.cpu);
                 },
-                .Syscall => {
+                .syscall => {
                     try syscall(instruction.cpu.operands);
                 },
-                .Div => {
+                .div => {
                     try div(instruction.cpu.operands);
                 },
-                .Test => {
+                .@"test" => {
                     try testi(instruction.cpu.operands);
                 },
-                .Lea => {
+                .lea => {
                     try lea(instruction.cpu.operands);
                 },
-                .Push => {
+                .push => {
                     try push(instruction.cpu.operands);
                 },
-                .Pop => {
+                .pop => {
                     try pop(instruction.cpu.operands);
                 },
-                .Jmp => {
+                .jmp => {
                     try jmp(instruction.cpu.operands);
                 },
-                .Call => {
+                .call => {
                     try call(instruction.cpu.operands);
                 },
-                .Ret => {
+                .ret => {
                     try ret(instruction.cpu.operands);
                 },
-                .Cmp => {
+                .cmp => {
                     try cmp(instruction.cpu.operands);
                 },
                 else => {
@@ -1509,10 +1509,10 @@ fn genInstruction(instruction: parser.CodeInstruction, program: *Program) Intern
     }
 }
 
-pub fn bufferizeCodeSection(program: *Program) CodegenError!void {
-    const section = &program.code_section.?;
-    gen = Codegen.init(section, program.allocator);
-    for (section.instr.items) |instruction| {
+pub fn bufferizeCodeBlock(program: *Program) CodegenError!void {
+    const block = &program.code_block.?;
+    gen = Codegen.init(block, program.allocator);
+    for (block.instr.items) |instruction| {
         genInstruction(instruction, program) catch |err| {
             const line = switch (instruction) {
                 .cpu => instruction.cpu.line,

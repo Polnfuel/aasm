@@ -31,8 +31,8 @@ pub fn addImmediate(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, im
     }
 }
 
-pub fn bufferizeDataSection(program: *Program) DatagenError!void {
-    var section = &program.data_section.?;
+pub fn bufferizeDataBlock(program: *Program) DatagenError!void {
+    var section = &program.data_block.?;
     for (section.instr.items) |instruction| {
         const name = instruction.label;
         const data_size = instruction.size;

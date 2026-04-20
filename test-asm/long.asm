@@ -1,12 +1,6 @@
-entry start
+@entry start
 
-section export 
-    exit, print_newline
-
-section import
-    print
-
-section data rw
+@data
 msg:        d8 "Sum of array: ", 0
 newline:    d8 10
 
@@ -15,7 +9,7 @@ count:      d64 5
 
 buffer:     d8 repeat(32, 0)
 
-section code rx
+@code
 start:
     ; rbx = pointer to array
     mov rbx, array
@@ -25,11 +19,11 @@ start:
 
     xor rax, rax
 
-loop_sum:
+.loop_sum:
     add rax, p64 [rbx]
     add rbx, 8
     dec rcx
-    jne loop_sum
+    jne .loop_sum
 
     ; result now in rax
 
@@ -49,7 +43,7 @@ loop_sum:
     ;mov rcx, 0
     xor rcx, rcx
 
-convert:
+.convert:
     xor rdx, rdx
     mov r8, 10
     div r8
@@ -59,12 +53,12 @@ convert:
 
     inc rcx
     test rax, rax
-    jne convert
+    jne .convert
 
     ; print digits in reverse
-print_digits:
+.print_digits:
     test rcx, rcx
-    je print_newline
+    je .print_newline
 
     dec rcx
 
@@ -78,16 +72,16 @@ print_digits:
 
     pop rcx
 
-    jmp print_digits
+    jmp .print_digits
 
-print_newline:
+.print_newline:
     mov rax, 1
     mov rdi, 1
     mov rsi, newline
     mov rdx, 1
     syscall
 
-exit:
+.exit:
     mov rax, 60
     mov rdi, 0
     syscall

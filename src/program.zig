@@ -13,10 +13,9 @@ pub const Program = struct {
     content: []const u8,
     tokens: std.ArrayList(lexer.Token),
     entry: ?[]u8,
-    data_section: ?parser.DataSection,
-    code_section: ?parser.CodeSection,
+    data_block: ?parser.DataBlock,
+    code_block: ?parser.CodeBlock,
     symbols: std.StringHashMap(parser.Symbol),
-    exports: std.StringHashMap(void),
     allocator: std.mem.Allocator,
 
     pub fn new(file_name: []const u8, content: []const u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!Program {
@@ -25,10 +24,9 @@ pub const Program = struct {
             .content = content,
             .tokens = .empty,
             .entry = null,
-            .data_section = null,
-            .code_section = null,
+            .data_block = null,
+            .code_block = null,
             .symbols = std.StringHashMap(parser.Symbol).init(allocator),
-            .exports = std.StringHashMap(void).init(allocator),
             .allocator = allocator,
         };
         program.file_name = try program.allocator.dupe(u8, file_name);
@@ -55,33 +53,36 @@ pub const Program = struct {
         parser.printSymbolTable(self);
     }
 
-    pub fn defineExportLabels(self: *Program) ProgramError!void {
-        var iter = self.exports.iterator();
-        while (iter.next()) |*exp| {
-            const exp_name = exp.key_ptr.*;
-            if (self.symbols.getPtr(exp_name)) |ptr| {
-                ptr.type = .Export;
-            } else {
-                stdbuffers.printSourceErrorFormatted(self.file_name, "export symbol '{s}' is not defined in this file", .{exp_name}, self.content, 1);
+    pub fn checkEntry(self: *Program) ProgramError!void {
+        if (self.entry) |entry| {
+            var exist = false;
+            var iter = self.symbols.keyIterator();
+            while (iter.next()) |sym| {
+                if (std.mem.eql(u8, sym.*, entry)) {
+                    exist = true;
+                }
+            }
+            if (!exist) {
+                stdbuffers.printErrorFormatted("entry symbol '{s}' not defined in this file", .{entry});
                 return ProgramError.ProgramFailed;
             }
         }
     }
 
     pub fn genDataCodeBuffers(self: *Program) ProgramError!void {
-        var any_section = false;
-        if (self.data_section) |_| {
-            // bufferize data section
-            try datagen.bufferizeDataSection(self);
-            any_section = true;
+        var any_block = false;
+        if (self.data_block) |_| {
+            // bufferize data block
+            try datagen.bufferizeDataBlock(self);
+            any_block = true;
         }
-        if (self.code_section) |_| {
-            // bufferize code section
-            try codegen.bufferizeCodeSection(self);
-            any_section = true;
+        if (self.code_block) |_| {
+            // bufferize code block
+            try codegen.bufferizeCodeBlock(self);
+            any_block = true;
         }
-        if (!any_section) {
-            stdbuffers.printSourceError(self.file_name, "source file doesn't contain any data or code section", self.content, 1);
+        if (!any_block) {
+            stdbuffers.printSourceError(self.file_name, "source file doesn't contain any data or code block", self.content, 1);
             return ProgramError.ProgramFailed;
         }
     }
@@ -97,16 +98,16 @@ pub const Program = struct {
         self.allocator.free(self.file_name);
         self.allocator.free(self.content);
         self.tokens.deinit(self.allocator);
-        if (self.data_section) |*data_section| {
-            data_section.buffer.deinit(self.allocator);
-            for (data_section.instr.items) |*instr| {
+        if (self.data_block) |*data_block| {
+            data_block.buffer.deinit(self.allocator);
+            for (data_block.instr.items) |*instr| {
                 instr.data.deinit(self.allocator);
             }
-            data_section.instr.deinit(self.allocator);
+            data_block.instr.deinit(self.allocator);
         }
-        if (self.code_section) |*code_section| {
-            code_section.buffer.deinit(self.allocator);
-            for (code_section.instr.items) |*instr| {
+        if (self.code_block) |*code_block| {
+            code_block.buffer.deinit(self.allocator);
+            for (code_block.instr.items) |*instr| {
                 switch (instr.*) {
                     .cpu => {
                         instr.cpu.operands.deinit(self.allocator);
@@ -114,10 +115,9 @@ pub const Program = struct {
                     .label => {},
                 }
             }
-            code_section.instr.deinit(self.allocator);
-            code_section.relocations.deinit(self.allocator);
+            code_block.instr.deinit(self.allocator);
+            code_block.relocations.deinit(self.allocator);
         }
-        self.exports.deinit();
         self.symbols.deinit();
     }
 };

@@ -25,7 +25,7 @@ fn startAASM() !void {
     const cwd = std.fs.cwd();
 
     if (cli_args.v) {
-        stdbuffers.printMessage("AASM v0.0.3");
+        stdbuffers.printMessage("AASM v0.0.5");
         return;
     } else if (cli_args.h) {
         // TODO: print command line help
@@ -47,9 +47,10 @@ fn startAASM() !void {
             const input_name = std.fs.path.stem(abs_input);
 
             var source = try Assembler.new(abs_input, input_name, allocator);
+            errdefer source.deinit();
+
             try source.genObj();
             try object_files.append(allocator, source);
-            try source.writeObj();
         }
         switch (cli_args.format) {
             .Object => {
@@ -60,7 +61,7 @@ fn startAASM() !void {
             },
             .Executable => {
                 // Linking object files data into one executable
-                var ld = Linker.new(allocator, object_files.items, cli_args.output_file);
+                var ld = Linker.new(allocator, object_files.items, cli_args.output_file, cli_args.s);
                 defer ld.deinit();
                 try ld.linkExe();
             },

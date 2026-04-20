@@ -6,7 +6,7 @@ const elf = std.elf;
 
 pub const LinkerError = error{LinkingFailed} || std.mem.Allocator.Error || std.Io.Writer.Error || std.fs.File.OpenError;
 
-pub const Executable = struct {
+const Executable = struct {
     ehdr: elf.Elf64_Ehdr,
     text: std.ArrayList(u8),
     data: std.ArrayList(u8),
@@ -96,6 +96,7 @@ const HMContext = struct {
 const LinkerSymbol = struct {
     glob_address: usize,
     glob_shndx: u16,
+    strip: bool,
 };
 
 pub const Linker = struct {
@@ -107,7 +108,9 @@ pub const Linker = struct {
     locals: std.StringHashMap(LinkerSymbol),
     globals: std.StringHashMap(LinkerSymbol),
 
-    pub fn new(allocator: std.mem.Allocator, assems: []assembler.Assembler, output: []const u8) Linker {
+    strip: bool,
+
+    pub fn new(allocator: std.mem.Allocator, assems: []assembler.Assembler, output: []const u8, strip: bool) Linker {
         return Linker{
             .entry = null,
             .allocator = allocator,
@@ -116,6 +119,7 @@ pub const Linker = struct {
             .output_name = output,
             .locals = std.StringHashMap(LinkerSymbol).init(allocator),
             .globals = std.StringHashMap(LinkerSymbol).init(allocator),
+            .strip = strip,
         };
     }
 
@@ -263,6 +267,7 @@ pub const Linker = struct {
                         try self.locals.putNoClobber(sym_name, LinkerSymbol{
                             .glob_address = sym_address,
                             .glob_shndx = sym_shndx,
+                            .strip = if (@as(elf.STV, @enumFromInt(symbol.st_other)) == elf.STV.HIDDEN) true else false,
                         });
                     }
                 }
@@ -293,6 +298,7 @@ pub const Linker = struct {
                         try self.globals.putNoClobber(sym_name, LinkerSymbol{
                             .glob_address = sym_address,
                             .glob_shndx = sym_shndx,
+                            .strip = false,
                         });
 
                         if (std.mem.eql(u8, sym_name, self.entry.?)) {
@@ -485,21 +491,23 @@ pub const Linker = struct {
         var l_iter = self.locals.iterator();
         var g_iter = self.globals.iterator();
         while (l_iter.next()) |sym| {
-            const sym_name = strtab_buffer.items.len;
-            try strtab_buffer.appendSlice(self.allocator, sym.key_ptr.*);
-            try strtab_buffer.append(self.allocator, 0);
+            if (!sym.value_ptr.strip) {
+                const sym_name = strtab_buffer.items.len;
+                try strtab_buffer.appendSlice(self.allocator, sym.key_ptr.*);
+                try strtab_buffer.append(self.allocator, 0);
 
-            const sym_type: u8 = if (sym.value_ptr.glob_shndx == 1) elf.STT_FUNC else elf.STT_OBJECT;
+                const sym_type: u8 = if (sym.value_ptr.glob_shndx == 1) elf.STT_FUNC else elf.STT_OBJECT;
 
-            const symbol = elf.Elf64_Sym{
-                .st_name = @truncate(sym_name),
-                .st_value = sym.value_ptr.glob_address,
-                .st_size = 0,
-                .st_info = (elf.STB_LOCAL << 4) + (sym_type & 0xF),
-                .st_other = @intFromEnum(elf.STV.DEFAULT) & 0x3,
-                .st_shndx = sym.value_ptr.glob_shndx,
-            };
-            try symtab_buffer.append(self.allocator, symbol);
+                const symbol = elf.Elf64_Sym{
+                    .st_name = @truncate(sym_name),
+                    .st_value = sym.value_ptr.glob_address,
+                    .st_size = 0,
+                    .st_info = (elf.STB_LOCAL << 4) + (sym_type & 0xF),
+                    .st_other = @intFromEnum(elf.STV.DEFAULT) & 0x3,
+                    .st_shndx = sym.value_ptr.glob_shndx,
+                };
+                try symtab_buffer.append(self.allocator, symbol);
+            }
         }
         symtab.sh_info = @truncate(symtab_buffer.items.len);
         while (g_iter.next()) |sym| {
@@ -556,12 +564,14 @@ pub const Linker = struct {
         strtab.sh_offset = shstrtab.sh_offset + shstrtab.sh_size;
         symtab.sh_offset = strtab.sh_offset + strtab.sh_size;
 
-        self.exe.ehdr.e_shnum = @truncate(4 + self.exe.buf_count);
-        self.exe.ehdr.e_shoff = symtab.sh_offset + symtab.sh_size;
-        self.exe.ehdr.e_shstrndx = @truncate(1 + self.exe.buf_count);
-        self.exe.ehdr.e_shentsize = 64;
+        if (!self.strip) {
+            self.exe.ehdr.e_shnum = @truncate(4 + self.exe.buf_count);
+            self.exe.ehdr.e_shoff = symtab.sh_offset + symtab.sh_size;
+            self.exe.ehdr.e_shstrndx = @truncate(1 + self.exe.buf_count);
+            self.exe.ehdr.e_shentsize = 64;
+        }
 
-        const file_size = self.exe.ehdr.e_shoff + (4 + self.exe.buf_count) * @sizeOf(elf.Elf64_Shdr);
+        const file_size = if (!self.strip) self.exe.ehdr.e_shoff + (4 + self.exe.buf_count) * @sizeOf(elf.Elf64_Shdr) else data_phdr.p_offset + data_phdr.p_filesz;
 
         const file_buffer = try self.allocator.alloc(u8, file_size);
         defer self.allocator.free(file_buffer);
@@ -585,31 +595,33 @@ pub const Linker = struct {
             _ = try writer.write(self.exe.data.items);
         }
 
-        _ = try writer.write(shstrtab_buffer.items);
-        _ = try writer.write(strtab_buffer.items);
-        for (symtab_buffer.items) |sym| {
-            try writer.writeStruct(sym, .little);
-        }
+        if (!self.strip) {
+            _ = try writer.write(shstrtab_buffer.items);
+            _ = try writer.write(strtab_buffer.items);
+            for (symtab_buffer.items) |sym| {
+                try writer.writeStruct(sym, .little);
+            }
 
-        try writeElf64_Shdr(writer, &elf.Elf64_Shdr{
-            .sh_name = 0,
-            .sh_type = elf.SHT_NULL,
-            .sh_addr = 0,
-            .sh_addralign = 0,
-            .sh_entsize = 0,
-            .sh_flags = 0,
-            .sh_info = 0,
-            .sh_link = 0,
-            .sh_offset = 0,
-            .sh_size = 0,
-        });
-        try writeElf64_Shdr(writer, &txt_sec);
-        if (self.exe.buf_count > 1) {
-            try writeElf64_Shdr(writer, &dat_sec);
+            try writeElf64_Shdr(writer, &elf.Elf64_Shdr{
+                .sh_name = 0,
+                .sh_type = elf.SHT_NULL,
+                .sh_addr = 0,
+                .sh_addralign = 0,
+                .sh_entsize = 0,
+                .sh_flags = 0,
+                .sh_info = 0,
+                .sh_link = 0,
+                .sh_offset = 0,
+                .sh_size = 0,
+            });
+            try writeElf64_Shdr(writer, &txt_sec);
+            if (self.exe.buf_count > 1) {
+                try writeElf64_Shdr(writer, &dat_sec);
+            }
+            try writeElf64_Shdr(writer, &shstrtab);
+            try writeElf64_Shdr(writer, &strtab);
+            try writeElf64_Shdr(writer, &symtab);
         }
-        try writeElf64_Shdr(writer, &shstrtab);
-        try writeElf64_Shdr(writer, &strtab);
-        try writeElf64_Shdr(writer, &symtab);
 
         try writer.flush();
     }

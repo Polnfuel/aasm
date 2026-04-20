@@ -21,124 +21,124 @@ const String = struct {
 pub const TokenType = enum(u8) {
 
     //Keywords
-    Entry,
-    Section,
-    Data,
-    Code,
-    Export,
-    Import,
-    D8,
-    D16,
-    D32,
-    D64,
-    Repeat,
-    P8,
-    P16,
-    P32,
-    P64,
+    entry,
+    data,
+    code,
+    import,
+    d8,
+    d16,
+    d32,
+    d64,
+    repeat,
+    p8,
+    p16,
+    p32,
+    p64,
 
     //Instruction mnemonics
-    Mov,
-    Cmp,
-    Ja,
-    Je,
-    Jne,
-    Jnz,
-    Jz,
-    Jmp,
-    Call,
-    Ret,
-    Syscall,
-    Xor,
-    Add,
-    Sub,
-    Imul,
-    Div,
-    Inc,
-    Dec,
-    Test,
-    Lea,
-    Push,
-    Pop,
+    mov,
+    cmp,
+    ja,
+    je,
+    jne,
+    jnz,
+    jz,
+    jmp,
+    call,
+    ret,
+    syscall,
+    xor,
+    add,
+    sub,
+    imul,
+    div,
+    inc,
+    dec,
+    @"test",
+    lea,
+    push,
+    pop,
 
     //Registers
     //64-bit
-    Rax,
-    Rbx,
-    Rcx,
-    Rdx,
-    Rdi,
-    Rsi,
-    Rsp,
-    Rbp,
-    Rip,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
+    rax,
+    rbx,
+    rcx,
+    rdx,
+    rdi,
+    rsi,
+    rsp,
+    rbp,
+    rip,
+    r8,
+    r9,
+    r10,
+    r11,
+    r12,
+    r13,
+    r14,
+    r15,
     //32-bit
-    Eax,
-    Ebx,
-    Ecx,
-    Edx,
-    Edi,
-    Esi,
-    Esp,
-    Ebp,
-    Eip,
-    R8d,
-    R9d,
-    R10d,
-    R11d,
-    R12d,
-    R13d,
-    R14d,
-    R15d,
+    eax,
+    ebx,
+    ecx,
+    edx,
+    edi,
+    esi,
+    esp,
+    ebp,
+    eip,
+    r8d,
+    r9d,
+    r10d,
+    r11d,
+    r12d,
+    r13d,
+    r14d,
+    r15d,
     //16-bit
-    Ax,
-    Bx,
-    Cx,
-    Dx,
-    Di,
-    Si,
-    Sp,
-    Bp,
-    R8w,
-    R9w,
-    R10w,
-    R11w,
-    R12w,
-    R13w,
-    R14w,
-    R15w,
+    ax,
+    bx,
+    cx,
+    dx,
+    di,
+    si,
+    sp,
+    bp,
+    r8w,
+    r9w,
+    r10w,
+    r11w,
+    r12w,
+    r13w,
+    r14w,
+    r15w,
     //8-bit
-    Ah,
-    Al,
-    Bh,
-    Bl,
-    Ch,
-    Cl,
-    Dh,
-    Dl,
-    Sil,
-    Dil,
-    Bpl,
-    Spl,
-    R8b,
-    R9b,
-    R10b,
-    R11b,
-    R12b,
-    R13b,
-    R14b,
-    R15b,
+    ah,
+    al,
+    bh,
+    bl,
+    ch,
+    cl,
+    dh,
+    dl,
+    sil,
+    dil,
+    bpl,
+    spl,
+    r8b,
+    r9b,
+    r10b,
+    r11b,
+    r12b,
+    r13b,
+    r14b,
+    r15b,
 
     //Literals
     Ident,
+    HashIdent,
+    DotIdent,
     StringLiteral,
     NumberLiteral,
     PosNumLiteral,
@@ -161,8 +161,8 @@ pub const TokenType = enum(u8) {
     NotPresent,
 
     pub fn isReg(self: TokenType) bool {
-        const lower = @intFromEnum(TokenType.Rax);
-        const upper = @intFromEnum(TokenType.R15b);
+        const lower = @intFromEnum(TokenType.rax);
+        const upper = @intFromEnum(TokenType.r15b);
         const r = @intFromEnum(self);
         if (r >= lower and r <= upper) {
             return true;
@@ -172,8 +172,8 @@ pub const TokenType = enum(u8) {
     }
 
     pub fn isMnemonic(self: TokenType) bool {
-        const lower = @intFromEnum(TokenType.Mov);
-        const upper = @intFromEnum(TokenType.Pop);
+        const lower = @intFromEnum(TokenType.mov);
+        const upper = @intFromEnum(TokenType.pop);
         const m = @intFromEnum(self);
         if (m >= lower and m <= upper) {
             return true;
@@ -183,8 +183,8 @@ pub const TokenType = enum(u8) {
     }
 
     pub fn isPointerSize(self: TokenType) bool {
-        const lower = @intFromEnum(TokenType.P8);
-        const upper = @intFromEnum(TokenType.P64);
+        const lower = @intFromEnum(TokenType.p8);
+        const upper = @intFromEnum(TokenType.p64);
         const p = @intFromEnum(self);
         if (p >= lower and p <= upper) {
             return true;
@@ -195,16 +195,16 @@ pub const TokenType = enum(u8) {
 
     pub fn isAdditionalReg(self: TokenType) bool {
         const r = @intFromEnum(self);
-        const is = (r >= @intFromEnum(TokenType.R8) and r <= @intFromEnum(TokenType.R15)) or
-            (r >= @intFromEnum(TokenType.R8d) and r <= @intFromEnum(TokenType.R15d)) or
-            (r >= @intFromEnum(TokenType.R8w) and r <= @intFromEnum(TokenType.R15w)) or
-            (r >= @intFromEnum(TokenType.R8b) and r <= @intFromEnum(TokenType.R15b));
+        const is = (r >= @intFromEnum(TokenType.r8) and r <= @intFromEnum(TokenType.r15)) or
+            (r >= @intFromEnum(TokenType.r8d) and r <= @intFromEnum(TokenType.r15d)) or
+            (r >= @intFromEnum(TokenType.r8w) and r <= @intFromEnum(TokenType.r15w)) or
+            (r >= @intFromEnum(TokenType.r8b) and r <= @intFromEnum(TokenType.r15b));
         return is;
     }
 
     pub fn isDataDirective(self: TokenType) bool {
-        const lower = @intFromEnum(TokenType.D8);
-        const upper = @intFromEnum(TokenType.D64);
+        const lower = @intFromEnum(TokenType.d8);
+        const upper = @intFromEnum(TokenType.d64);
         const d = @intFromEnum(self);
         if (d >= lower and d <= upper) {
             return true;
@@ -215,7 +215,29 @@ pub const TokenType = enum(u8) {
 
     pub fn isAccumulator(self: TokenType) bool {
         switch (self) {
-            TokenType.Al, TokenType.Ax, TokenType.Eax, TokenType.Rax => {
+            TokenType.al, TokenType.ax, TokenType.eax, TokenType.rax => {
+                return true;
+            },
+            else => {
+                return false;
+            },
+        }
+    }
+
+    pub fn isBlockDecl(self: TokenType) bool {
+        switch (self) {
+            TokenType.entry, TokenType.import, TokenType.data, TokenType.code => {
+                return true;
+            },
+            else => {
+                return false;
+            },
+        }
+    }
+
+    pub fn isAnyIdent(self: TokenType) bool {
+        switch (self) {
+            TokenType.Ident, TokenType.HashIdent, TokenType.DotIdent => {
                 return true;
             },
             else => {
@@ -235,229 +257,230 @@ fn analyzeWord(word: String, line: u16) Token {
     var token_type: TokenType = undefined;
     // Keywords
     if (word.is("d8")) {
-        token_type = .D8;
+        token_type = .d8;
     } else if (word.is("d16")) {
-        token_type = .D16;
+        token_type = .d16;
     } else if (word.is("d32")) {
-        token_type = .D32;
+        token_type = .d32;
     } else if (word.is("d64")) {
-        token_type = .D64;
+        token_type = .d64;
     } else if (word.is("p8")) {
-        token_type = .P8;
+        token_type = .p8;
     } else if (word.is("p16")) {
-        token_type = .P16;
+        token_type = .p16;
     } else if (word.is("p32")) {
-        token_type = .P32;
+        token_type = .p32;
     } else if (word.is("p64")) {
-        token_type = .P64;
-    } else if (word.is("data")) {
-        token_type = .Data;
-    } else if (word.is("code")) {
-        token_type = .Code;
-    } else if (word.is("entry")) {
-        token_type = .Entry;
-    } else if (word.is("section")) {
-        token_type = .Section;
+        token_type = .p64;
+    } else if (word.is("@data")) {
+        token_type = .data;
+    } else if (word.is("@code")) {
+        token_type = .code;
+    } else if (word.is("@entry")) {
+        token_type = .entry;
     } else if (word.is("repeat")) {
-        token_type = .Repeat;
-    } else if (word.is("export")) {
-        token_type = .Export;
-    } else if (word.is("import")) {
-        token_type = .Import;
+        token_type = .repeat;
+    } else if (word.is("@import")) {
+        token_type = .import;
     }
     // Instructions
     else if (word.is("mov")) {
-        token_type = .Mov;
+        token_type = .mov;
     } else if (word.is("cmp")) {
-        token_type = .Cmp;
+        token_type = .cmp;
     } else if (word.is("je")) {
-        token_type = .Je;
+        token_type = .je;
     } else if (word.is("jne")) {
-        token_type = .Jne;
+        token_type = .jne;
     } else if (word.is("ja")) {
-        token_type = .Ja;
+        token_type = .ja;
     } else if (word.is("jnz")) {
-        token_type = .Jnz;
+        token_type = .jnz;
     } else if (word.is("jz")) {
-        token_type = .Jz;
+        token_type = .jz;
     } else if (word.is("call")) {
-        token_type = .Call;
+        token_type = .call;
     } else if (word.is("ret")) {
-        token_type = .Ret;
+        token_type = .ret;
     } else if (word.is("syscall")) {
-        token_type = .Syscall;
+        token_type = .syscall;
     } else if (word.is("jmp")) {
-        token_type = .Jmp;
+        token_type = .jmp;
     } else if (word.is("xor")) {
-        token_type = .Xor;
+        token_type = .xor;
     } else if (word.is("add")) {
-        token_type = .Add;
+        token_type = .add;
     } else if (word.is("sub")) {
-        token_type = .Sub;
+        token_type = .sub;
     } else if (word.is("imul")) {
-        token_type = .Imul;
+        token_type = .imul;
     } else if (word.is("div")) {
-        token_type = .Div;
+        token_type = .div;
     } else if (word.is("inc")) {
-        token_type = .Inc;
+        token_type = .inc;
     } else if (word.is("dec")) {
-        token_type = .Dec;
+        token_type = .dec;
     } else if (word.is("test")) {
-        token_type = .Test;
+        token_type = .@"test";
     } else if (word.is("lea")) {
-        token_type = .Lea;
+        token_type = .lea;
     } else if (word.is("push")) {
-        token_type = .Push;
+        token_type = .push;
     } else if (word.is("pop")) {
-        token_type = .Pop;
+        token_type = .pop;
     }
     // Registers
     else if (word.is("rax")) {
-        token_type = .Rax;
+        token_type = .rax;
     } else if (word.is("rbx")) {
-        token_type = .Rbx;
+        token_type = .rbx;
     } else if (word.is("rcx")) {
-        token_type = .Rcx;
+        token_type = .rcx;
     } else if (word.is("rdx")) {
-        token_type = .Rdx;
+        token_type = .rdx;
     } else if (word.is("rsi")) {
-        token_type = .Rsi;
+        token_type = .rsi;
     } else if (word.is("rdi")) {
-        token_type = .Rdi;
+        token_type = .rdi;
     } else if (word.is("rsp")) {
-        token_type = .Rsp;
+        token_type = .rsp;
     } else if (word.is("rbp")) {
-        token_type = .Rbp;
+        token_type = .rbp;
     } else if (word.is("rip")) {
-        token_type = .Rip;
+        token_type = .rip;
     } else if (word.is("r8")) {
-        token_type = .R8;
+        token_type = .r8;
     } else if (word.is("r9")) {
-        token_type = .R9;
+        token_type = .r9;
     } else if (word.is("r10")) {
-        token_type = .R10;
+        token_type = .r10;
     } else if (word.is("r11")) {
-        token_type = .R11;
+        token_type = .r11;
     } else if (word.is("r12")) {
-        token_type = .R12;
+        token_type = .r12;
     } else if (word.is("r13")) {
-        token_type = .R13;
+        token_type = .r13;
     } else if (word.is("r14")) {
-        token_type = .R14;
+        token_type = .r14;
     } else if (word.is("r15")) {
-        token_type = .R15;
+        token_type = .r15;
     } else if (word.is("eax")) {
-        token_type = .Eax;
+        token_type = .eax;
     } else if (word.is("ebx")) {
-        token_type = .Ebx;
+        token_type = .ebx;
     } else if (word.is("ecx")) {
-        token_type = .Ecx;
+        token_type = .ecx;
     } else if (word.is("edx")) {
-        token_type = .Edx;
+        token_type = .edx;
     } else if (word.is("edi")) {
-        token_type = .Edi;
+        token_type = .edi;
     } else if (word.is("esi")) {
-        token_type = .Esi;
+        token_type = .esi;
     } else if (word.is("esp")) {
-        token_type = .Esp;
+        token_type = .esp;
     } else if (word.is("ebp")) {
-        token_type = .Ebp;
+        token_type = .ebp;
     } else if (word.is("eip")) {
-        token_type = .Eip;
+        token_type = .eip;
     } else if (word.is("r8d")) {
-        token_type = .R8d;
+        token_type = .r8d;
     } else if (word.is("r9d")) {
-        token_type = .R9d;
+        token_type = .r9d;
     } else if (word.is("r10d")) {
-        token_type = .R10d;
+        token_type = .r10d;
     } else if (word.is("r11d")) {
-        token_type = .R11d;
+        token_type = .r11d;
     } else if (word.is("r12d")) {
-        token_type = .R12d;
+        token_type = .r12d;
     } else if (word.is("r13d")) {
-        token_type = .R13d;
+        token_type = .r13d;
     } else if (word.is("r14d")) {
-        token_type = .R14d;
+        token_type = .r14d;
     } else if (word.is("r15d")) {
-        token_type = .R15d;
+        token_type = .r15d;
     } else if (word.is("ax")) {
-        token_type = .Ax;
+        token_type = .ax;
     } else if (word.is("bx")) {
-        token_type = .Bx;
+        token_type = .bx;
     } else if (word.is("cx")) {
-        token_type = .Cx;
+        token_type = .cx;
     } else if (word.is("dx")) {
-        token_type = .Dx;
+        token_type = .dx;
     } else if (word.is("di")) {
-        token_type = .Di;
+        token_type = .di;
     } else if (word.is("si")) {
-        token_type = .Si;
+        token_type = .si;
     } else if (word.is("sp")) {
-        token_type = .Sp;
+        token_type = .sp;
     } else if (word.is("bp")) {
-        token_type = .Bp;
+        token_type = .bp;
     } else if (word.is("r8w")) {
-        token_type = .R8w;
+        token_type = .r8w;
     } else if (word.is("r9w")) {
-        token_type = .R9w;
+        token_type = .r9w;
     } else if (word.is("r10w")) {
-        token_type = .R10w;
+        token_type = .r10w;
     } else if (word.is("r11w")) {
-        token_type = .R11w;
+        token_type = .r11w;
     } else if (word.is("r12w")) {
-        token_type = .R12w;
+        token_type = .r12w;
     } else if (word.is("r13w")) {
-        token_type = .R13w;
+        token_type = .r13w;
     } else if (word.is("r14w")) {
-        token_type = .R14w;
+        token_type = .r14w;
     } else if (word.is("r15w")) {
-        token_type = .R15w;
+        token_type = .r15w;
     } else if (word.is("ah")) {
-        token_type = .Ah;
+        token_type = .ah;
     } else if (word.is("al")) {
-        token_type = .Al;
+        token_type = .al;
     } else if (word.is("bh")) {
-        token_type = .Bh;
+        token_type = .bh;
     } else if (word.is("bl")) {
-        token_type = .Bl;
+        token_type = .bl;
     } else if (word.is("ch")) {
-        token_type = .Ch;
+        token_type = .ch;
     } else if (word.is("cl")) {
-        token_type = .Cl;
+        token_type = .cl;
     } else if (word.is("dh")) {
-        token_type = .Dh;
+        token_type = .dh;
     } else if (word.is("dl")) {
-        token_type = .Dl;
+        token_type = .dl;
     } else if (word.is("sil")) {
-        token_type = .Sil;
+        token_type = .sil;
     } else if (word.is("dil")) {
-        token_type = .Dil;
+        token_type = .dil;
     } else if (word.is("bpl")) {
-        token_type = .Bpl;
+        token_type = .bpl;
     } else if (word.is("spl")) {
-        token_type = .Spl;
+        token_type = .spl;
     } else if (word.is("r8b")) {
-        token_type = .R8b;
+        token_type = .r8b;
     } else if (word.is("r9b")) {
-        token_type = .R9b;
+        token_type = .r9b;
     } else if (word.is("r10b")) {
-        token_type = .R10b;
+        token_type = .r10b;
     } else if (word.is("r11b")) {
-        token_type = .R11b;
+        token_type = .r11b;
     } else if (word.is("r12b")) {
-        token_type = .R12b;
+        token_type = .r12b;
     } else if (word.is("r13b")) {
-        token_type = .R13b;
+        token_type = .r13b;
     } else if (word.is("r14b")) {
-        token_type = .R14b;
+        token_type = .r14b;
     } else if (word.is("r15b")) {
-        token_type = .R15b;
+        token_type = .r15b;
+    } else if (word.slice.len > 1 and word.slice[0] == '#') {
+        token_type = .HashIdent;
+    } else if (word.slice.len > 1 and word.slice[0] == '.') {
+        token_type = .DotIdent;
     } else {
         token_type = .Ident;
     }
 
     return Token{ .type = token_type, .value = switch (token_type) {
         .Ident => word.slice,
+        .HashIdent, .DotIdent => word.slice[1..],
         else => word.slice[0..0],
     }, .line = line };
 }
@@ -941,6 +964,20 @@ pub fn tokenizeContent(allocator: std.mem.Allocator, content: []const u8, file_n
                     .Comment, .String => unreachable,
                 }
                 state = .Comment;
+            },
+            '@', '#', '.' => {
+                switch (state) {
+                    .TopLevel => {
+                        word = String.new(content[i..i].ptr);
+                        word.addByte();
+                        state = .Word;
+                    },
+                    .Word, .NegNumber, .PosNumber, .Number, .MinusSign, .PlusSign => {
+                        stdbuffers.printSourceErrorFormatted(file_name, "unexpected {c}", .{byte}, content, line);
+                        return LexerError.LexerAnalyzisFailed;
+                    },
+                    .Comment, .String => unreachable,
+                }
             },
             else => {
                 stdbuffers.printSourceError(file_name, "unknown character", content, line);

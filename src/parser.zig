@@ -11,9 +11,9 @@ pub const Register = struct {
     /// Caller must be sure that reg param is actually register name
     pub fn init(reg: lexer.TokenType) Register {
         const r = @intFromEnum(reg);
-        const r64_end = @intFromEnum(lexer.TokenType.R15);
-        const r32_end = @intFromEnum(lexer.TokenType.R15d);
-        const r16_end = @intFromEnum(lexer.TokenType.R15w);
+        const r64_end = @intFromEnum(lexer.TokenType.r15);
+        const r32_end = @intFromEnum(lexer.TokenType.r15d);
+        const r16_end = @intFromEnum(lexer.TokenType.r15w);
         if (r <= r64_end) {
             return Register{ .name = reg, .size = 8 };
         } else if (r <= r32_end) {
@@ -114,20 +114,11 @@ pub const CodeInstruction = union(enum) {
     cpu: CpuInstruction,
 };
 
-const SectionFlags = struct {
-    read: bool,
-    write: bool,
-    exec: bool,
-
-    pub fn empty() SectionFlags {
-        return SectionFlags{ .read = false, .write = false, .exec = false };
-    }
-};
-
 pub const SymType = enum {
     Local,
     Export,
     Import,
+    Hidden,
 };
 
 const SectionType = enum {
@@ -156,29 +147,25 @@ pub const Relocation = struct {
     addend: i32,
 };
 
-pub const DataSection = struct {
-    flags: SectionFlags,
+pub const DataBlock = struct {
     instr: std.ArrayList(DataInstruction),
     buffer: std.ArrayList(u8),
 
-    pub fn new() DataSection {
-        return DataSection{
-            .flags = SectionFlags.empty(),
+    pub fn new() DataBlock {
+        return DataBlock{
             .instr = .empty,
             .buffer = .empty,
         };
     }
 };
 
-pub const CodeSection = struct {
-    flags: SectionFlags,
+pub const CodeBlock = struct {
     instr: std.ArrayList(CodeInstruction),
     relocations: std.ArrayList(Relocation),
     buffer: std.ArrayList(u8),
 
-    pub fn new() CodeSection {
-        return CodeSection{
-            .flags = SectionFlags.empty(),
+    pub fn new() CodeBlock {
+        return CodeBlock{
             .instr = .empty,
             .buffer = .empty,
             .relocations = .empty,
@@ -187,47 +174,6 @@ pub const CodeSection = struct {
 };
 
 pub const ParserError = error{ParsingFailed} || std.mem.Allocator.Error || std.fmt.ParseIntError;
-
-fn parseEntry(tokens: []lexer.Token, program: *Program) ParserError!void {
-    const next = tokens[0];
-    if (next.type == .Ident) {
-        program.entry = next.value;
-    } else {
-        stdbuffers.printSourceError(program.file_name, "expected identifier after entry keyword", program.content, next.line);
-        return ParserError.ParsingFailed;
-    }
-    if (tokens[1].type != .NewLine) {
-        stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, tokens[1].line);
-        return ParserError.ParsingFailed;
-    }
-}
-
-fn parseSectionFlags(token: lexer.Token, program: *Program) ParserError!SectionFlags {
-    var flags = SectionFlags.empty();
-    if (token.type == .Ident and token.value.len <= 3) {
-        for (token.value) |char| {
-            switch (char) {
-                'r' => {
-                    flags.read = true;
-                },
-                'w' => {
-                    flags.write = true;
-                },
-                'x' => {
-                    flags.exec = true;
-                },
-                else => {
-                    stdbuffers.printSourceError(program.file_name, "wrong section flag", program.content, token.line);
-                    return ParserError.ParsingFailed;
-                },
-            }
-        }
-    } else {
-        stdbuffers.printSourceError(program.file_name, "expected section flags", program.content, token.line);
-        return ParserError.ParsingFailed;
-    }
-    return flags;
-}
 
 fn immFromNumToken(token: lexer.Token) std.fmt.ParseIntError!Immediate {
     switch (token.type) {
@@ -318,6 +264,20 @@ fn scaleFromNumToken(token: lexer.Token, program: *Program) ParserError!Scale {
     }
 }
 
+fn parseEntry(tokens: []lexer.Token, program: *Program) ParserError!void {
+    const next = tokens[0];
+    if (next.type == .Ident) {
+        program.entry = next.value;
+    } else {
+        stdbuffers.printSourceError(program.file_name, "expected identifier after entry keyword", program.content, next.line);
+        return ParserError.ParsingFailed;
+    }
+    if (tokens[1].type != .NewLine) {
+        stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, tokens[1].line);
+        return ParserError.ParsingFailed;
+    }
+}
+
 fn parseRepeat(tokens: []lexer.Token, data_size: u8, program: *Program, line: u16) ParserError!DataInitialization {
     var data_init: DataInitialization = undefined;
     if (tokens[0].type == .OpenParenthes) {
@@ -383,14 +343,14 @@ fn parseRepeat(tokens: []lexer.Token, data_size: u8, program: *Program, line: u1
 
 fn parseDataInstruction(tokens: []lexer.Token, program: *Program) ParserError!void {
     var instruction: DataInstruction = undefined;
-    if (tokens[0].type == .Ident) {
+    if (tokens[0].type == .Ident or tokens[0].type == .HashIdent) {
         if (tokens[1].type == .Colon) {
             if (tokens[2].type.isDataDirective()) {
                 const data_size: u8 = switch (tokens[2].type) {
-                    .D8 => 1,
-                    .D16 => 2,
-                    .D32 => 4,
-                    .D64 => 8,
+                    .d8 => 1,
+                    .d16 => 2,
+                    .d32 => 4,
+                    .d64 => 8,
                     else => unreachable,
                 };
                 instruction.label = tokens[0].value;
@@ -434,7 +394,7 @@ fn parseDataInstruction(tokens: []lexer.Token, program: *Program) ParserError!vo
                                 return ParserError.ParsingFailed;
                             }
                         },
-                        .Repeat => {
+                        .repeat => {
                             if (expect_value) {
                                 expect_value = false;
                             } else {
@@ -471,11 +431,11 @@ fn parseDataInstruction(tokens: []lexer.Token, program: *Program) ParserError!vo
                     stdbuffers.printSourceErrorFormatted(program.file_name, "label '{s}' already defined in this file", .{instruction.label}, program.content, tokens[0].line);
                     return ParserError.ParsingFailed;
                 } else {
-                    result.value_ptr.type = .Local;
+                    result.value_ptr.type = if (tokens[0].type == .HashIdent) .Export else .Local;
                     result.value_ptr.section = .Data;
                 }
 
-                try program.data_section.?.instr.append(program.allocator, instruction);
+                try program.data_block.?.instr.append(program.allocator, instruction);
             } else {
                 stdbuffers.printSourceError(program.file_name, "expected data size directive", program.content, tokens[2].line);
                 return ParserError.ParsingFailed;
@@ -490,21 +450,18 @@ fn parseDataInstruction(tokens: []lexer.Token, program: *Program) ParserError!vo
     }
 }
 
-fn parseDataSection(tokens: []lexer.Token, program: *Program) ParserError!usize {
-    program.data_section = DataSection.new();
-    const first = tokens[0];
-    program.data_section.?.flags = try parseSectionFlags(first, program);
-    if (tokens[1].type == .NewLine) {
-        var current_instruction: []lexer.Token = tokens[2..2];
-        var i: usize = 2;
+fn parseDataBlock(tokens: []lexer.Token, program: *Program) ParserError!usize {
+    program.data_block = DataBlock.new();
+    if (tokens[0].type == .NewLine) {
+        var current_instruction: []lexer.Token = tokens[1..1];
+        var i: usize = 1;
         while (i < tokens.len) : (i += 1) {
             const token = tokens[i];
             if (token.type == .NewLine) {
                 current_instruction.len += 1;
                 try parseDataInstruction(current_instruction, program);
-                current_instruction.ptr = tokens[i + 1 .. i + 1].ptr;
-                current_instruction.len = 0;
-            } else if (token.type == .Section) {
+                current_instruction = tokens[i + 1 .. i + 1];
+            } else if (token.type.isBlockDecl()) {
                 return i;
             } else {
                 current_instruction.len += 1;
@@ -717,7 +674,7 @@ fn parseOperand(tokens: []lexer.Token, program: *Program) ParserError!Operand {
             const token = first;
             if (token.type.isReg()) {
                 oper = .{ .reg = Register.init(token.type) };
-            } else if (token.type == .Ident) {
+            } else if (token.type.isAnyIdent()) {
                 oper = .{ .label = token.value };
             } else if (token.type == .NumberLiteral or token.type == .NegNumLiteral or token.type == .PosNumLiteral) {
                 oper = .{ .imm = try immFromNumToken(token) };
@@ -741,10 +698,10 @@ fn parseOperand(tokens: []lexer.Token, program: *Program) ParserError!Operand {
                 if (second.type == .OpenBracket and last.type == .CloseBracket) {
                     var mem_operand = try parseMemoryOperand(tokens[2 .. tokens.len - 1], program);
                     const ptr_size: u8 = switch (first.type) {
-                        .P8 => 1,
-                        .P16 => 2,
-                        .P32 => 4,
-                        .P64 => 8,
+                        .p8 => 1,
+                        .p16 => 2,
+                        .p32 => 4,
+                        .p64 => 8,
                         else => unreachable,
                     };
                     mem_operand.size = ptr_size;
@@ -772,7 +729,7 @@ fn parseOperand(tokens: []lexer.Token, program: *Program) ParserError!Operand {
 
 fn parseCodeInstruction(tokens: []lexer.Token, program: *Program) ParserError!void {
     var instruction: CodeInstruction = undefined;
-    if (tokens[0].type == .Ident) {
+    if (tokens[0].type.isAnyIdent()) {
         if (tokens.len > 1 and tokens[1].type == .Colon) {
             const label = tokens[0].value;
 
@@ -781,12 +738,17 @@ fn parseCodeInstruction(tokens: []lexer.Token, program: *Program) ParserError!vo
                 stdbuffers.printSourceErrorFormatted(program.file_name, "label '{s}' already defined in this file", .{label}, program.content, tokens[0].line);
                 return ParserError.ParsingFailed;
             } else {
-                result.value_ptr.type = .Local;
+                result.value_ptr.type = switch (tokens[0].type) {
+                    .Ident => .Local,
+                    .HashIdent => .Export,
+                    .DotIdent => .Hidden,
+                    else => unreachable,
+                };
                 result.value_ptr.section = .Code;
             }
 
             instruction = .{ .label = .{ .name = label, .line = tokens[0].line } };
-            try program.code_section.?.instr.append(program.allocator, instruction);
+            try program.code_block.?.instr.append(program.allocator, instruction);
         } else {
             stdbuffers.printSourceError(program.file_name, "expected ':'", program.content, tokens[0].line);
             return ParserError.ParsingFailed;
@@ -821,27 +783,24 @@ fn parseCodeInstruction(tokens: []lexer.Token, program: *Program) ParserError!vo
                 oper_tokens.len += 1;
             }
         }
-        try program.code_section.?.instr.append(program.allocator, instruction);
+        try program.code_block.?.instr.append(program.allocator, instruction);
     } else {
         stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, tokens[0].line);
         return ParserError.ParsingFailed;
     }
 }
 
-fn parseCodeSection(tokens: []lexer.Token, program: *Program) ParserError!usize {
-    program.code_section = CodeSection.new();
-    const first = tokens[0];
-    program.code_section.?.flags = try parseSectionFlags(first, program);
-    if (tokens[1].type == .NewLine) {
-        var current_instruction: []lexer.Token = tokens[2..2];
-        var i: usize = 2;
+fn parseCodeBlock(tokens: []lexer.Token, program: *Program) ParserError!usize {
+    program.code_block = CodeBlock.new();
+    if (tokens[0].type == .NewLine) {
+        var current_instruction: []lexer.Token = tokens[1..1];
+        var i: usize = 1;
         while (i < tokens.len) : (i += 1) {
             const token = tokens[i];
             if (token.type == .NewLine) {
                 try parseCodeInstruction(current_instruction, program);
-                current_instruction.ptr = tokens[i + 1 .. i + 1].ptr;
-                current_instruction.len = 0;
-            } else if (token.type == .Section) {
+                current_instruction = tokens[i + 1 .. i + 1];
+            } else if (token.type.isBlockDecl()) {
                 return i;
             } else {
                 current_instruction.len += 1;
@@ -854,42 +813,7 @@ fn parseCodeSection(tokens: []lexer.Token, program: *Program) ParserError!usize 
     return tokens.len;
 }
 
-fn parseExportSection(tokens: []lexer.Token, program: *Program) ParserError!usize {
-    if (tokens[0].type != .NewLine) {
-        stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, tokens[0].line);
-        return ParserError.ParsingFailed;
-    }
-    var expect_symbol = true;
-    for (tokens[1..], 1..) |token, i| {
-        if (expect_symbol) {
-            if (token.type == .Ident) {
-                const result = try program.exports.getOrPut(token.value);
-                if (result.found_existing) {
-                    stdbuffers.printSourceErrorFormatted(program.file_name, "label '{s}' already defined in this file", .{token.value}, program.content, token.line);
-                    return ParserError.ParsingFailed;
-                }
-                expect_symbol = false;
-            } else if (token.type == .Section) {
-                return i;
-            } else {
-                stdbuffers.printSourceError(program.file_name, "expected label name", program.content, token.line);
-                return ParserError.ParsingFailed;
-            }
-        } else {
-            if (token.type == .Comma or token.type == .NewLine) {
-                expect_symbol = true;
-            } else if (token.type == .Section) {
-                return i;
-            } else {
-                stdbuffers.printSourceError(program.file_name, "expected ','", program.content, token.line);
-                return ParserError.ParsingFailed;
-            }
-        }
-    }
-    return tokens.len;
-}
-
-fn parseImportSection(tokens: []lexer.Token, program: *Program) !usize {
+fn parseImportBlock(tokens: []lexer.Token, program: *Program) !usize {
     if (tokens[0].type != .NewLine) {
         stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, tokens[0].line);
         return ParserError.ParsingFailed;
@@ -908,7 +832,7 @@ fn parseImportSection(tokens: []lexer.Token, program: *Program) !usize {
                     result.value_ptr.offset = 0;
                 }
                 expect_symbol = false;
-            } else if (token.type == .Section) {
+            } else if (token.type.isBlockDecl()) {
                 return i;
             } else {
                 stdbuffers.printSourceError(program.file_name, "expected label name", program.content, token.line);
@@ -917,7 +841,7 @@ fn parseImportSection(tokens: []lexer.Token, program: *Program) !usize {
         } else {
             if (token.type == .Comma or token.type == .NewLine) {
                 expect_symbol = true;
-            } else if (token.type == .Section) {
+            } else if (token.type.isBlockDecl()) {
                 return i;
             } else {
                 stdbuffers.printSourceError(program.file_name, "expected ','", program.content, token.line);
@@ -929,14 +853,13 @@ fn parseImportSection(tokens: []lexer.Token, program: *Program) !usize {
 }
 
 pub fn parseTokens(program: *Program) ParserError!void {
+    var datblk_defined = false;
+    var codblk_defined = false;
     var i: usize = 0;
-    var skip_entry = false;
-    var datsec_defined = false;
-    var codsec_defined = false;
     while (i < program.tokens.items.len) : (i += 1) {
         const token = program.tokens.items[i];
 
-        if (token.type == .Entry and !skip_entry) {
+        if (token.type == .entry) {
             if (program.entry == null) {
                 try parseEntry(program.tokens.items[i + 1 ..], program);
                 i += 2;
@@ -944,40 +867,31 @@ pub fn parseTokens(program: *Program) ParserError!void {
                 stdbuffers.printSourceError(program.file_name, "entry label already defined in this file", program.content, token.line);
                 return ParserError.ParsingFailed;
             }
-        } else if (token.type == .Section) {
-            skip_entry = true;
-            if (program.tokens.items[i + 1].type == .Data) {
-                if (datsec_defined) {
-                    stdbuffers.printSourceError(program.file_name, "data section already present in this file", program.content, token.line);
-                    return ParserError.ParsingFailed;
-                }
-                const len = try parseDataSection(program.tokens.items[i + 2 ..], program);
-                if (program.data_section.?.instr.items.len == 0) {
-                    program.data_section = null;
-                }
-                i += (len + 1);
-                datsec_defined = true;
-            } else if (program.tokens.items[i + 1].type == .Code) {
-                if (codsec_defined) {
-                    stdbuffers.printSourceError(program.file_name, "code section already present in this file", program.content, token.line);
-                    return ParserError.ParsingFailed;
-                }
-                const len = try parseCodeSection(program.tokens.items[i + 2 ..], program);
-                if (program.code_section.?.instr.items.len == 0) {
-                    program.code_section = null;
-                }
-                i += (len + 1);
-                codsec_defined = true;
-            } else if (program.tokens.items[i + 1].type == .Export) {
-                const len = try parseExportSection(program.tokens.items[i + 2 ..], program);
-                i += (len + 1);
-            } else if (program.tokens.items[i + 1].type == .Import) {
-                const len = try parseImportSection(program.tokens.items[i + 2 ..], program);
-                i += (len + 1);
-            } else {
-                stdbuffers.printSourceError(program.file_name, "unknown section type", program.content, token.line);
+        } else if (token.type == .data) {
+            if (datblk_defined) {
+                stdbuffers.printSourceError(program.file_name, "data block already present in this file", program.content, token.line);
                 return ParserError.ParsingFailed;
             }
+            const len = try parseDataBlock(program.tokens.items[i + 1 ..], program);
+            if (program.data_block.?.instr.items.len == 0) {
+                program.data_block = null;
+            }
+            i += len;
+            datblk_defined = true;
+        } else if (token.type == .code) {
+            if (codblk_defined) {
+                stdbuffers.printSourceError(program.file_name, "code block already present in this file", program.content, token.line);
+                return ParserError.ParsingFailed;
+            }
+            const len = try parseCodeBlock(program.tokens.items[i + 1 ..], program);
+            if (program.code_block.?.instr.items.len == 0) {
+                program.code_block = null;
+            }
+            i += len;
+            codblk_defined = true;
+        } else if (token.type == .import) {
+            const len = try parseImportBlock(program.tokens.items[i + 1 ..], program);
+            i += len;
         } else {
             stdbuffers.printSourceError(program.file_name, "unexpected symbols on line", program.content, token.line);
             return ParserError.ParsingFailed;
@@ -1053,11 +967,10 @@ pub fn printAST(program: *Program) void {
         std.debug.print("entry: null\n", .{});
     }
 
-    if (program.data_section) |*data_section| {
-        // data section
-        std.debug.print("section data\n", .{});
-        std.debug.print("flags: r - {}, w - {}, e - {}\n", .{ data_section.flags.read, data_section.flags.write, data_section.flags.exec });
-        for (data_section.instr.items) |instr| {
+    if (program.data_block) |*data_block| {
+        // data block
+        std.debug.print("data block\n", .{});
+        for (data_block.instr.items) |instr| {
             std.debug.print(" {s}: d{d} ", .{ instr.label, instr.size * 8 });
             for (instr.data.items, 0..) |item, i| {
                 switch (item) {
@@ -1100,17 +1013,16 @@ pub fn printAST(program: *Program) void {
         }
         std.debug.print("\n", .{});
     }
-    if (program.code_section) |*code_section| {
-        // code section
-        std.debug.print("section code\n", .{});
-        std.debug.print("flags: r - {}, w - {}, e - {}\n", .{ code_section.flags.read, code_section.flags.write, code_section.flags.exec });
-        for (code_section.instr.items) |instr| {
+    if (program.code_block) |*code_block| {
+        // code block
+        std.debug.print("code block\n", .{});
+        for (code_block.instr.items) |instr| {
             switch (instr) {
                 .cpu => {
                     printCPUInstruction(instr.cpu);
                 },
                 .label => {
-                    std.debug.print("label {s}:", .{instr.label});
+                    std.debug.print("label {s}:", .{instr.label.name});
                 },
             }
             std.debug.print("\n", .{});
@@ -1121,6 +1033,7 @@ pub fn printAST(program: *Program) void {
 
 pub fn printSymbolTable(program: *Program) void {
     std.debug.print(" Symbols\n", .{});
+    std.debug.print("entry {?s}\n", .{program.entry});
     var iter = program.symbols.iterator();
     while (iter.next()) |sym| {
         std.debug.print("{s} {s} {s}: {d}\n", .{
@@ -1133,6 +1046,7 @@ pub fn printSymbolTable(program: *Program) void {
                 .Local => "LOC",
                 .Export => "EXP",
                 .Import => "IMP",
+                .Hidden => "HID",
             },
             sym.key_ptr.*,
             sym.value_ptr.offset,

@@ -207,13 +207,13 @@ pub const Assembler = struct {
         };
 
         const code_section_ind: u8 = 1;
-        const data_section_ind: u8 = if (self.program.code_section != null) 2 else 1;
+        const data_section_ind: u8 = if (self.program.code_block != null) 2 else 1;
 
         var str_start = strtab_size;
 
         str_start = strtab_size;
-        if (self.program.code_section) |*code_section| {
-            self.objfile.code_buffer = code_section.buffer;
+        if (self.program.code_block) |*code_block| {
+            self.objfile.code_buffer = code_block.buffer;
             self.objfile.text_section = elf.Elf64_Shdr{
                 .sh_name = shnstrtab_size,
                 .sh_type = elf.SHT_PROGBITS,
@@ -246,8 +246,8 @@ pub const Assembler = struct {
         }
 
         str_start = strtab_size;
-        if (self.program.data_section) |*data_section| {
-            self.objfile.data_buffer = data_section.buffer;
+        if (self.program.data_block) |*data_block| {
+            self.objfile.data_buffer = data_block.buffer;
             self.objfile.data_section = elf.Elf64_Shdr{
                 .sh_name = shnstrtab_size,
                 .sh_type = elf.SHT_PROGBITS,
@@ -282,7 +282,7 @@ pub const Assembler = struct {
         // First append all LOCAL symbols
         var sym_iter = self.program.symbols.iterator();
         while (sym_iter.next()) |sym| {
-            if (sym.value_ptr.type == .Local) {
+            if (sym.value_ptr.type == .Local or sym.value_ptr.type == .Hidden) {
                 str_start = strtab_size;
                 try self.objfile.strtab.appendSlice(self.allocator, sym.key_ptr.*);
                 try self.objfile.strtab.append(self.allocator, 0);
@@ -302,12 +302,14 @@ pub const Assembler = struct {
                     .Undef => unreachable,
                 }
 
+                const visib = if (sym.value_ptr.type == .Local) elf.STV.DEFAULT else elf.STV.HIDDEN;
+
                 const symbol = elf.Elf64_Sym{
                     .st_name = str_start,
                     .st_value = sym.value_ptr.offset,
                     .st_size = 0,
                     .st_info = (elf.STB_LOCAL << 4) + (sym_type & 0xF),
-                    .st_other = @intFromEnum(elf.STV.DEFAULT) & 0x3,
+                    .st_other = @intFromEnum(visib) & 0x3,
                     .st_shndx = sym_shndx,
                 };
 
@@ -361,8 +363,8 @@ pub const Assembler = struct {
         }
 
         str_start = strtab_size;
-        if (self.program.code_section) |*code_section| {
-            for (code_section.relocations.items) |relocation| {
+        if (self.program.code_block) |*code_block| {
+            for (code_block.relocations.items) |relocation| {
                 var sym_ind: u32 = 0;
                 if (symbol_indices.get(relocation.name)) |index| {
                     sym_ind = index;
@@ -644,7 +646,9 @@ pub const Assembler = struct {
         try self.program.tokenize();
         // self.program.printTokens();
         try self.program.parse();
-        try self.program.defineExportLabels();
+        // self.program.printParse();
+        // self.program.printSymTab();
+        try self.program.checkEntry();
         try self.program.genDataCodeBuffers();
 
         // Create object file data from program data

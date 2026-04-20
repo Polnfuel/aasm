@@ -1,24 +1,21 @@
-section export 
-    print, print_number
-
-section import
+@import
     inttostr
 
-section data rw
+@data
 
 
-section code rx
+@code
 ; in: rsi - null-terminated string pointer
 ; out: rax - number of bytes written
-print:
+#print:
     xor rdx, rdx
-pr_1:
+.pr_1:
     mov bl, [rsi + rdx]
     cmp bl, 0
-    je pr_2
+    je .pr_2
     inc rdx
-    jmp pr_1
-pr_2:
+    jmp .pr_1
+.pr_2:
     mov rdi, 1
     mov rax, 1
     syscall
@@ -26,7 +23,7 @@ pr_2:
     ret
 
 ; in: rax - number to print
-print_number:
+#print_number:
     call inttostr
 
     mov rsi, rax

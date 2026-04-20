@@ -1,13 +1,10 @@
-section import 
+@import 
     exit
     print_newline
 
-section export
-    print
+@code
 
-section code rx
-
-print:
+#print:
     mov rdx, rbx
     mov rax, 0
     jmp exit

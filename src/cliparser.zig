@@ -17,6 +17,8 @@ pub const CliArgs = struct {
     v: bool,
     o: bool,
     f: bool,
+    s: bool,
+    g: bool,
     format: OutputFormat,
 
     pub fn parseArgs(args: [][:0]u8, allocator: std.mem.Allocator) CliError!CliArgs {
@@ -27,6 +29,8 @@ pub const CliArgs = struct {
             .v = false,
             .o = false,
             .f = false,
+            .s = false,
+            .g = false,
             .format = .Object,
         };
         errdefer cli_args.deinit(allocator);
@@ -98,6 +102,12 @@ pub const CliArgs = struct {
                         }
                         cli_args.f = true;
                     },
+                    's' => {
+                        cli_args.s = true;
+                    },
+                    'g' => {
+                        cli_args.g = true;
+                    },
                     else => {
                         stdbuffers.printErrorFormatted("unknown option: -{c}", .{option});
                         return CliError.CliParseFailed;
@@ -137,6 +147,21 @@ pub const CliArgs = struct {
                     stdbuffers.printError("cannot combine multiple sources into one object file");
                     return CliError.CliParseFailed;
                 }
+            } else if (self.output_file.len == 0 and (self.format != .Object)) {
+                stdbuffers.printError("output file name must be specified");
+                return CliError.CliParseFailed;
+            }
+        }
+        if (self.s) {
+            if (self.g) {
+                stdbuffers.printError("cannot add debug info and strip at the same time");
+                return CliError.CliParseFailed;
+            } else if (self.input_files.items.len == 0) {
+                stdbuffers.printError("expected at least one input file");
+                return CliError.CliParseFailed;
+            } else if (self.o and (self.format == .Object or self.format == .StaticArchive)) {
+                stdbuffers.printError("cannot strip from object file(s) or archive");
+                return CliError.CliParseFailed;
             }
         }
     }
