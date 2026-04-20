@@ -6,8 +6,9 @@ const Program = program.Program;
 const stdbuffers = @import("stdbuffers");
 
 const elf = std.elf;
+const dwarf = std.dwarf;
 
-pub const LoadFileError = error{SourceFileTooBig} || std.fs.File.OpenError || std.fs.File.StatError || std.mem.Allocator.Error || std.Io.Reader.Error;
+pub const LoadFileError = error{SourceFileTooBig} || std.fs.Dir.RealPathAllocError || std.fs.File.OpenError || std.fs.File.StatError || std.mem.Allocator.Error || std.Io.Reader.Error;
 
 pub const ObjectError = error{ObjectError} || std.Io.Writer.Error || std.mem.Allocator.Error || std.fs.File.OpenError;
 
@@ -27,6 +28,7 @@ pub const ObjFile = struct {
     strtab_section: ?elf.Elf64_Shdr,
     symtab_section: ?elf.Elf64_Shdr,
     relatab_section: ?elf.Elf64_Shdr,
+    section_count: usize,
 
     pub fn new() ObjFile {
         return ObjFile{
@@ -43,6 +45,7 @@ pub const ObjFile = struct {
             .strtab_section = null,
             .symtab_section = null,
             .relatab_section = null,
+            .section_count = 0,
         };
     }
 
@@ -123,6 +126,7 @@ const AsmFlags = packed struct {
     data: bool,
     symbols: bool,
     relocations: bool,
+    debug_info: bool,
 
     pub fn new() AsmFlags {
         return AsmFlags{
@@ -130,11 +134,13 @@ const AsmFlags = packed struct {
             .data = false,
             .symbols = false,
             .relocations = false,
+            .debug_info = false,
         };
     }
 };
 
 pub const Assembler = struct {
+    rel_path: []const u8,
     output_file: []const u8,
     allocator: std.mem.Allocator,
     program: program.Program,
@@ -165,8 +171,9 @@ pub const Assembler = struct {
         return content;
     }
 
-    pub fn new(input_abs_path: []const u8, output_name: []const u8, allocator: std.mem.Allocator) LoadFileError!Assembler {
+    pub fn new(rel_path: []const u8, allocator: std.mem.Allocator, gen_debug: bool) LoadFileError!Assembler {
         var assembler = Assembler{
+            .rel_path = undefined,
             .output_file = undefined,
             .allocator = allocator,
             .program = undefined,
@@ -174,9 +181,20 @@ pub const Assembler = struct {
             .flags = AsmFlags.new(),
             .file_size = 0,
         };
+        assembler.flags.debug_info = gen_debug;
+        assembler.rel_path = try assembler.allocator.dupe(u8, rel_path);
+
+        const output_name = std.fs.path.stem(assembler.rel_path);
         assembler.output_file = try assembler.allocator.dupe(u8, output_name);
+
+        const input_abs_path = try std.fs.cwd().realpathAlloc(assembler.allocator, rel_path);
+        defer assembler.allocator.free(input_abs_path);
+
         const content = try assembler.loadFromFile(input_abs_path);
-        assembler.program = try Program.new(std.fs.path.basename(input_abs_path), content, assembler.allocator);
+        assembler.program = try Program.new(std.fs.path.basename(input_abs_path), content, assembler.allocator, gen_debug);
+        if (assembler.flags.debug_info) {
+            assembler.program.debug_info.dir_path = std.fs.path.dirname(rel_path);
+        }
         return assembler;
     }
 
@@ -202,12 +220,13 @@ pub const Assembler = struct {
             .sh_size = undefined,
             .sh_link = 0,
             .sh_info = 0,
-            .sh_addralign = 1,
+            .sh_addralign = 0x1,
             .sh_entsize = 0,
         };
 
         const code_section_ind: u8 = 1;
         const data_section_ind: u8 = if (self.program.code_block != null) 2 else 1;
+        self.objfile.section_count = data_section_ind + 2;
 
         var str_start = strtab_size;
 
@@ -242,6 +261,11 @@ pub const Assembler = struct {
                 .st_other = @intFromEnum(elf.STV.DEFAULT) & 0x3,
                 .st_size = 0,
             });
+
+            if (self.flags.debug_info) {
+                self.program.debug_info.text_symbol_ind = symtab_size;
+            }
+
             symtab_size += 1;
         }
 
@@ -277,6 +301,206 @@ pub const Assembler = struct {
                 .st_size = 0,
             });
             symtab_size += 1;
+        }
+
+        if (self.flags.debug_info) {
+            self.program.debug_info.dbline_section = elf.Elf64_Shdr{
+                .sh_name = shnstrtab_size,
+                .sh_type = elf.SHT_PROGBITS,
+                .sh_flags = 0,
+                .sh_addr = 0,
+                .sh_offset = undefined,
+                .sh_size = 0,
+                .sh_link = 0,
+                .sh_info = 0,
+                .sh_addralign = 0x1,
+                .sh_entsize = 0,
+            };
+            try self.objfile.shnstrtab.appendSlice(self.allocator, @ptrCast(".debug_line"));
+            try self.objfile.shnstrtab.append(self.allocator, 0);
+            shnstrtab_size = @truncate(self.objfile.shnstrtab.items.len);
+
+            str_start = strtab_size;
+            try self.objfile.strtab.appendSlice(self.allocator, @ptrCast(".debug_line"));
+            try self.objfile.strtab.append(self.allocator, 0);
+            strtab_size = @truncate(self.objfile.strtab.items.len);
+
+            try self.objfile.symtab.append(self.allocator, elf.Elf64_Sym{
+                .st_name = str_start,
+                .st_value = 0,
+                .st_info = (elf.STB_LOCAL << 4) + (elf.STT_SECTION & 0xF),
+                .st_shndx = undefined,
+                .st_other = @intFromEnum(elf.STV.DEFAULT) & 0x3,
+                .st_size = 0,
+            });
+            self.program.debug_info.debug_line_ind = symtab_size;
+            symtab_size += 1;
+
+            self.program.debug_info.dblinestr_section = elf.Elf64_Shdr{
+                .sh_name = shnstrtab_size,
+                .sh_type = elf.SHT_PROGBITS,
+                .sh_flags = elf.SHF_MERGE + elf.SHF_STRINGS,
+                .sh_addr = 0,
+                .sh_offset = undefined,
+                .sh_size = 0,
+                .sh_link = 0,
+                .sh_info = 0,
+                .sh_addralign = 0x1,
+                .sh_entsize = 0x1,
+            };
+
+            try self.objfile.shnstrtab.appendSlice(self.allocator, @ptrCast(".debug_line_str"));
+            try self.objfile.shnstrtab.append(self.allocator, 0);
+            shnstrtab_size = @truncate(self.objfile.shnstrtab.items.len);
+
+            str_start = strtab_size;
+            try self.objfile.strtab.appendSlice(self.allocator, @ptrCast(".debug_line_str"));
+            try self.objfile.strtab.append(self.allocator, 0);
+            strtab_size = @truncate(self.objfile.strtab.items.len);
+
+            try self.objfile.symtab.append(self.allocator, elf.Elf64_Sym{
+                .st_name = str_start,
+                .st_value = 0,
+                .st_info = (elf.STB_LOCAL << 4) + (elf.STT_SECTION & 0xF),
+                .st_shndx = undefined,
+                .st_other = @intFromEnum(elf.STV.DEFAULT) & 0x3,
+                .st_size = 0,
+            });
+            self.program.debug_info.debug_line_str_ind = symtab_size;
+            symtab_size += 1;
+
+            self.program.debug_info.dblinerela_section = elf.Elf64_Shdr{
+                .sh_name = shnstrtab_size,
+                .sh_type = elf.SHT_RELA,
+                .sh_flags = 0,
+                .sh_addr = 0,
+                .sh_offset = undefined,
+                .sh_size = 0,
+                .sh_link = undefined,
+                .sh_info = undefined,
+                .sh_addralign = 0x1,
+                .sh_entsize = @sizeOf(elf.Elf64_Rela),
+            };
+
+            try self.objfile.shnstrtab.appendSlice(self.allocator, @ptrCast(".rela.debug_line"));
+            try self.objfile.shnstrtab.append(self.allocator, 0);
+            shnstrtab_size = @truncate(self.objfile.shnstrtab.items.len);
+
+            self.program.debug_info.dbinfo_section = elf.Elf64_Shdr{
+                .sh_name = shnstrtab_size,
+                .sh_type = elf.SHT_PROGBITS,
+                .sh_flags = 0,
+                .sh_addr = 0,
+                .sh_offset = undefined,
+                .sh_size = 0,
+                .sh_link = 0,
+                .sh_info = 0,
+                .sh_addralign = 0x1,
+                .sh_entsize = 0,
+            };
+            try self.objfile.shnstrtab.appendSlice(self.allocator, @ptrCast(".debug_info"));
+            try self.objfile.shnstrtab.append(self.allocator, 0);
+            shnstrtab_size = @truncate(self.objfile.shnstrtab.items.len);
+
+            str_start = strtab_size;
+            try self.objfile.strtab.appendSlice(self.allocator, @ptrCast(".debug_info"));
+            try self.objfile.strtab.append(self.allocator, 0);
+            strtab_size = @truncate(self.objfile.strtab.items.len);
+
+            try self.objfile.symtab.append(self.allocator, elf.Elf64_Sym{
+                .st_name = str_start,
+                .st_value = 0,
+                .st_info = (elf.STB_LOCAL << 4) + (elf.STT_SECTION & 0xF),
+                .st_shndx = undefined,
+                .st_other = @intFromEnum(elf.STV.DEFAULT) & 0x3,
+                .st_size = 0,
+            });
+            self.program.debug_info.debug_info_ind = symtab_size;
+            symtab_size += 1;
+
+            self.program.debug_info.dbabbrev_section = elf.Elf64_Shdr{
+                .sh_name = shnstrtab_size,
+                .sh_type = elf.SHT_PROGBITS,
+                .sh_flags = 0,
+                .sh_addr = 0,
+                .sh_offset = undefined,
+                .sh_size = 0,
+                .sh_link = 0,
+                .sh_info = 0,
+                .sh_addralign = 0x1,
+                .sh_entsize = 0,
+            };
+            try self.objfile.shnstrtab.appendSlice(self.allocator, @ptrCast(".debug_abbrev"));
+            try self.objfile.shnstrtab.append(self.allocator, 0);
+            shnstrtab_size = @truncate(self.objfile.shnstrtab.items.len);
+
+            str_start = strtab_size;
+            try self.objfile.strtab.appendSlice(self.allocator, @ptrCast(".debug_abbrev"));
+            try self.objfile.strtab.append(self.allocator, 0);
+            strtab_size = @truncate(self.objfile.strtab.items.len);
+
+            try self.objfile.symtab.append(self.allocator, elf.Elf64_Sym{
+                .st_name = str_start,
+                .st_value = 0,
+                .st_info = (elf.STB_LOCAL << 4) + (elf.STT_SECTION & 0xF),
+                .st_shndx = undefined,
+                .st_other = @intFromEnum(elf.STV.DEFAULT) & 0x3,
+                .st_size = 0,
+            });
+            self.program.debug_info.debug_abbrev_ind = symtab_size;
+            symtab_size += 1;
+
+            self.program.debug_info.dbstr_section = elf.Elf64_Shdr{
+                .sh_name = shnstrtab_size,
+                .sh_type = elf.SHT_PROGBITS,
+                .sh_flags = elf.SHF_MERGE + elf.SHF_STRINGS,
+                .sh_addr = 0,
+                .sh_offset = undefined,
+                .sh_size = 0,
+                .sh_link = 0,
+                .sh_info = 0,
+                .sh_addralign = 0x1,
+                .sh_entsize = 0x1,
+            };
+
+            try self.objfile.shnstrtab.appendSlice(self.allocator, @ptrCast(".debug_str"));
+            try self.objfile.shnstrtab.append(self.allocator, 0);
+            shnstrtab_size = @truncate(self.objfile.shnstrtab.items.len);
+
+            str_start = strtab_size;
+            try self.objfile.strtab.appendSlice(self.allocator, @ptrCast(".debug_str"));
+            try self.objfile.strtab.append(self.allocator, 0);
+            strtab_size = @truncate(self.objfile.strtab.items.len);
+
+            try self.objfile.symtab.append(self.allocator, elf.Elf64_Sym{
+                .st_name = str_start,
+                .st_value = 0,
+                .st_info = (elf.STB_LOCAL << 4) + (elf.STT_SECTION & 0xF),
+                .st_shndx = undefined,
+                .st_other = @intFromEnum(elf.STV.DEFAULT) & 0x3,
+                .st_size = 0,
+            });
+            self.program.debug_info.debug_str_ind = symtab_size;
+            symtab_size += 1;
+
+            self.program.debug_info.dbinforela_section = elf.Elf64_Shdr{
+                .sh_name = shnstrtab_size,
+                .sh_type = elf.SHT_RELA,
+                .sh_flags = 0,
+                .sh_addr = 0,
+                .sh_offset = undefined,
+                .sh_size = 0,
+                .sh_link = undefined,
+                .sh_info = undefined,
+                .sh_addralign = 0x1,
+                .sh_entsize = @sizeOf(elf.Elf64_Rela),
+            };
+
+            try self.objfile.shnstrtab.appendSlice(self.allocator, @ptrCast(".rela.debug_info"));
+            try self.objfile.shnstrtab.append(self.allocator, 0);
+            shnstrtab_size = @truncate(self.objfile.shnstrtab.items.len);
+
+            self.objfile.section_count += 7;
         }
 
         // First append all LOCAL symbols
@@ -422,6 +646,8 @@ pub const Assembler = struct {
             try self.objfile.shnstrtab.appendSlice(self.allocator, @ptrCast(".symtab"));
             try self.objfile.shnstrtab.append(self.allocator, 0);
             shnstrtab_size = @truncate(self.objfile.shnstrtab.items.len);
+
+            self.objfile.section_count += 2;
         }
 
         if (self.objfile.relatab.items.len > 0) {
@@ -441,6 +667,8 @@ pub const Assembler = struct {
             try self.objfile.shnstrtab.appendSlice(self.allocator, @ptrCast(".rela.text"));
             try self.objfile.shnstrtab.append(self.allocator, 0);
             shnstrtab_size = @truncate(self.objfile.shnstrtab.items.len);
+
+            self.objfile.section_count += 1;
         }
 
         self.objfile.shnstrtab_section.sh_name = shnstrtab_size;
@@ -469,9 +697,181 @@ pub const Assembler = struct {
         }
     }
 
+    fn defineDebugLine(self: *Assembler) std.mem.Allocator.Error!void {
+        const dir_cnt: u8 = if (self.program.debug_info.dir_path != null) 2 else 1;
+        try self.program.debug_info.debug_line_str_buffer.appendSlice(self.allocator, self.program.debug_info.cwd_path);
+        try self.program.debug_info.debug_line_str_buffer.append(self.allocator, 0);
+        const dir1_ind: u32 = @truncate(self.program.debug_info.debug_line_str_buffer.items.len);
+        if (dir_cnt > 1) {
+            try self.program.debug_info.debug_line_str_buffer.appendSlice(self.allocator, self.program.debug_info.dir_path.?);
+            try self.program.debug_info.debug_line_str_buffer.append(self.allocator, 0);
+        }
+        const filename_ind: u32 = @truncate(self.program.debug_info.debug_line_str_buffer.items.len);
+        try self.program.debug_info.debug_line_str_buffer.appendSlice(self.allocator, self.program.file_name);
+        try self.program.debug_info.debug_line_str_buffer.append(self.allocator, 0);
+        // std.debug.print("{d}, {d}, {d}\n", .{ 0, dir1_ind, filename_ind });
+        self.program.debug_info.dblinestr_section.sh_size = self.program.debug_info.debug_line_str_buffer.items.len;
+
+        try self.program.debug_info.debug_line_buffer.appendSlice(self.allocator, &.{
+            0,    0,    0,    0,    0x5,  0x0,
+            0x8,  0x0,  0,    0,    0,    0,
+            0x01, 0x01, 0x01, 0xfb, 0x0e, 0x0d,
+            0,    1,    1,    1,    1,    0,
+            0,    0,    1,    0,    0,    1,
+        });
+
+        // Directories
+        try self.program.debug_info.debug_line_buffer.appendSlice(self.allocator, &.{
+            0x01, 0x01, 0x1f, dir_cnt,
+        });
+
+        const dirs_start = self.program.debug_info.debug_line_buffer.items.len;
+        for (0..dir_cnt) |_| {
+            try self.program.debug_info.debug_line_buffer.appendSlice(self.allocator, &.{ 0, 0, 0, 0 });
+        }
+
+        // Files
+        try self.program.debug_info.debug_line_buffer.appendSlice(self.allocator, &.{
+            0x02, 0x01, 0x1f, 0x02, 0x0f, 0x02,
+        });
+        const files_start = self.program.debug_info.debug_line_buffer.items.len;
+        for (0..2) |_| {
+            try self.program.debug_info.debug_line_buffer.appendSlice(self.allocator, &.{
+                0, 0, 0, 0, dir_cnt - 1,
+            });
+        }
+        self.program.debug_info.debug_line_buffer.items[8] = @truncate(self.program.debug_info.debug_line_buffer.items.len - 12);
+
+        // Line Number Program
+        const text_reloc = try self.program.debug_info.createLineNumberProgram(self.allocator);
+
+        // Relocations
+        // cwd:
+        try self.program.debug_info.debug_line_rela_buffer.append(self.allocator, .{
+            .r_offset = dirs_start,
+            .r_info = (self.program.debug_info.debug_line_str_ind << 32) + (@intFromEnum(elf.R_X86_64.@"32")),
+            .r_addend = 0,
+        });
+        // dir:
+        if (dir_cnt > 1) {
+            try self.program.debug_info.debug_line_rela_buffer.append(self.allocator, .{
+                .r_offset = dirs_start + 4,
+                .r_info = (self.program.debug_info.debug_line_str_ind << 32) + (@intFromEnum(elf.R_X86_64.@"32")),
+                .r_addend = dir1_ind,
+            });
+        }
+        // files:
+        try self.program.debug_info.debug_line_rela_buffer.append(self.allocator, .{
+            .r_offset = files_start,
+            .r_info = (self.program.debug_info.debug_line_str_ind << 32) + (@intFromEnum(elf.R_X86_64.@"32")),
+            .r_addend = filename_ind,
+        });
+        try self.program.debug_info.debug_line_rela_buffer.append(self.allocator, .{
+            .r_offset = files_start + 5,
+            .r_info = (self.program.debug_info.debug_line_str_ind << 32) + (@intFromEnum(elf.R_X86_64.@"32")),
+            .r_addend = filename_ind,
+        });
+        // text:
+        try self.program.debug_info.debug_line_rela_buffer.append(self.allocator, .{
+            .r_offset = text_reloc,
+            .r_info = (self.program.debug_info.text_symbol_ind << 32) + (@intFromEnum(elf.R_X86_64.@"64")),
+            .r_addend = 0,
+        });
+
+        //
+        const unit_length = self.program.debug_info.debug_line_buffer.items.len - 4;
+        std.mem.writeInt(u32, self.program.debug_info.debug_line_buffer.items[0..4], @truncate(unit_length), .little);
+        self.program.debug_info.dbline_section.sh_size = self.program.debug_info.debug_line_buffer.items.len;
+        self.program.debug_info.dblinerela_section.sh_size = self.program.debug_info.debug_line_rela_buffer.items.len * self.program.debug_info.dblinerela_section.sh_entsize;
+    }
+
+    fn defineDebugInfo(self: *Assembler) std.mem.Allocator.Error!void {
+        try self.program.debug_info.debug_str_buffer.appendSlice(self.allocator, self.rel_path);
+        try self.program.debug_info.debug_str_buffer.append(self.allocator, 0);
+        const dir_ind: u32 = @truncate(self.program.debug_info.debug_str_buffer.items.len);
+        try self.program.debug_info.debug_str_buffer.appendSlice(self.allocator, self.program.debug_info.cwd_path);
+        try self.program.debug_info.debug_str_buffer.append(self.allocator, 0);
+        self.program.debug_info.dbstr_section.sh_size = self.program.debug_info.debug_str_buffer.items.len;
+
+        // Debug Abbrev
+        try self.program.debug_info.debug_abbrev_buffer.appendSlice(self.allocator, &.{
+            0x1,                dwarf.TAG.compile_unit, dwarf.CHILDREN.no,
+            dwarf.AT.stmt_list, dwarf.FORM.sec_offset,  dwarf.AT.low_pc,
+            dwarf.FORM.addr,    dwarf.AT.high_pc,       dwarf.FORM.udata,
+            dwarf.AT.name,      dwarf.FORM.strp,        dwarf.AT.comp_dir,
+            dwarf.FORM.strp,    0x00,                   0x00,
+            0x00,
+        });
+
+        // Debug Info
+        try self.program.debug_info.debug_info_buffer.appendSlice(self.allocator, &.{
+            0,    0,   0,                0,
+            0x05, 0x0, dwarf.UT.compile, 0x08,
+            0,    0,   0,                0,
+            0x01, 0,   0,                0,
+            0,    0,   0,                0,
+            0,    0,   0,                0,
+            0,
+        });
+        // high_pc uleb128
+        try self.program.debug_info.debug_info_buffer.append(self.allocator, @truncate(self.objfile.code_buffer.?.items.len));
+        const name_offset = self.program.debug_info.debug_info_buffer.items.len;
+        try self.program.debug_info.debug_info_buffer.appendSlice(self.allocator, &.{
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+        });
+
+        // Relocations
+
+        // abbrev:
+        try self.program.debug_info.debug_info_rela_buffer.append(self.allocator, .{
+            .r_offset = 8,
+            .r_info = (self.program.debug_info.debug_abbrev_ind << 32) + (@intFromEnum(elf.R_X86_64.@"32")),
+            .r_addend = 0,
+        });
+        // debug_line:
+        try self.program.debug_info.debug_info_rela_buffer.append(self.allocator, .{
+            .r_offset = 13,
+            .r_info = (self.program.debug_info.debug_line_ind << 32) + (@intFromEnum(elf.R_X86_64.@"32")),
+            .r_addend = 0,
+        });
+
+        // text:
+        try self.program.debug_info.debug_info_rela_buffer.append(self.allocator, .{
+            .r_offset = 17,
+            .r_info = (self.program.debug_info.text_symbol_ind << 32) + (@intFromEnum(elf.R_X86_64.@"64")),
+            .r_addend = 0,
+        });
+        // name:
+        try self.program.debug_info.debug_info_rela_buffer.append(self.allocator, .{
+            .r_offset = name_offset,
+            .r_info = (self.program.debug_info.debug_str_ind << 32) + (@intFromEnum(elf.R_X86_64.@"32")),
+            .r_addend = 0,
+        });
+        // comp_dir:
+        try self.program.debug_info.debug_info_rela_buffer.append(self.allocator, .{
+            .r_offset = name_offset + 4,
+            .r_info = (self.program.debug_info.debug_str_ind << 32) + (@intFromEnum(elf.R_X86_64.@"32")),
+            .r_addend = dir_ind,
+        });
+
+        //
+        const unit_length = self.program.debug_info.debug_info_buffer.items.len - 4;
+        std.mem.writeInt(u32, self.program.debug_info.debug_info_buffer.items[0..4], @truncate(unit_length), .little);
+        self.program.debug_info.dbinfo_section.sh_size = self.program.debug_info.debug_info_buffer.items.len;
+        self.program.debug_info.dbabbrev_section.sh_size = self.program.debug_info.debug_abbrev_buffer.items.len;
+        self.program.debug_info.dbinforela_section.sh_size = self.program.debug_info.debug_info_rela_buffer.items.len * self.program.debug_info.dbinforela_section.sh_entsize;
+    }
+
     fn genObjectFile(self: *Assembler) ObjectError!void {
         try self.defineObjFileTables();
         // self.objfile.printStrTabSymTab();
+
+        if (self.flags.debug_info) {
+            try self.defineDebugLine();
+            try self.defineDebugInfo();
+            // self.program.debug_info.print();
+        }
 
         self.flags.text = if (self.objfile.text_section != null) true else false;
         self.flags.data = if (self.objfile.data_section != null) true else false;
@@ -494,6 +894,28 @@ pub const Assembler = struct {
         if (self.flags.relocations) {
             relatext_index = symtab_index + 1;
         }
+        var dbg_line_index: u16 = relatext_index;
+        var dbg_line_str_index: u16 = relatext_index;
+        var dbg_line_rela_index: u16 = relatext_index;
+        var dbg_info_index: u16 = relatext_index;
+        var dbg_abbrev_index: u16 = relatext_index;
+        var dbg_str_index: u16 = relatext_index;
+        var dbg_info_rela_index: u16 = relatext_index;
+        if (self.flags.debug_info) {
+            dbg_line_index = relatext_index + 1;
+            dbg_line_str_index = dbg_line_index + 1;
+            dbg_line_rela_index = dbg_line_str_index + 1;
+            dbg_info_index = dbg_line_rela_index + 1;
+            dbg_abbrev_index = dbg_info_index + 1;
+            dbg_str_index = dbg_abbrev_index + 1;
+            dbg_info_rela_index = dbg_str_index + 1;
+
+            self.objfile.symtab.items[self.program.debug_info.debug_line_ind].st_shndx = dbg_line_index;
+            self.objfile.symtab.items[self.program.debug_info.debug_line_str_ind].st_shndx = dbg_line_str_index;
+            self.objfile.symtab.items[self.program.debug_info.debug_info_ind].st_shndx = dbg_info_index;
+            self.objfile.symtab.items[self.program.debug_info.debug_abbrev_ind].st_shndx = dbg_abbrev_index;
+            self.objfile.symtab.items[self.program.debug_info.debug_str_ind].st_shndx = dbg_str_index;
+        }
 
         self.file_size = 0;
 
@@ -511,7 +933,7 @@ pub const Assembler = struct {
             .e_phentsize = 0,
             .e_phnum = 0,
             .e_shentsize = 64,
-            .e_shnum = relatext_index + 1,
+            .e_shnum = dbg_info_rela_index + 1,
             .e_shstrndx = shstrtab_index,
         };
 
@@ -540,8 +962,22 @@ pub const Assembler = struct {
             self.file_size += self.objfile.elf_header.e_shentsize;
         }
 
-        // Section Header Table Entry 5 - .rela.text
+        // Section Header Table Entry 6 - .rela.text
         if (self.flags.relocations) {
+            self.file_size += self.objfile.elf_header.e_shentsize;
+        }
+
+        // Section Header Table Entry 7-9
+        // .debug_line, .debug_line_str, .rela.debug_line
+        // Section Header Table Entry 10-13
+        // .debug_info, .debug_abbrev, .debug_str, .rela.debug_info
+        if (self.flags.debug_info) {
+            self.file_size += self.objfile.elf_header.e_shentsize;
+            self.file_size += self.objfile.elf_header.e_shentsize;
+            self.file_size += self.objfile.elf_header.e_shentsize;
+            self.file_size += self.objfile.elf_header.e_shentsize;
+            self.file_size += self.objfile.elf_header.e_shentsize;
+            self.file_size += self.objfile.elf_header.e_shentsize;
             self.file_size += self.objfile.elf_header.e_shentsize;
         }
 
@@ -577,6 +1013,35 @@ pub const Assembler = struct {
 
             self.objfile.relatab_section.?.sh_link = symtab_index;
             self.objfile.relatab_section.?.sh_info = text_index;
+        }
+        // Debug buffers
+        if (self.flags.debug_info) {
+            self.program.debug_info.dbline_section.sh_offset = self.file_size;
+            self.file_size += self.program.debug_info.dbline_section.sh_size;
+
+            self.program.debug_info.dblinestr_section.sh_offset = self.file_size;
+            self.file_size += self.program.debug_info.dblinestr_section.sh_size;
+
+            self.program.debug_info.dblinerela_section.sh_offset = self.file_size;
+            self.file_size += self.program.debug_info.dblinerela_section.sh_size;
+
+            self.program.debug_info.dblinerela_section.sh_link = symtab_index;
+            self.program.debug_info.dblinerela_section.sh_info = dbg_line_index;
+
+            self.program.debug_info.dbinfo_section.sh_offset = self.file_size;
+            self.file_size += self.program.debug_info.dbinfo_section.sh_size;
+
+            self.program.debug_info.dbabbrev_section.sh_offset = self.file_size;
+            self.file_size += self.program.debug_info.dbabbrev_section.sh_size;
+
+            self.program.debug_info.dbstr_section.sh_offset = self.file_size;
+            self.file_size += self.program.debug_info.dbstr_section.sh_size;
+
+            self.program.debug_info.dbinforela_section.sh_offset = self.file_size;
+            self.file_size += self.program.debug_info.dbinforela_section.sh_size;
+
+            self.program.debug_info.dbinforela_section.sh_link = symtab_index;
+            self.program.debug_info.dbinforela_section.sh_info = dbg_info_index;
         }
     }
 
@@ -622,6 +1087,15 @@ pub const Assembler = struct {
         if (self.flags.relocations) {
             try Assembler.writeElf64_Shdr(writer, &self.objfile.relatab_section.?);
         }
+        if (self.flags.debug_info) {
+            try Assembler.writeElf64_Shdr(writer, &self.program.debug_info.dbline_section);
+            try Assembler.writeElf64_Shdr(writer, &self.program.debug_info.dblinestr_section);
+            try Assembler.writeElf64_Shdr(writer, &self.program.debug_info.dblinerela_section);
+            try Assembler.writeElf64_Shdr(writer, &self.program.debug_info.dbinfo_section);
+            try Assembler.writeElf64_Shdr(writer, &self.program.debug_info.dbabbrev_section);
+            try Assembler.writeElf64_Shdr(writer, &self.program.debug_info.dbstr_section);
+            try Assembler.writeElf64_Shdr(writer, &self.program.debug_info.dbinforela_section);
+        }
 
         if (self.flags.text) {
             _ = try writer.write(self.objfile.code_buffer.?.items);
@@ -637,6 +1111,15 @@ pub const Assembler = struct {
         if (self.flags.relocations) {
             try Assembler.writeRelocationsBuffer(writer, self.objfile.relatab.items);
         }
+        if (self.flags.debug_info) {
+            _ = try writer.write(self.program.debug_info.debug_line_buffer.items);
+            _ = try writer.write(self.program.debug_info.debug_line_str_buffer.items);
+            try Assembler.writeRelocationsBuffer(writer, self.program.debug_info.debug_line_rela_buffer.items);
+            _ = try writer.write(self.program.debug_info.debug_info_buffer.items);
+            _ = try writer.write(self.program.debug_info.debug_abbrev_buffer.items);
+            _ = try writer.write(self.program.debug_info.debug_str_buffer.items);
+            try Assembler.writeRelocationsBuffer(writer, self.program.debug_info.debug_info_rela_buffer.items);
+        }
 
         try writer.flush();
     }
@@ -650,6 +1133,7 @@ pub const Assembler = struct {
         // self.program.printSymTab();
         try self.program.checkEntry();
         try self.program.genDataCodeBuffers();
+        // self.program.printDebugInfo();
 
         // Create object file data from program data
         try self.genObjectFile();
@@ -660,6 +1144,7 @@ pub const Assembler = struct {
     }
 
     pub fn deinit(self: *Assembler) void {
+        self.allocator.free(self.rel_path);
         self.allocator.free(self.output_file);
         self.program.deinit();
         self.objfile.deinit(self.allocator);

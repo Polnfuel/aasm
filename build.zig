@@ -41,6 +41,13 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const debug_info = b.addModule("debugging", .{
+        .root_source_file = b.path("src/debugging.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{},
+    });
+
     const program = b.addModule("program", .{
         .root_source_file = b.path("src/program.zig"),
         .target = target,
@@ -49,6 +56,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lexer", .module = lexer },
             .{ .name = "parser", .module = parser },
             .{ .name = "stdbuffers", .module = buffers },
+            .{ .name = "debug_info", .module = debug_info },
         },
     });
 

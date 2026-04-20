@@ -22,8 +22,6 @@ fn startAASM() !void {
     var cli_args = try cli.CliArgs.parseArgs(args, allocator);
     defer cli_args.deinit(allocator);
 
-    const cwd = std.fs.cwd();
-
     if (cli_args.v) {
         stdbuffers.printMessage("AASM v0.0.5");
         return;
@@ -42,11 +40,7 @@ fn startAASM() !void {
         }
 
         for (cli_args.input_files.items) |input| {
-            const abs_input = try cwd.realpathAlloc(allocator, input);
-            defer allocator.free(abs_input);
-            const input_name = std.fs.path.stem(abs_input);
-
-            var source = try Assembler.new(abs_input, input_name, allocator);
+            var source = try Assembler.new(input, allocator, cli_args.g);
             errdefer source.deinit();
 
             try source.genObj();

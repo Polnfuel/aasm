@@ -1452,6 +1452,10 @@ fn genInstruction(instruction: parser.CodeInstruction, program: *Program) Intern
             }
         },
         .cpu => {
+            if (program.g) {
+                try program.debug_info.entries.append(program.allocator, .{ .offset = gen.block.buffer.items.len, .line = instruction.cpu.line });
+            }
+            const before = gen.block.buffer.items.len;
             switch (instruction.cpu.mnem) {
                 .mov => {
                     try mov(instruction.cpu.operands);
@@ -1505,6 +1509,16 @@ fn genInstruction(instruction: parser.CodeInstruction, program: *Program) Intern
                     return InternalError.UnsupportedInstruction;
                 },
             }
+            const after = gen.block.buffer.items.len;
+            _ = before;
+            _ = after;
+            // std.debug.print("({d:3}) {x:04}: ", .{ instruction.cpu.line, before });
+            // for (gen.block.buffer.items[before..after]) |byte| {
+            //     std.debug.print("{x:02} ", .{byte});
+            // }
+            // std.debug.print("\x1b[35G", .{});
+            // parser.printCPUInstruction(instruction.cpu);
+            // std.debug.print("\n", .{});
         },
     }
 }
@@ -1552,5 +1566,10 @@ pub fn bufferizeCodeBlock(program: *Program) CodegenError!void {
             }
             return CodegenError.CodeGenFailed;
         };
+    }
+
+    if (program.g) {
+        // Last shadow instruction
+        try program.debug_info.entries.append(program.allocator, .{ .offset = gen.block.buffer.items.len, .line = block.instr.items[block.instr.items.len - 1].cpu.line + 1 });
     }
 }
