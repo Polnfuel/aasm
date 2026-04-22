@@ -23,7 +23,7 @@ fn startAASM() !void {
     defer cli_args.deinit(allocator);
 
     if (cli_args.v) {
-        stdbuffers.printMessage("AASM v0.0.5");
+        stdbuffers.printMessage("AASM v0.0.6");
         return;
     } else if (cli_args.h) {
         // TODO: print command line help
@@ -55,7 +55,7 @@ fn startAASM() !void {
             },
             .Executable => {
                 // Linking object files data into one executable
-                var ld = Linker.new(allocator, object_files.items, cli_args.output_file, cli_args.s);
+                var ld = Linker.new(allocator, object_files.items, cli_args.output_file, cli_args.s, cli_args.g);
                 defer ld.deinit();
                 try ld.linkExe();
             },

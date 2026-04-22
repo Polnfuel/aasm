@@ -114,6 +114,13 @@ pub const Program = struct {
         std.debug.print("\n", .{});
     }
 
+    pub fn printStrBuffer(buffer: std.ArrayList(u8)) void {
+        for (buffer.items) |char| {
+            std.debug.print("{c}", .{if (char == 0) ' ' else char});
+        }
+        std.debug.print("\n", .{});
+    }
+
     pub fn deinit(self: *Program) void {
         self.allocator.free(self.file_name);
         self.allocator.free(self.content);

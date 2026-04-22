@@ -4,7 +4,7 @@ const stdbuffers = @import("stdbuffers");
 
 const elf = std.elf;
 
-pub const LinkerError = error{LinkingFailed} || std.mem.Allocator.Error || std.Io.Writer.Error || std.fs.File.OpenError;
+pub const LinkerError = error{LinkingFailed} || std.mem.Allocator.Error || std.Io.Writer.Error || std.fs.File.OpenError || std.fs.File.ChmodError;
 
 const Executable = struct {
     ehdr: elf.Elf64_Ehdr,
@@ -107,10 +107,12 @@ pub const Linker = struct {
     output_name: []const u8,
     locals: std.StringHashMap(LinkerSymbol),
     globals: std.StringHashMap(LinkerSymbol),
+    offsets: std.HashMap(FiNoSecNo, usize, HMContext, 80),
 
     strip: bool,
+    g: bool,
 
-    pub fn new(allocator: std.mem.Allocator, assems: []assembler.Assembler, output: []const u8, strip: bool) Linker {
+    pub fn new(allocator: std.mem.Allocator, assems: []assembler.Assembler, output: []const u8, strip: bool, debug_info: bool) Linker {
         return Linker{
             .entry = null,
             .allocator = allocator,
@@ -119,7 +121,9 @@ pub const Linker = struct {
             .output_name = output,
             .locals = std.StringHashMap(LinkerSymbol).init(allocator),
             .globals = std.StringHashMap(LinkerSymbol).init(allocator),
+            .offsets = std.HashMap(FiNoSecNo, usize, HMContext, 80).init(allocator),
             .strip = strip,
+            .g = debug_info,
         };
     }
 
@@ -136,12 +140,13 @@ pub const Linker = struct {
         std.debug.print("\n\n", .{});
     }
 
-    fn printOffsets(self: *Linker, map: std.HashMap(FiNoSecNo, usize, HMContext, 80)) void {
-        _ = self;
+    fn printOffsets(self: *Linker) void {
         std.debug.print("Global sections offsets mapping\n", .{});
-        var iter = map.iterator();
+        var iter = self.offsets.iterator();
         while (iter.next()) |entry| {
-            std.debug.print("({d}, {d}) -> {x}\n", .{ entry.key_ptr.file_no, entry.key_ptr.section_no, entry.value_ptr.* });
+            const filename = self.assems[entry.key_ptr.file_no].program.file_name;
+            const sec_name = if (entry.key_ptr.section_no == 1) ".text" else ".data";
+            std.debug.print("{s}: {s} - {d}\n", .{ filename, sec_name, entry.value_ptr.* });
         }
         std.debug.print("\n", .{});
     }
@@ -164,7 +169,7 @@ pub const Linker = struct {
         std.debug.print("\n", .{});
     }
 
-    fn patchRelocation(self: *Linker, offset: usize, value: u64, comptime bytes: u8) void {
+    fn patchTextRelocation(self: *Linker, offset: usize, value: u64, comptime bytes: u8) void {
         // std.debug.print("{d}: {d}\n", .{ offset, value });
         self.exe.text.items[offset] = @truncate(value);
         if (bytes > 1) {
@@ -217,21 +222,18 @@ pub const Linker = struct {
         self.exe.buf_count = buffers_count;
 
         // Second pass - merge buffers
-        var offsets = std.HashMap(FiNoSecNo, usize, HMContext, 80).init(self.allocator);
-        defer offsets.deinit();
-
         for (self.assems, 0..) |*assem, i| {
             if (assem.objfile.code_buffer) |cb| {
                 const padding = Executable.tillNextAlignedAddress(self.exe.code_addr + self.exe.text.items.len, 8);
                 try self.exe.addNoOps(padding, self.allocator);
 
                 const offset = self.exe.text.items.len;
-                try offsets.putNoClobber(.{ .file_no = @truncate(i), .section_no = 1 }, offset);
+                try self.offsets.putNoClobber(.{ .file_no = @truncate(i), .section_no = 1 }, offset);
                 try self.exe.text.appendSlice(self.allocator, cb.items);
             }
             if (assem.objfile.data_buffer) |db| {
                 const offset = self.exe.data.items.len;
-                try offsets.putNoClobber(.{ .file_no = @truncate(i), .section_no = 2 }, offset);
+                try self.offsets.putNoClobber(.{ .file_no = @truncate(i), .section_no = 2 }, offset);
                 try self.exe.data.appendSlice(self.allocator, db.items);
             }
         }
@@ -243,7 +245,7 @@ pub const Linker = struct {
         self.exe.data_addr = data_address;
 
         // self.printBuffers();
-        // self.printOffsets(offsets);
+        // self.printOffsets();
 
         // Third pass - iterate over all LOCAL symbols
 
@@ -256,7 +258,7 @@ pub const Linker = struct {
                             elf.STT_OBJECT => 2,
                             else => continue,
                         };
-                        const sh_offset = offsets.get(.{ .file_no = @truncate(i), .section_no = symbol.st_shndx }) orelse unreachable;
+                        const sh_offset = self.offsets.get(.{ .file_no = @truncate(i), .section_no = symbol.st_shndx }) orelse unreachable;
                         const sh_address = switch (sym_shndx) {
                             1 => self.exe.code_addr,
                             2 => self.exe.data_addr,
@@ -287,7 +289,8 @@ pub const Linker = struct {
                             elf.STT_OBJECT => 2,
                             else => continue,
                         };
-                        const sh_offset = offsets.get(.{ .file_no = @truncate(i), .section_no = symbol.st_shndx }) orelse unreachable;
+                        const shift: u8 = if (!assem.flags.text) 1 else 0;
+                        const sh_offset = self.offsets.get(.{ .file_no = @truncate(i), .section_no = symbol.st_shndx + shift }) orelse unreachable;
                         const sh_address = switch (sym_shndx) {
                             1 => self.exe.code_addr,
                             2 => self.exe.data_addr,
@@ -340,7 +343,7 @@ pub const Linker = struct {
                         const S = l_sym.glob_address;
                         const A = rela.r_addend;
                         const rtype: elf.R_X86_64 = @enumFromInt(rela.r_type());
-                        const shn_offset = offsets.get(.{ .file_no = @truncate(i), .section_no = 1 }) orelse unreachable;
+                        const shn_offset = self.offsets.get(.{ .file_no = @truncate(i), .section_no = 1 }) orelse unreachable;
                         const text_offset = shn_offset + rela.r_offset;
                         const reloc_address = self.exe.code_addr + text_offset;
 
@@ -348,17 +351,17 @@ pub const Linker = struct {
                             .@"64" => {
                                 const r_value: u64 = @bitCast(@as(i64, @bitCast(S)) +% A);
                                 // std.debug.print("  64: {s:<15} {x:0>16}\n", .{ sym_name, r_value });
-                                self.patchRelocation(text_offset, r_value, 8);
+                                self.patchTextRelocation(text_offset, r_value, 8);
                             },
                             .PC32 => {
                                 const r_value: i32 = @truncate(@as(i64, @bitCast(S -% reloc_address)) + A);
                                 // std.debug.print("PC32: {s:<15} {x:0>16}\n", .{ sym_name, r_value });
-                                self.patchRelocation(text_offset, @as(u32, @bitCast(r_value)), 4);
+                                self.patchTextRelocation(text_offset, @as(u32, @bitCast(r_value)), 4);
                             },
                             .@"32" => {
                                 const r_value: u32 = @truncate(@as(u64, @bitCast(@as(i64, @bitCast(S)) +% A)));
                                 // std.debug.print("  32: {s:<15} {x:0>16}\n", .{ sym_name, r_value });
-                                self.patchRelocation(text_offset, r_value, 4);
+                                self.patchTextRelocation(text_offset, r_value, 4);
                             },
                             else => {
                                 stdbuffers.printError("unsupported relocation type");
@@ -558,20 +561,238 @@ pub const Linker = struct {
         try shstrtab_buffer.appendSlice(self.allocator, ".data");
         try shstrtab_buffer.append(self.allocator, 0);
 
+        var debug_str_buffer: std.ArrayList(u8) = .empty;
+        defer debug_str_buffer.deinit(self.allocator);
+
+        var debug_line_str_buffer: std.ArrayList(u8) = .empty;
+        defer debug_line_str_buffer.deinit(self.allocator);
+
+        var dbg_info_size: usize = 0;
+        var dbg_line_size: usize = 0;
+
+        if (self.g) {
+            var text_addresses = try std.ArrayList(u64).initCapacity(self.allocator, self.offsets.count());
+            defer text_addresses.deinit(self.allocator);
+            _ = text_addresses.addManyAsSliceAssumeCapacity(self.offsets.count());
+            var offsets_iter = self.offsets.iterator();
+            while (offsets_iter.next()) |entry| {
+                if (entry.key_ptr.section_no == 1) {
+                    const address = self.exe.code_addr + entry.value_ptr.*;
+                    text_addresses.items[entry.key_ptr.file_no] = address;
+                }
+            }
+
+            var str_map = std.StringHashMap(usize).init(self.allocator);
+            defer str_map.deinit();
+
+            var line_str_map = std.StringHashMap(usize).init(self.allocator);
+            defer line_str_map.deinit();
+
+            var str_start: usize = 0;
+            var line_str_start: usize = 0;
+            for (self.assems) |*assem| {
+                var str_start_local: usize = 0;
+                const str_buf = assem.program.debug_info.debug_str_buffer.items;
+                while (str_start_local < str_buf.len) {
+                    const str_null_term_slice: []u8 = std.mem.sliceTo(str_buf[str_start_local..], 0);
+
+                    const result = try str_map.getOrPut(str_null_term_slice);
+                    if (!result.found_existing) {
+                        result.value_ptr.* = str_start;
+                        try debug_str_buffer.appendSlice(self.allocator, str_null_term_slice);
+                        try debug_str_buffer.append(self.allocator, 0);
+                        str_start = debug_str_buffer.items.len;
+                    }
+
+                    str_start_local += str_null_term_slice.len + 1;
+                }
+                var line_str_start_local: usize = 0;
+                const line_str_buf = assem.program.debug_info.debug_line_str_buffer.items;
+                while (line_str_start_local < line_str_buf.len) {
+                    const str_null_term_slice: []u8 = std.mem.sliceTo(line_str_buf[line_str_start_local..], 0);
+
+                    const result = try line_str_map.getOrPut(str_null_term_slice);
+                    if (!result.found_existing) {
+                        result.value_ptr.* = line_str_start;
+                        try debug_line_str_buffer.appendSlice(self.allocator, str_null_term_slice);
+                        try debug_line_str_buffer.append(self.allocator, 0);
+                        line_str_start = debug_line_str_buffer.items.len;
+                    }
+
+                    line_str_start_local += str_null_term_slice.len + 1;
+                }
+            }
+
+            var dbg_line_offsets: std.ArrayList(u32) = .empty;
+            defer dbg_line_offsets.deinit(self.allocator);
+
+            // Patch Debug line relocations
+            var dbg_line_start: u32 = 0;
+            for (self.assems, 0..) |*assem, i| {
+                try dbg_line_offsets.append(self.allocator, dbg_line_start);
+                const debug_line = assem.program.debug_info.debug_line_buffer.items;
+                dbg_line_start += @truncate(debug_line.len);
+                dbg_line_size += debug_line.len;
+                const symbols = assem.objfile.symtab.items;
+                const strs = assem.objfile.strtab.items;
+                for (assem.program.debug_info.debug_line_rela_buffer.items) |rela| {
+                    const sym_index = rela.r_sym();
+                    const symbol = symbols[sym_index];
+                    const str_ind = symbol.st_name;
+                    const sym_name: []u8 = std.mem.sliceTo(strs[str_ind..], 0);
+                    if (std.mem.eql(u8, sym_name, ".debug_line_str")) {
+                        const str_offset: u32 = @intCast(rela.r_addend);
+                        const str_name: []u8 = std.mem.sliceTo(assem.program.debug_info.debug_line_str_buffer.items[str_offset..], 0);
+                        const glob_line_str_offset = line_str_map.get(str_name) orelse unreachable;
+                        std.mem.writeInt(u32, @ptrCast(debug_line[rela.r_offset..]), @truncate(glob_line_str_offset), .little);
+                    } else if (std.mem.eql(u8, sym_name, ".text")) {
+                        std.mem.writeInt(u64, @ptrCast(debug_line[rela.r_offset..]), text_addresses.items[i], .little);
+                    }
+                }
+            }
+
+            // Patch Debug info relocations
+            for (self.assems, 0..) |*assem, i| {
+                const debug_info = assem.program.debug_info.debug_info_buffer.items;
+                dbg_info_size += debug_info.len;
+                const symbols = assem.objfile.symtab.items;
+                const strs = assem.objfile.strtab.items;
+                for (assem.program.debug_info.debug_info_rela_buffer.items) |rela| {
+                    const sym_index = rela.r_sym();
+                    const symbol = symbols[sym_index];
+                    const str_ind = symbol.st_name;
+                    const sym_name: []u8 = std.mem.sliceTo(strs[str_ind..], 0);
+                    if (std.mem.eql(u8, sym_name, ".debug_str")) {
+                        const str_offset: u32 = @intCast(rela.r_addend);
+                        const str_name: []u8 = std.mem.sliceTo(assem.program.debug_info.debug_str_buffer.items[str_offset..], 0);
+                        const glob_line_str_offset = str_map.get(str_name) orelse unreachable;
+                        std.mem.writeInt(u32, @ptrCast(debug_info[rela.r_offset..]), @truncate(glob_line_str_offset), .little);
+                    } else if (std.mem.eql(u8, sym_name, ".debug_line")) {
+                        const index = dbg_line_offsets.items[i];
+                        std.mem.writeInt(u32, @ptrCast(debug_info[rela.r_offset..]), index, .little);
+                    } else if (std.mem.eql(u8, sym_name, ".text")) {
+                        std.mem.writeInt(u64, @ptrCast(debug_info[rela.r_offset..]), text_addresses.items[i], .little);
+                    }
+                }
+            }
+        }
+
+        var debug_info_sec = elf.Elf64_Shdr{
+            .sh_name = @truncate(shstrtab_buffer.items.len),
+            .sh_type = elf.SHT_PROGBITS,
+            .sh_flags = 0,
+            .sh_addr = 0,
+            .sh_offset = undefined,
+            .sh_size = dbg_info_size,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 0x1,
+            .sh_entsize = 0,
+        };
+        if (self.g) {
+            try shstrtab_buffer.appendSlice(self.allocator, ".debug_info");
+            try shstrtab_buffer.append(self.allocator, 0);
+        }
+        var debug_line_sec = elf.Elf64_Shdr{
+            .sh_name = @truncate(shstrtab_buffer.items.len),
+            .sh_type = elf.SHT_PROGBITS,
+            .sh_flags = 0,
+            .sh_addr = 0,
+            .sh_offset = undefined,
+            .sh_size = dbg_line_size,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 0x1,
+            .sh_entsize = 0,
+        };
+        if (self.g) {
+            try shstrtab_buffer.appendSlice(self.allocator, ".debug_line");
+            try shstrtab_buffer.append(self.allocator, 0);
+        }
+        var debug_abbrev_sec = elf.Elf64_Shdr{
+            .sh_name = @truncate(shstrtab_buffer.items.len),
+            .sh_type = elf.SHT_PROGBITS,
+            .sh_flags = 0,
+            .sh_addr = 0,
+            .sh_offset = undefined,
+            .sh_size = self.assems[0].program.debug_info.debug_abbrev_buffer.items.len,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 0x1,
+            .sh_entsize = 0,
+        };
+        if (self.g) {
+            try shstrtab_buffer.appendSlice(self.allocator, ".debug_abbrev");
+            try shstrtab_buffer.append(self.allocator, 0);
+        }
+        var debug_str_sec = elf.Elf64_Shdr{
+            .sh_name = @truncate(shstrtab_buffer.items.len),
+            .sh_type = elf.SHT_PROGBITS,
+            .sh_flags = elf.SHF_MERGE + elf.SHF_STRINGS,
+            .sh_addr = 0,
+            .sh_offset = undefined,
+            .sh_size = debug_str_buffer.items.len,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 0x1,
+            .sh_entsize = 0x1,
+        };
+        if (self.g) {
+            try shstrtab_buffer.appendSlice(self.allocator, ".debug_str");
+            try shstrtab_buffer.append(self.allocator, 0);
+        }
+        var debug_line_str_sec = elf.Elf64_Shdr{
+            .sh_name = @truncate(shstrtab_buffer.items.len),
+            .sh_type = elf.SHT_PROGBITS,
+            .sh_flags = elf.SHF_MERGE + elf.SHF_STRINGS,
+            .sh_addr = 0,
+            .sh_offset = undefined,
+            .sh_size = debug_line_str_buffer.items.len,
+            .sh_link = 0,
+            .sh_info = 0,
+            .sh_addralign = 0x1,
+            .sh_entsize = 0x1,
+        };
+        if (self.g) {
+            try shstrtab_buffer.appendSlice(self.allocator, ".debug_line_str");
+            try shstrtab_buffer.append(self.allocator, 0);
+        }
+
         shstrtab.sh_size = @truncate(shstrtab_buffer.items.len);
         strtab.sh_size = @truncate(strtab_buffer.items.len);
         symtab.sh_size = @truncate(symtab_buffer.items.len * @sizeOf(elf.Elf64_Sym));
         strtab.sh_offset = shstrtab.sh_offset + shstrtab.sh_size;
         symtab.sh_offset = strtab.sh_offset + strtab.sh_size;
+        if (self.g) {
+            debug_info_sec.sh_offset = symtab.sh_offset + symtab.sh_size;
+            debug_line_sec.sh_offset = debug_info_sec.sh_offset + debug_info_sec.sh_size;
+            debug_abbrev_sec.sh_offset = debug_line_sec.sh_offset + debug_line_sec.sh_size;
+            debug_str_sec.sh_offset = debug_abbrev_sec.sh_offset + debug_abbrev_sec.sh_size;
+            debug_line_str_sec.sh_offset = debug_str_sec.sh_offset + debug_str_sec.sh_size;
+        }
 
         if (!self.strip) {
-            self.exe.ehdr.e_shnum = @truncate(4 + self.exe.buf_count);
-            self.exe.ehdr.e_shoff = symtab.sh_offset + symtab.sh_size;
+            if (self.g) {
+                self.exe.ehdr.e_shnum = @truncate(9 + self.exe.buf_count);
+                self.exe.ehdr.e_shoff = debug_line_str_sec.sh_offset + debug_line_str_sec.sh_size;
+            } else {
+                self.exe.ehdr.e_shnum = @truncate(4 + self.exe.buf_count);
+                self.exe.ehdr.e_shoff = symtab.sh_offset + symtab.sh_size;
+            }
             self.exe.ehdr.e_shstrndx = @truncate(1 + self.exe.buf_count);
             self.exe.ehdr.e_shentsize = 64;
         }
 
-        const file_size = if (!self.strip) self.exe.ehdr.e_shoff + (4 + self.exe.buf_count) * @sizeOf(elf.Elf64_Shdr) else data_phdr.p_offset + data_phdr.p_filesz;
+        var file_size: u64 = 0;
+        if (!self.strip) {
+            if (self.g) {
+                file_size = self.exe.ehdr.e_shoff + (9 + self.exe.buf_count) * @sizeOf(elf.Elf64_Shdr);
+            } else {
+                file_size = self.exe.ehdr.e_shoff + (4 + self.exe.buf_count) * @sizeOf(elf.Elf64_Shdr);
+            }
+        } else {
+            file_size = data_phdr.p_offset + data_phdr.p_filesz;
+        }
 
         const file_buffer = try self.allocator.alloc(u8, file_size);
         defer self.allocator.free(file_buffer);
@@ -579,6 +800,7 @@ pub const Linker = struct {
         const cwd = std.fs.cwd();
 
         const file = try cwd.createFile(self.output_name, .{});
+        try file.chmod(0o755);
         defer file.close();
 
         var file_writer = file.writer(file_buffer);
@@ -602,6 +824,18 @@ pub const Linker = struct {
                 try writer.writeStruct(sym, .little);
             }
 
+            if (self.g) {
+                for (self.assems) |*assem| {
+                    _ = try writer.write(assem.program.debug_info.debug_info_buffer.items);
+                }
+                for (self.assems) |*assem| {
+                    _ = try writer.write(assem.program.debug_info.debug_line_buffer.items);
+                }
+                _ = try writer.write(self.assems[0].program.debug_info.debug_abbrev_buffer.items);
+                _ = try writer.write(debug_str_buffer.items);
+                _ = try writer.write(debug_line_str_buffer.items);
+            }
+
             try writeElf64_Shdr(writer, &elf.Elf64_Shdr{
                 .sh_name = 0,
                 .sh_type = elf.SHT_NULL,
@@ -621,6 +855,14 @@ pub const Linker = struct {
             try writeElf64_Shdr(writer, &shstrtab);
             try writeElf64_Shdr(writer, &strtab);
             try writeElf64_Shdr(writer, &symtab);
+
+            if (self.g) {
+                try writeElf64_Shdr(writer, &debug_info_sec);
+                try writeElf64_Shdr(writer, &debug_line_sec);
+                try writeElf64_Shdr(writer, &debug_abbrev_sec);
+                try writeElf64_Shdr(writer, &debug_str_sec);
+                try writeElf64_Shdr(writer, &debug_line_str_sec);
+            }
         }
 
         try writer.flush();
@@ -630,5 +872,6 @@ pub const Linker = struct {
         self.exe.deinit(self.allocator);
         self.locals.deinit();
         self.globals.deinit();
+        self.offsets.deinit();
     }
 };

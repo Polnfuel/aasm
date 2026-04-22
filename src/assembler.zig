@@ -267,6 +267,8 @@ pub const Assembler = struct {
             }
 
             symtab_size += 1;
+        } else {
+            self.flags.debug_info = false;
         }
 
         str_start = strtab_size;
@@ -867,16 +869,16 @@ pub const Assembler = struct {
         try self.defineObjFileTables();
         // self.objfile.printStrTabSymTab();
 
+        self.flags.text = if (self.objfile.text_section != null) true else false;
+        self.flags.data = if (self.objfile.data_section != null) true else false;
+        self.flags.symbols = if (self.objfile.symtab.items.len > 1) true else false;
+        self.flags.relocations = if (self.objfile.relatab.items.len > 0) true else false;
+
         if (self.flags.debug_info) {
             try self.defineDebugLine();
             try self.defineDebugInfo();
             // self.program.debug_info.print();
         }
-
-        self.flags.text = if (self.objfile.text_section != null) true else false;
-        self.flags.data = if (self.objfile.data_section != null) true else false;
-        self.flags.symbols = if (self.objfile.symtab.items.len > 1) true else false;
-        self.flags.relocations = if (self.objfile.relatab.items.len > 0) true else false;
 
         var text_index: u16 = 0;
         if (self.flags.text) text_index += 1;
