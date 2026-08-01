@@ -1,79 +1,29 @@
 const std = @import("std");
-const builtin = @import("builtin");
-const cli = @import("cli");
-const assembler = @import("assembler");
-const stdbuffers = @import("stdbuffers");
-const linker = @import("linker");
+const errprint = @import("errprint");
+const CliArgs = @import("CliArgs");
+const Assembler = @import("Assembler");
 
-const Assembler = assembler.Assembler;
-const Linker = linker.Linker;
+fn startAASM(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-fn startAASM() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    defer _ = gpa.deinit();
-    const allocator = if (builtin.mode == .Debug) gpa.allocator() else std.heap.smp_allocator;
+    try errprint.init(allocator, io);
+    defer errprint.deinit(allocator);
 
-    try stdbuffers.init(allocator);
-    defer stdbuffers.deinit(allocator);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
-    var cli_args = try cli.CliArgs.parseArgs(args, allocator);
+    var cli_args = try CliArgs.parse(args, allocator);
     defer cli_args.deinit(allocator);
 
-    if (cli_args.v) {
-        stdbuffers.printMessage("AASM v0.0.6");
-        return;
-    } else if (cli_args.h) {
-        // TODO: print command line help
-        stdbuffers.printMessage("Help");
-        return;
-    } else if (cli_args.o) {
-        // Generate object files data for each input source file
-        var object_files: std.ArrayList(Assembler) = .empty;
-        defer {
-            for (object_files.items) |*file| {
-                file.deinit();
-            }
-            object_files.deinit(allocator);
-        }
+    var aasm = try Assembler.init(io, allocator);
+    defer aasm.deinit();
 
-        for (cli_args.input_files.items) |input| {
-            var source = try Assembler.new(input, allocator, cli_args.g);
-            errdefer source.deinit();
-
-            try source.genObj();
-            try object_files.append(allocator, source);
-        }
-        switch (cli_args.format) {
-            .Object => {
-                // Object files data generated already, can create files
-                for (object_files.items) |*file| {
-                    try file.writeObj();
-                }
-            },
-            .Executable => {
-                // Linking object files data into one executable
-                var ld = Linker.new(allocator, object_files.items, cli_args.output_file, cli_args.s, cli_args.g);
-                defer ld.deinit();
-                try ld.linkExe();
-            },
-            .StaticArchive => {
-                // Archive object files with ar
-            },
-            .SharedObject => {
-                // Link object files with ld
-            },
-        }
-    } else {
-        return;
-    }
+    try aasm.run(cli_args);
 }
 
-pub fn main() void {
-    startAASM() catch |err| {
-        stdbuffers.handleError(err);
+pub fn main(init: std.process.Init) void {
+    startAASM(init) catch |err| {
+        errprint.handleError(err);
     };
     std.process.exit(0);
 }

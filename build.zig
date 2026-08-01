@@ -6,19 +6,19 @@ pub fn build(b: *std.Build) void {
 
     const with_llvm = b.option(bool, "llvm", "Use LLVM backend") orelse false;
 
-    const buffers = b.addModule("stdbuffers", .{
-        .root_source_file = b.path("src/stdbuffers.zig"),
+    const errprint = b.addModule("errprint", .{
+        .root_source_file = b.path("src/errprint.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{},
     });
 
-    const cliparser = b.addModule("cli", .{
-        .root_source_file = b.path("src/cliparser.zig"),
+    const cli_args = b.addModule("CliArgs", .{
+        .root_source_file = b.path("src/CliArgs.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "stdbuffers", .module = buffers },
+            .{ .name = "errprint", .module = errprint },
         },
     });
 
@@ -27,100 +27,103 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "stdbuffers", .module = buffers },
+            .{ .name = "errprint", .module = errprint },
         },
     });
 
-    const parser = b.addModule("parser", .{
-        .root_source_file = b.path("src/parser.zig"),
+    const parser = b.addModule("Parser", .{
+        .root_source_file = b.path("src/Parser.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "errprint", .module = errprint },
+            .{ .name = "lexer", .module = lexer },
+        },
+    });
+
+    const program = b.addModule("Program", .{
+        .root_source_file = b.path("src/Program.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "lexer", .module = lexer },
-            .{ .name = "stdbuffers", .module = buffers },
+            .{ .name = "Parser", .module = parser },
         },
     });
 
-    const debug_info = b.addModule("debugging", .{
-        .root_source_file = b.path("src/debugging.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{},
-    });
-
-    const program = b.addModule("program", .{
-        .root_source_file = b.path("src/program.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "lexer", .module = lexer },
-            .{ .name = "parser", .module = parser },
-            .{ .name = "stdbuffers", .module = buffers },
-            .{ .name = "debug_info", .module = debug_info },
-        },
-    });
-
-    lexer.addImport("program", program);
-    parser.addImport("program", program);
+    parser.addImport("Program", program);
 
     const datagen = b.addModule("datagen", .{
         .root_source_file = b.path("src/datagen.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "parser", .module = parser },
-            .{ .name = "program", .module = program },
-            .{ .name = "stdbuffers", .module = buffers },
+            .{ .name = "errprint", .module = errprint },
+            .{ .name = "Program", .module = program },
         },
     });
 
     program.addImport("datagen", datagen);
 
-    const codegen = b.addModule("codegen", .{
-        .root_source_file = b.path("src/codegen.zig"),
+    const codegen = b.addModule("Codegen", .{
+        .root_source_file = b.path("src/Codegen.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
+            .{ .name = "errprint", .module = errprint },
             .{ .name = "lexer", .module = lexer },
-            .{ .name = "parser", .module = parser },
-            .{ .name = "program", .module = program },
-            .{ .name = "stdbuffers", .module = buffers },
+            .{ .name = "Program", .module = program },
         },
     });
 
-    program.addImport("codegen", codegen);
+    program.addImport("Codegen", codegen);
 
-    const assembler = b.addModule("assembler", .{
-        .root_source_file = b.path("src/assembler.zig"),
+    const objfile = b.addModule("ObjFileElf", .{
+        .root_source_file = b.path("src/ObjFileElf.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
+            .{ .name = "Program", .module = program },
+        },
+    });
+
+    const linker = b.addModule("Linker", .{
+        .root_source_file = b.path("src/Linker.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "errprint", .module = errprint },
+            .{ .name = "ObjFileElf", .module = objfile },
+        },
+    });
+
+    const assembler = b.addModule("Assembler", .{
+        .root_source_file = b.path("src/Assembler.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "errprint", .module = errprint },
+            .{ .name = "CliArgs", .module = cli_args },
+            .{ .name = "Program", .module = program },
             .{ .name = "lexer", .module = lexer },
-            .{ .name = "parser", .module = parser },
-            .{ .name = "program", .module = program },
-            .{ .name = "stdbuffers", .module = buffers },
+            .{ .name = "Parser", .module = parser },
+            .{ .name = "datagen", .module = datagen },
+            .{ .name = "Codegen", .module = codegen },
+            .{ .name = "ObjFileElf", .module = objfile },
+            .{ .name = "Linker", .module = linker },
         },
     });
 
-    const linker = b.addModule("linker", .{
-        .root_source_file = b.path("src/linker.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "assembler", .module = assembler },
-            .{ .name = "stdbuffers", .module = buffers },
-        },
-    });
+    linker.addImport("Assembler", assembler);
 
     const main_module = b.addModule("main", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "cli", .module = cliparser },
-            .{ .name = "assembler", .module = assembler },
-            .{ .name = "stdbuffers", .module = buffers },
-            .{ .name = "linker", .module = linker },
+            .{ .name = "errprint", .module = errprint },
+            .{ .name = "CliArgs", .module = cli_args },
+            .{ .name = "Assembler", .module = assembler },
         },
     });
 
@@ -143,15 +146,13 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    const inst1 = b.addInstallFile(b.path("test-asm/long.asm"), "bin/long.asm");
-    const inst2 = b.addInstallFile(b.path("test-asm/print.asm"), "bin/print.asm");
-    const inst3 = b.addInstallFile(b.path("test-asm/main.asm"), "bin/main.asm");
-    const inst4 = b.addInstallFile(b.path("test-asm/parse.asm"), "bin/parse.asm");
-    const inst5 = b.addInstallFile(b.path("test-asm/printf.asm"), "bin/printf.asm");
-    const install_step = b.getInstallStep();
-    install_step.dependOn(&inst1.step);
-    install_step.dependOn(&inst2.step);
-    install_step.dependOn(&inst3.step);
-    install_step.dependOn(&inst4.step);
-    install_step.dependOn(&inst5.step);
+    const mod_tests = b.addTest(.{
+        .root_module = codegen,
+        .filters = b.args orelse &.{},
+    });
+
+    const run_mod_tests = b.addRunArtifact(mod_tests);
+
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&run_mod_tests.step);
 }

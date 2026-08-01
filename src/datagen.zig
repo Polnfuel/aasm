@@ -1,91 +1,65 @@
 const std = @import("std");
-const parser = @import("parser");
-const Program = @import("program").Program;
-const stdbuffers = @import("stdbuffers");
+const errprint = @import("errprint");
+const Program = @import("Program");
 
-fn tillNextAlignedAddress(current: u64, alignment: u8) u64 {
-    const aligned = (current + alignment - 1) & ~(alignment - 1);
-    return aligned - current;
-}
+pub const DatagenError = std.mem.Allocator.Error;
 
-pub const DatagenError = error{DataGenFailed} || std.mem.Allocator.Error;
-
-pub fn addImmediate(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, imm: parser.Immediate, bytes: u8) std.mem.Allocator.Error!void {
+fn appendImmediateBytes(buffer: *std.ArrayList(u8), alloc: std.mem.Allocator, imm: Program.Immediate, bytes: u8) std.mem.Allocator.Error!void {
     const value: u64 = switch (imm) {
         .i => @bitCast(imm.i),
         .u => imm.u,
     };
-    try buffer.append(allocator, @as(u8, @truncate(value)));
-    if (bytes > 1) {
-        try buffer.append(allocator, @as(u8, @truncate(value >> 8)));
-    }
-    if (bytes > 2) {
-        try buffer.append(allocator, @as(u8, @truncate(value >> 16)));
-        try buffer.append(allocator, @as(u8, @truncate(value >> 24)));
-    }
-    if (bytes > 4) {
-        try buffer.append(allocator, @as(u8, @truncate(value >> 32)));
-        try buffer.append(allocator, @as(u8, @truncate(value >> 40)));
-        try buffer.append(allocator, @as(u8, @truncate(value >> 48)));
-        try buffer.append(allocator, @as(u8, @truncate(value >> 56)));
-    }
+    const array = std.mem.toBytes(value);
+    try buffer.appendSlice(alloc, array[0..bytes]);
 }
 
-pub fn bufferizeDataBlock(program: *Program) DatagenError!void {
-    var section = &program.data_block.?;
-    for (section.instr.items) |instruction| {
+pub fn genDataBlockBuffer(program: *Program) DatagenError!void {
+    for (program.data_block.instr.items) |instruction| {
         const name = instruction.label;
         const data_size = instruction.size;
 
-        const padding = tillNextAlignedAddress(section.buffer.items.len, data_size);
-        for (0..padding) |_| {
-            try section.buffer.append(program.allocator, undefined);
-        }
+        const next_aligned = std.mem.alignForward(usize, program.data_block.buffer.items.len, data_size);
+        const padding = next_aligned - program.data_block.buffer.items.len;
 
-        const opt_symbol = program.symbols.getPtr(name);
-        if (opt_symbol) |symbol| {
-            symbol.offset = section.buffer.items.len;
-        } else {
-            // unreachable;
-            stdbuffers.printSourceErrorFormatted(program.file_name, "label '{s}' is not defined", .{name}, program.content, instruction.line);
-            return DatagenError.DataGenFailed;
-        }
+        _ = try program.data_block.buffer.addManyAsSlice(program.alloc, padding);
+
+        const offset = program.data_block.buffer.items.len;
 
         for (instruction.data.items) |data| {
             switch (data) {
                 .str => {
                     if (data_size == 1) {
-                        try section.buffer.appendSlice(program.allocator, data.str);
-                    } else {
-                        stdbuffers.printSourceError(program.file_name, "string literal must have data size d8", program.content, instruction.line);
-                        return DatagenError.DataGenFailed;
-                    }
+                        try program.data_block.buffer.appendSlice(program.alloc, data.str);
+                    } else unreachable;
                 },
                 .num => {
-                    try addImmediate(&section.buffer, program.allocator, data.num, data_size);
+                    try appendImmediateBytes(&program.data_block.buffer, program.alloc, data.num, data_size);
                 },
                 .repeat => {
-                    const count = data.repeat.count.u;
+                    const count = data.repeat.count;
                     switch (data.repeat.item) {
                         .str => {
                             if (data_size == 1) {
                                 const chars = data.repeat.item.str;
                                 for (0..count) |_| {
-                                    try section.buffer.appendSlice(program.allocator, chars);
+                                    try program.data_block.buffer.appendSlice(program.alloc, chars);
                                 }
-                            } else {
-                                stdbuffers.printSourceError(program.file_name, "string literal must have data size d8", program.content, instruction.line);
-                                return DatagenError.DataGenFailed;
-                            }
+                            } else unreachable;
                         },
                         .num => {
                             for (0..count) |_| {
-                                try addImmediate(&section.buffer, program.allocator, data.repeat.item.num, data_size);
+                                try appendImmediateBytes(&program.data_block.buffer, program.alloc, data.repeat.item.num, data_size);
                             }
                         },
                     }
                 },
             }
         }
+
+        const opt_symbol = program.data_vars.getPtr(name);
+        if (opt_symbol) |symbol| {
+            symbol.offset = offset;
+            symbol.size = program.data_block.buffer.items.len - offset;
+        } else unreachable;
     }
 }
