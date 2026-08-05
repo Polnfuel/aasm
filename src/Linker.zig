@@ -7,7 +7,7 @@ const CompUnit = Assembler.CompUnit;
 
 const Linker = @This();
 
-pub const LinkerError = error{ LinkingFailed, LoadingFailed } || std.mem.Allocator.Error || std.Io.File.OpenError || std.Io.File.StatError || std.Io.Writer.Error || std.Io.File.SetPermissionsError || std.posix.MMapError;
+pub const LinkerError = error{ LinkingFailed, LoadingFailed } || std.mem.Allocator.Error || std.Io.File.OpenError || std.Io.File.StatError || std.process.CurrentPathAllocError || std.Io.Writer.Error || std.Io.File.SetPermissionsError || std.posix.MMapError;
 
 /// Elf64 executable file representation
 const ExeElf = struct {
@@ -222,6 +222,7 @@ const Object = struct {
 };
 
 const DynLibElf = struct {
+    resolved_name: []const u8 = &.{},
     mem: []align(std.heap.page_size_min) u8,
     strings: [*:0]u8,
     syms: [*]elf.Elf64.Sym,
@@ -232,10 +233,7 @@ const DynLibElf = struct {
         gnu_hash: *elf.gnu_hash.Header,
     };
 
-    pub fn open(path: []const u8, io: std.Io) LinkerError!DynLibElf {
-        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        defer file.close(io);
-
+    pub fn open(file: std.Io.File, io: std.Io) LinkerError!DynLibElf {
         const stat = try file.stat(io);
         const page = std.heap.pageSize();
 
@@ -250,12 +248,6 @@ const DynLibElf = struct {
         defer std.posix.munmap(file_bytes);
 
         const eh = @as(*elf.Elf64.Ehdr, @ptrCast(file_bytes.ptr));
-        if (!std.mem.eql(u8, eh.ident[0..4], elf.MAGIC)) {
-            return LinkerError.LoadingFailed;
-        }
-        if (eh.type != elf.ET.DYN) {
-            return LinkerError.LoadingFailed;
-        }
 
         const elf_addr = @intFromPtr(file_bytes.ptr);
 
@@ -449,6 +441,11 @@ const LinkerSymbol = packed struct {
     },
 };
 
+const LibraryFile = struct {
+    file: std.Io.File,
+    name: []const u8,
+};
+
 exe: ExeElf,
 alloc: std.mem.Allocator,
 io: std.Io,
@@ -457,17 +454,21 @@ flags: Flags,
 dyn_libs: std.ArrayList([]const u8),
 dyn_funcs: std.StringHashMap(u64),
 dyn_objects: std.StringHashMap(Object),
+dyn_search_paths: std.ArrayList([]const u8),
+dyn_runpath: std.ArrayList([]const u8),
 offsets: std.HashMap(FileSection, usize, HM_Context, 80),
 locals: std.StringHashMap(LinkerSymbol),
 globals: std.StringHashMap(LinkerSymbol),
 
-pub fn init(self: *Linker, output_name: []const u8, alloc: std.mem.Allocator, io: std.Io, comp_units: []CompUnit, flags: Flags) std.mem.Allocator.Error!void {
+pub fn init(self: *Linker, output_name: []const u8, alloc: std.mem.Allocator, io: std.Io, comp_units: []CompUnit, flags: Flags, search_paths: std.ArrayList([]const u8)) std.mem.Allocator.Error!void {
     self.alloc = alloc;
     self.io = io;
     self.comp_units = comp_units;
     self.dyn_libs = .empty;
     self.dyn_funcs = .init(alloc);
     self.dyn_objects = .init(alloc);
+    self.dyn_search_paths = search_paths;
+    self.dyn_runpath = .empty;
     self.offsets = .init(alloc);
     self.locals = .init(alloc);
     self.globals = .init(alloc);
@@ -481,14 +482,103 @@ pub fn init(self: *Linker, output_name: []const u8, alloc: std.mem.Allocator, io
     }
 }
 
-fn findLib(self: *Linker, libname: []const u8) LinkerError!DynLibElf {
+fn checkIfValidLibrary(file_handle: std.Io.File.Handle) std.posix.MMapError!bool {
+    const first_page = try std.posix.mmap(null, std.heap.pageSize(), .{ .READ = true }, .{ .TYPE = .PRIVATE }, file_handle, 0);
+    defer std.posix.munmap(first_page);
+
+    if (first_page.len < @sizeOf(elf.Elf64.Ehdr)) return false;
+
+    const eh = @as(*elf.Elf64.Ehdr, @ptrCast(first_page.ptr));
+    if (!std.mem.eql(u8, eh.ident[0..4], elf.MAGIC) or eh.type != elf.ET.DYN) {
+        return false;
+    }
+
+    return true;
+}
+
+fn searchInPath(self: *Linker, cwd_path: []const u8, search_dir_path: []const u8, lib_fullname: []const u8, save_path: bool) LinkerError!?LibraryFile {
+    const abs_file_path = try std.fs.path.resolve(self.alloc, &.{ cwd_path, search_dir_path, lib_fullname });
+    defer self.alloc.free(abs_file_path);
+
+    const abs_dir_path = abs_file_path[0 .. abs_file_path.len - lib_fullname.len];
+    // std.debug.print("Abs file: {s}\n", .{abs_file_path});
+    // std.debug.print("Abs dir: {s}\n", .{abs_dir_path});
+
+    const file = std.Io.Dir.openFileAbsolute(self.io, abs_file_path, .{}) catch return null;
+
+    if (!try checkIfValidLibrary(file.handle)) {
+        const search_dir = try std.Io.Dir.openDirAbsolute(self.io, abs_dir_path, .{ .iterate = true });
+        var dir_iter = search_dir.iterateAssumeFirstIteration();
+        while (try dir_iter.next(self.io)) |entry| {
+            if (entry.kind == .file and std.mem.startsWith(u8, entry.name, lib_fullname)) {
+                // std.debug.print("File {s}\n", .{entry.name});
+                const dir_file = try search_dir.openFile(self.io, entry.name, .{});
+                if (try checkIfValidLibrary(dir_file.handle)) {
+                    // std.debug.print("Found valid file {s} in {s}\n", .{ entry.name, abs_dir_path });
+                    if (save_path) {
+                        try self.dyn_runpath.append(self.alloc, try self.alloc.dupe(u8, abs_dir_path));
+                    }
+                    return LibraryFile{ .file = dir_file, .name = try self.alloc.dupe(u8, entry.name) };
+                }
+                dir_file.close(self.io);
+            }
+        }
+        return null;
+    } else {
+        if (save_path) {
+            try self.dyn_runpath.append(self.alloc, try self.alloc.dupe(u8, abs_dir_path));
+        }
+        return LibraryFile{ .file = file, .name = try self.alloc.dupe(u8, lib_fullname) };
+    }
+}
+
+fn resolveLibFileName(self: *Linker, libname: []const u8) std.mem.Allocator.Error![]const u8 {
+    var buffer = try self.alloc.alloc(u8, libname.len + 6);
+    defer self.alloc.free(buffer);
+
+    var len: usize = 0;
+    if (!std.mem.startsWith(u8, libname, "lib")) {
+        @memcpy(buffer[len .. len + 3], "lib");
+        len += 3;
+    }
+    @memcpy(buffer[len .. len + libname.len], libname);
+    len += libname.len;
+    if (std.mem.findPosLinear(u8, libname, 0, ".so") == null) {
+        @memcpy(buffer[len .. len + 3], ".so");
+        len += 3;
+    }
+
+    const copy = try self.alloc.dupe(u8, buffer[0..len]);
+    return copy;
+}
+
+fn findLib(self: *Linker, lib_fullname: []const u8) LinkerError!DynLibElf {
+    const cwd_path_sent = try std.process.currentPathAlloc(self.io, self.alloc);
+    defer self.alloc.free(cwd_path_sent);
+    const cwd_path: []const u8 = @ptrCast(cwd_path_sent);
+
+    for (self.dyn_search_paths.items) |search_path| {
+        const found_file = try self.searchInPath(cwd_path, search_path, lib_fullname, true) orelse continue;
+        defer found_file.file.close(self.io);
+
+        var dynlib = DynLibElf.open(found_file.file, self.io) catch continue;
+        dynlib.resolved_name = found_file.name;
+        return dynlib;
+    }
+
     const syslib_prefix = "/usr/lib64/";
-    const lib_path = try std.mem.concat(self.alloc, u8, &.{ syslib_prefix, libname });
-    defer self.alloc.free(lib_path);
+    const found_file = try self.searchInPath(cwd_path, syslib_prefix, lib_fullname, false) orelse {
+        errprint.printErrorFmt("Could not find '{s}' library\n", .{lib_fullname});
+        return LinkerError.LinkingFailed;
+    };
+    defer found_file.file.close(self.io);
 
-    const library = try DynLibElf.open(lib_path, self.io);
-
-    return library;
+    var dynlib = DynLibElf.open(found_file.file, self.io) catch {
+        errprint.printErrorFmt("Could not find '{s}' library\n", .{lib_fullname});
+        return LinkerError.LinkingFailed;
+    };
+    dynlib.resolved_name = found_file.name;
+    return dynlib;
 }
 
 fn printDynstr(self: *Linker) void {
@@ -908,6 +998,14 @@ fn linkDynamic(self: *Linker) void {
         const lib_name = self.exe.appendDynstrName(lib);
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_NEEDED, .d_val = lib_name });
     }
+
+    const runpath_name = self.exe.buffs.dynstr.items.len;
+    for (self.dyn_runpath.items) |path| {
+        self.exe.buffs.dynstr.appendSliceAssumeCapacity(path);
+        self.exe.buffs.dynstr.appendAssumeCapacity(':');
+    }
+    self.exe.buffs.dynstr.items[self.exe.buffs.dynstr.items.len - 1] = 0;
+
     dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_HASH, .d_val = self.exe.sections.hash.vaddr });
     dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_STRTAB, .d_val = self.exe.sections.dynstr.vaddr });
     dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_SYMTAB, .d_val = self.exe.sections.dynsym.vaddr });
@@ -924,6 +1022,9 @@ fn linkDynamic(self: *Linker) void {
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_RELA, .d_val = self.exe.sections.reladyn.vaddr });
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_RELASZ, .d_val = self.exe.sections.reladyn.size });
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_RELAENT, .d_val = @sizeOf(elf.Elf64.Rela) });
+    }
+    if (self.dyn_runpath.items.len > 0) {
+        dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_RUNPATH, .d_val = runpath_name });
     }
     dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_NULL, .d_val = 0 });
 }
@@ -1307,6 +1408,9 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
         for (self.dyn_libs.items) |lib| {
             dynstr_size += lib.len + 1;
         }
+        for (self.dyn_runpath.items) |path| {
+            dynstr_size += path.len + 1;
+        }
 
         secs.dynstr.ind = incInd(&ind);
         secs.dynstr.offset = secs.dynsym.offset + secs.dynsym.size;
@@ -1347,6 +1451,9 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
         }
         if (self.exe.has_bss) {
             secs.dynamic.size += 3 * @sizeOf(elf.Elf64_Dyn);
+        }
+        if (self.dyn_runpath.items.len > 0) {
+            secs.dynamic.size += @sizeOf(elf.Elf64_Dyn);
         }
         secs.dynamic.vaddr = vaddress + secs.dynamic.offset;
         phdrs.dynamic = .{
@@ -1493,10 +1600,15 @@ fn linkExe(self: *Linker) LinkerError!void {
         var lib_iter = dyn_libs.iterator();
         while (lib_iter.next()) |lib| {
             const lib_name = lib.key_ptr.*;
-            var dyn_lib = try self.findLib(lib_name);
+            const lib_fullname = try self.resolveLibFileName(lib_name);
+            defer self.alloc.free(lib_fullname);
+            // std.debug.print("Try to find library: '{s}' -> '{s}'\n", .{ lib_name, lib_fullname });
+            var dyn_lib = try self.findLib(lib_fullname);
             defer dyn_lib.close();
 
-            try self.dyn_libs.append(self.alloc, lib_name);
+            // std.debug.print("Found library '{s}'\n", .{dyn_lib.resolved_name});
+
+            try self.dyn_libs.append(self.alloc, dyn_lib.resolved_name);
 
             var sym_iter = lib.value_ptr.iterator();
             while (sym_iter.next()) |sym| {
@@ -1982,6 +2094,7 @@ pub fn deinit(self: *Linker) void {
     self.dyn_libs.deinit(self.alloc);
     self.dyn_funcs.deinit();
     self.dyn_objects.deinit();
+    self.dyn_runpath.deinit(self.alloc);
     self.offsets.deinit();
     self.locals.deinit();
     self.globals.deinit();

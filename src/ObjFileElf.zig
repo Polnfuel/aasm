@@ -85,6 +85,7 @@ const Sections = struct {
 
 buffs: *Buffers,
 sections: *Sections,
+output_path: []const u8,
 
 txt_sym: u32,
 dbg_ln_sym: u32,
@@ -93,11 +94,12 @@ dbg_str_sym: u32,
 
 symtab_info: u32,
 
-pub fn init(self: *ObjFileElf, alloc: std.mem.Allocator) std.mem.Allocator.Error!void {
+pub fn init(self: *ObjFileElf, alloc: std.mem.Allocator, output_path: []const u8) std.mem.Allocator.Error!void {
     self.buffs = try alloc.create(Buffers);
     self.buffs.* = Buffers{};
     self.sections = try alloc.create(Sections);
     self.sections.* = Sections{};
+    self.output_path = output_path;
 
     try self.buffs.symtab.append(alloc, .{ .name = 0, .value = 0, .size = 0, .info = .{ .type = .NOTYPE, .bind = .LOCAL }, .other = .{ .visibility = .DEFAULT }, .shndx = elf.SHN_UNDEF });
     try self.buffs.strtab.append(alloc, 0);
@@ -636,11 +638,14 @@ pub fn writeObjFile(self: *ObjFileElf, io: std.Io, program: *Program) ObjectErro
     const file_buffer = try program.alloc.alloc(u8, file_size);
     defer program.alloc.free(file_buffer);
 
-    const file_name_ext = try std.mem.concat(program.alloc, u8, &.{ std.fs.path.stem(program.file_name), @ptrCast(".o") });
-    defer program.alloc.free(file_name_ext);
+    const file_name = if (self.output_path.len == 0)
+        try std.mem.concat(program.alloc, u8, &.{ std.fs.path.stem(program.file_name), @ptrCast(".o") })
+    else
+        self.output_path;
+    defer if (self.output_path.len == 0) program.alloc.free(file_name);
 
     const cwd = std.Io.Dir.cwd();
-    const file = try cwd.createFile(io, file_name_ext, .{});
+    const file = try cwd.createFile(io, file_name, .{});
     defer file.close(io);
 
     var file_writer = file.writer(io, file_buffer);

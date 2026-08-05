@@ -7,18 +7,18 @@ var stderr_writer: std.Io.File.Writer = undefined;
 var stdout: *std.Io.Writer = undefined;
 var stderr: *std.Io.Writer = undefined;
 
-pub fn init(allocator: std.mem.Allocator, io: std.Io) std.mem.Allocator.Error!void {
-    stdout_buffer = try allocator.alloc(u8, 1024);
-    stderr_buffer = try allocator.alloc(u8, 1024);
+pub fn init(alloc: std.mem.Allocator, io: std.Io) std.mem.Allocator.Error!void {
+    stdout_buffer = try alloc.alloc(u8, 1024);
+    stderr_buffer = try alloc.alloc(u8, 1024);
     stdout_writer = std.Io.File.stdout().writer(io, stdout_buffer);
     stderr_writer = std.Io.File.stderr().writer(io, stderr_buffer);
     stdout = &stdout_writer.interface;
     stderr = &stderr_writer.interface;
 }
 
-pub fn deinit(allocator: std.mem.Allocator) void {
-    allocator.free(stdout_buffer);
-    allocator.free(stderr_buffer);
+pub fn deinit(alloc: std.mem.Allocator) void {
+    alloc.free(stdout_buffer);
+    alloc.free(stderr_buffer);
 }
 
 pub fn printMessage(comptime message: []const u8) void {

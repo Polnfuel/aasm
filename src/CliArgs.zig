@@ -12,35 +12,21 @@ const OutputFormat = enum {
     Executable,
 };
 
-input_files: std.ArrayList([]const u8),
-output_file: []const u8,
-h: bool,
-v: bool,
-o: bool,
-f: bool,
-s: bool,
-g: bool,
-pic: bool,
-w: bool,
-q: bool,
-format: OutputFormat,
+input_paths: std.ArrayList([]const u8) = .empty,
+search_paths: std.ArrayList([]const u8) = .empty,
+output_name: []const u8 = &.{},
+help: bool = false,
+version: bool = false,
+strip: bool = false,
+debug: bool = false,
+pic: bool = false,
+no_warnings: bool = false,
+quiet: bool = false,
+format: OutputFormat = .Object,
 
-pub fn parse(args: []const [:0]const u8, allocator: std.mem.Allocator) CliError!CliArgs {
-    var cli_args: CliArgs = .{
-        .input_files = .empty,
-        .output_file = &.{},
-        .h = false,
-        .v = false,
-        .o = false,
-        .f = false,
-        .s = false,
-        .g = false,
-        .pic = false,
-        .w = false,
-        .q = false,
-        .format = .Object,
-    };
-    errdefer cli_args.deinit(allocator);
+pub fn parse(args: []const [:0]const u8, alloc: std.mem.Allocator) CliError!CliArgs {
+    var cli_args = CliArgs{};
+    errdefer cli_args.deinit(alloc);
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -56,32 +42,18 @@ pub fn parse(args: []const [:0]const u8, allocator: std.mem.Allocator) CliError!
                         if (i + 1 < args.len and args[i + 1][0] != '-') {
                             output = @ptrCast(args[i + 1]);
                             i += 1;
+                        } else {
+                            errprint.printError("expected output filename following -o flag");
+                            return CliError.CliParseFailed;
                         }
                     } else {
                         // -o<filename>
                         output = @ptrCast(arg[2..]);
                     }
-                    cli_args.o = true;
-                    cli_args.output_file = output;
-                },
-                'v' => {
-                    if (arg.len == 2 and args.len == 2) {
-                        cli_args.v = true;
-                    } else {
-                        errprint.printError("-v flag with unexpected parameters");
-                        return CliError.CliParseFailed;
-                    }
-                },
-                'h' => {
-                    if (arg.len == 2 and args.len == 2) {
-                        cli_args.h = true;
-                    } else {
-                        errprint.printError("-h flag with unexpected parameters");
-                        return CliError.CliParseFailed;
-                    }
+                    cli_args.output_name = output;
                 },
                 'f' => {
-                    var format: []const u8 = undefined;
+                    var format: []const u8 = &.{};
                     if (arg.len == 2) {
                         // -f <format>
                         if (i + 1 < args.len and args[i + 1][0] != '-') {
@@ -107,13 +79,23 @@ pub fn parse(args: []const [:0]const u8, allocator: std.mem.Allocator) CliError!
                         errprint.printError("unknown parameter after -f flag");
                         return CliError.CliParseFailed;
                     }
-                    cli_args.f = true;
                 },
-                's' => {
-                    cli_args.s = true;
-                },
-                'g' => {
-                    cli_args.g = true;
+                'L' => {
+                    var lib_path: []const u8 = &.{};
+                    if (arg.len == 2) {
+                        // -L <path>
+                        if (i + 1 < args.len and args[i + 1][0] != '-') {
+                            lib_path = @ptrCast(args[i + 1]);
+                            i += 1;
+                        } else {
+                            errprint.printError("expected library search path following -L flag");
+                            return CliError.CliParseFailed;
+                        }
+                    } else {
+                        // -L<path>
+                        lib_path = @ptrCast(arg[2..]);
+                    }
+                    try cli_args.search_paths.append(alloc, lib_path);
                 },
                 'p' => {
                     if (std.mem.eql(u8, arg[1..], "pic")) {
@@ -123,11 +105,33 @@ pub fn parse(args: []const [:0]const u8, allocator: std.mem.Allocator) CliError!
                         return CliError.CliParseFailed;
                     }
                 },
+                'v' => {
+                    if (arg.len == 2 and args.len == 2) {
+                        cli_args.version = true;
+                    } else {
+                        errprint.printError("-v flag with unexpected parameters");
+                        return CliError.CliParseFailed;
+                    }
+                },
+                'h' => {
+                    if (arg.len == 2 and args.len == 2) {
+                        cli_args.help = true;
+                    } else {
+                        errprint.printError("-h flag with unexpected parameters");
+                        return CliError.CliParseFailed;
+                    }
+                },
                 'w' => {
-                    cli_args.w = true;
+                    cli_args.no_warnings = true;
                 },
                 'q' => {
-                    cli_args.q = true;
+                    cli_args.quiet = true;
+                },
+                's' => {
+                    cli_args.strip = true;
+                },
+                'g' => {
+                    cli_args.debug = true;
                 },
                 else => {
                     errprint.printErrorFmt("unknown option: -{c}", .{option});
@@ -135,7 +139,7 @@ pub fn parse(args: []const [:0]const u8, allocator: std.mem.Allocator) CliError!
                 },
             }
         } else {
-            try cli_args.input_files.append(allocator, @ptrCast(arg));
+            try cli_args.input_paths.append(alloc, @ptrCast(arg));
         }
     }
     if (i == 1) {
@@ -147,28 +151,23 @@ pub fn parse(args: []const [:0]const u8, allocator: std.mem.Allocator) CliError!
 }
 
 fn check(self: *CliArgs) CliError!void {
-    if (self.input_files.items.len == 0) {
-        if (self.o or self.f or self.s or self.g) {
+    if (self.input_paths.items.len == 0) {
+        if (!self.help and !self.version) {
             errprint.printError("expected at least one input file");
             return CliError.CliParseFailed;
         }
     } else {
-        if (self.o) {
-            if (self.output_file.len == 0) {
-                errprint.printError("output file name must be specified");
-                return CliError.CliParseFailed;
-            } else if (self.input_files.items.len > 1 and self.format == .Object) {
+        if (self.output_name.len > 0) {
+            if (self.input_paths.items.len > 1 and self.format == .Object) {
                 errprint.printError("cannot assemble multiple sources into one object file");
                 return CliError.CliParseFailed;
             }
-        } else if (self.f) {
-            if (self.format == .Executable) {
-                errprint.printError("output file name must be specified");
-                return CliError.CliParseFailed;
-            }
+        } else if (self.format != .Object) {
+            errprint.printError("output file name must be specified");
+            return CliError.CliParseFailed;
         }
-        if (self.s) {
-            if (self.g) {
+        if (self.strip) {
+            if (self.debug) {
                 errprint.printError("cannot add debug info and strip at the same time");
                 return CliError.CliParseFailed;
             } else if (self.format == .Object or self.format == .StaticArchive) {
@@ -180,22 +179,32 @@ fn check(self: *CliArgs) CliError!void {
 }
 
 pub fn print(self: CliArgs) void {
-    for (self.input_files.items) |input| {
+    for (self.input_paths.items) |input| {
         std.debug.print("{s} ", .{input});
     }
-    if (self.o) {
-        std.debug.print("=> ({s})", .{self.output_file});
+    if (self.output_name.len > 0) {
+        std.debug.print("=> ({s})", .{self.output_name});
     }
     std.debug.print("| f - {t} |", .{self.format});
-    if (self.s) {
+    if (self.strip) {
         std.debug.print("| strip |", .{});
     }
-    if (self.g) {
+    if (self.debug) {
         std.debug.print("| with debug info |", .{});
+    }
+    if (self.quiet) {
+        std.debug.print("| quiet |", .{});
+    }
+    if (self.no_warnings) {
+        std.debug.print("| no-warning |", .{});
+    }
+    for (self.search_paths.items) |path| {
+        std.debug.print("{s} ", .{path});
     }
     std.debug.print("\n", .{});
 }
 
-pub fn deinit(self: *CliArgs, allocator: std.mem.Allocator) void {
-    self.input_files.deinit(allocator);
+pub fn deinit(self: *CliArgs, alloc: std.mem.Allocator) void {
+    self.input_paths.deinit(alloc);
+    self.search_paths.deinit(alloc);
 }
