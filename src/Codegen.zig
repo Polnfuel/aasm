@@ -82,6 +82,7 @@ const InstrBytes = struct {
     as: bool,
     os: bool,
     rex: RexByte,
+    preopcode: bool,
     opcode: u8,
     modrm: ?ModRmByte,
     need_sib: bool,
@@ -95,6 +96,7 @@ const InstrBytes = struct {
         .as = false,
         .os = false,
         .rex = RexByte.default(),
+        .preopcode = false,
         .opcode = 0x00,
         .modrm = null,
         .sib = null,
@@ -146,6 +148,10 @@ const InstrBytes = struct {
             8 => self.rex.setW(),
             else => {},
         }
+    }
+
+    fn setPreOpcode(self: *InstrBytes) void {
+        self.preopcode = true;
     }
 
     fn sibByte(self: *InstrBytes, addr: Address) void {
@@ -439,6 +445,9 @@ fn appendInstrBytes(self: *Codegen) std.mem.Allocator.Error!void {
         self.ibytes.rex.rex = 0b0100;
         try self.program.code_block.buffer.append(self.program.alloc, self.ibytes.rex.byte());
     }
+    if (self.ibytes.preopcode) {
+        try self.program.code_block.buffer.append(self.program.alloc, 0x0F);
+    }
     try self.program.code_block.buffer.append(self.program.alloc, self.ibytes.opcode);
     if (self.ibytes.modrm) |modrm| {
         try self.program.code_block.buffer.append(self.program.alloc, modrm.byte());
@@ -619,6 +628,7 @@ fn memImmEncoding1(self: *Codegen, rm: CodeOperand, opcode: u8, digit: u8, imm: 
         try self.appendImmediateBytes(imm, imm_bytes);
         if (self.ibytes.reloc) |*reloc| {
             reloc.addend -= imm_bytes;
+            try self.program.relocations.append(self.program.alloc, reloc.*);
         }
     } else {
         errprint.printSrcLineError("immediate value doesn't fit in memory", self.program.file_name, self.program.content, self.line);
@@ -856,6 +866,54 @@ fn mov(self: *Codegen, operands: Operands) CodegenError!void {
         },
         else => {
             errprint.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
+            return CodegenError.CodeGenFailed;
+        },
+    }
+}
+
+fn movzx(self: *Codegen, operands: Operands) CodegenError!void {
+    if (operands.items.len != 2) {
+        errprint.printSrcLineError("movzx instruction should have 2 operands", self.program.file_name, self.program.content, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+    const first = operands.items[0];
+    const second = operands.items[1];
+    switch (first) {
+        .reg => {
+            switch (second) {
+                .mem => {
+                    const reg_size = first.reg.size;
+                    if (second.mem.size) |mem_size| {
+                        if (mem_size <= 2) {
+                            if (reg_size > mem_size) {
+                                const opcode: u8 = if (mem_size == 1) 0xB6 else 0xB7;
+                                try self.ibytes.define(first.reg, second, opcode, self);
+                                self.ibytes.setPreOpcode();
+                                try self.appendInstrBytes();
+                                if (self.ibytes.reloc) |*reloc| {
+                                    try self.program.relocations.append(self.program.alloc, reloc.*);
+                                }
+                            } else {
+                                errprint.printSrcLineError("register size must be greater than memory operand size", self.program.file_name, self.program.content, self.line);
+                                return CodegenError.CodeGenFailed;
+                            }
+                        } else {
+                            errprint.printSrcLineError("only 8- and 16-bit sizes allowed for memory operand", self.program.file_name, self.program.content, self.line);
+                            return CodegenError.CodeGenFailed;
+                        }
+                    } else {
+                        errprint.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
+                        return CodegenError.CodeGenFailed;
+                    }
+                },
+                else => {
+                    errprint.printSrcLineError("second operand must be memory", self.program.file_name, self.program.content, self.line);
+                    return CodegenError.CodeGenFailed;
+                },
+            }
+        },
+        else => {
+            errprint.printSrcLineError("first operand must be register", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -1324,6 +1382,7 @@ fn genInstruction(self: *Codegen, instr: Program.CodeInstruction) CodegenError!v
             const start = self.program.code_block.buffer.items.len;
             switch (instr.cpu.mnem) {
                 .mov => try self.mov(instr.cpu.operands),
+                .movzx => try self.movzx(instr.cpu.operands),
                 .lea => try self.lea(instr.cpu.operands),
                 .push => try self.push(instr.cpu.operands),
                 .pop => try self.pop(instr.cpu.operands),

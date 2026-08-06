@@ -28,7 +28,7 @@ pub const TokenType = enum(u8) {
     //Instruction mnemonics
     adc, add, @"and", cmp, @"or", sbb, sub, xor,
     dec, div, idiv, inc, mul, neg, not,
-    mov, lea, call, ret, syscall,
+    mov, movzx, lea, call, ret, syscall, 
     ja,  jae, jb,   jbe, jc,   je,  jg,  jge, jl,  jle, jna, jnae, jnb, jnbe, jnc, 
     jne, jng, jnge, jnl, jnle, jno, jnp, jns, jnz, jo,  jp,  jpe,  jpo, js,   jz, jmp,
     imul, @"test",
@@ -307,6 +307,8 @@ fn analyzeWord(word: String, line: u16, file_name: []const u8, content: []const 
         token_type = .mul;
     } else if (word.is("mov")) {
         token_type = .mov;
+    } else if (word.is("movzx")) {
+        token_type = .movzx;
     } else if (word.is("neg")) {
         token_type = .neg;
     } else if (word.is("not")) {
