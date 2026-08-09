@@ -28,22 +28,8 @@ pub const AasmFlags = struct {
     quiet: bool = false,
 };
 
-comp_dir: []const u8 = &.{},
-flags: AasmFlags,
+flags: AasmFlags = AasmFlags{},
 comp_units: std.ArrayList(CompUnit) = .empty,
-
-pub fn init() AssemblerError!Assembler {
-    const cwd_sentinel = try std.process.currentPathAlloc(utils.io, utils.alloc);
-    const cwd = try utils.alloc.dupe(u8, @ptrCast(cwd_sentinel));
-    utils.alloc.free(cwd_sentinel);
-
-    const aasm = Assembler{
-        .comp_dir = cwd,
-        .flags = AasmFlags{},
-    };
-
-    return aasm;
-}
 
 fn loadFileContent(abs_path: []const u8) LoadFileError![]const u8 {
     const file = std.Io.Dir.openFileAbsolute(utils.io, abs_path, .{ .mode = .read_only }) catch |err| {
@@ -90,16 +76,16 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
         self.flags.warnings = !cli_args.no_warnings;
         self.flags.quiet = cli_args.quiet;
     }
-    for (cli_args.input_paths.items) |input_rel_path| {
-        const inp_rel_path_copy = try utils.alloc.dupe(u8, input_rel_path);
+    for (cli_args.input_paths.items) |rel_path| {
+        const input_rel_path = try utils.alloc.dupe(u8, rel_path);
 
-        const abs_path = try std.fs.path.resolve(utils.alloc, &.{ self.comp_dir, input_rel_path });
+        const abs_path = try std.fs.path.resolve(utils.alloc, &.{ utils.comp_dir, rel_path });
         defer utils.alloc.free(abs_path);
 
         // std.debug.print("aasm.abs_path: {s}\n", .{abs_path});
-        // std.debug.print("aasm.rel_path: {s}\n", .{inp_rel_path_copy});
+        // std.debug.print("aasm.rel_path: {s}\n", .{input_rel_path});
 
-        const basename = std.fs.path.basename(inp_rel_path_copy);
+        const basename = std.fs.path.basename(input_rel_path);
 
         // std.debug.print("aasm.basename: {s}\n", .{basename});
 
@@ -144,9 +130,9 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
         try object_file.init(cli_args.output_name);
         errdefer object_file.deinit();
 
-        try object_file.compileProgram(program, self.comp_dir, inp_rel_path_copy);
+        try object_file.compileProgram(program, input_rel_path);
 
-        try self.comp_units.append(utils.alloc, .{ .rel_path = inp_rel_path_copy, .program = program, .objfile = object_file });
+        try self.comp_units.append(utils.alloc, .{ .rel_path = input_rel_path, .program = program, .objfile = object_file });
     }
 
     if (cli_args.format == .Object) {
@@ -177,5 +163,4 @@ pub fn deinit(self: *Assembler) void {
         utils.alloc.free(unit.rel_path);
     }
     self.comp_units.deinit(utils.alloc);
-    utils.alloc.free(self.comp_dir);
 }

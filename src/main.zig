@@ -12,7 +12,7 @@ fn startAASM(init: std.process.Init) !void {
     var cli_args = try CliArgs.parse(args);
     defer cli_args.deinit();
 
-    var aasm = try Assembler.init();
+    var aasm = Assembler{};
     defer aasm.deinit();
 
     try aasm.run(cli_args);

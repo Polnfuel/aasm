@@ -344,13 +344,13 @@ fn addVariableDebugInfo(self: *ObjFileElf, name: []const u8, sym_ind: u32) std.m
     });
 }
 
-fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, cwd_path: []const u8, rel_path: []const u8) std.mem.Allocator.Error!void {
+fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, rel_path: []const u8) std.mem.Allocator.Error!void {
     const buffs = self.buffs;
 
     // Names for line number program
     const dir_path = std.fs.path.dirname(rel_path);
     const dir_cnt: u8 = if (dir_path != null) 2 else 1;
-    try buffs.debug_line_str.appendSlice(utils.alloc, cwd_path);
+    try buffs.debug_line_str.appendSlice(utils.alloc, utils.comp_dir);
     try buffs.debug_line_str.append(utils.alloc, 0);
     const dir1_ind: u32 = @truncate(buffs.debug_line_str.items.len);
     if (dir_cnt > 1) {
@@ -465,7 +465,7 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, cwd_path: []co
     try buffs.debug_str.appendSlice(utils.alloc, rel_path);
     try buffs.debug_str.append(utils.alloc, 0);
     const dir_ind: u32 = @truncate(buffs.debug_str.items.len);
-    try buffs.debug_str.appendSlice(utils.alloc, cwd_path);
+    try buffs.debug_str.appendSlice(utils.alloc, utils.comp_dir);
     try buffs.debug_str.append(utils.alloc, 0);
 
     // DW_TAG_compile_unit abbrev
@@ -526,7 +526,7 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, cwd_path: []co
     });
 }
 
-pub fn compileProgram(self: *ObjFileElf, program: *Program, cwd_path: []const u8, rel_path: []const u8) ObjectError!void {
+pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8) ObjectError!void {
     const buffs = self.buffs;
     const secs = self.sections;
 
@@ -581,7 +581,7 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, cwd_path: []const u8
         try self.appendSectionSymbol(".debug_str", secs.debug_str.ind);
         secs.reladebug_info.name = try self.appendSectionName(".rela.debug_info");
 
-        try self.genDwarfDebugInformation(program, cwd_path, rel_path);
+        try self.genDwarfDebugInformation(program, rel_path);
     } else {
         secs.reladebug_info.ind = secs.relatext.ind;
         secs.reladebug_info.offset = secs.relatext.offset + secs.relatext.size;

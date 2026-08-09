@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub var alloc: std.mem.Allocator = undefined;
 pub var io: std.Io = undefined;
+pub var comp_dir: []const u8 = undefined;
 var stdout_buffer: []u8 = undefined;
 var stderr_buffer: []u8 = undefined;
 var stdout_writer: std.Io.File.Writer = undefined;
@@ -9,7 +10,7 @@ var stderr_writer: std.Io.File.Writer = undefined;
 var stdout: *std.Io.Writer = undefined;
 var stderr: *std.Io.Writer = undefined;
 
-pub fn init(allocator: std.mem.Allocator, inout: std.Io) std.mem.Allocator.Error!void {
+pub fn init(allocator: std.mem.Allocator, inout: std.Io) (std.mem.Allocator.Error || std.process.CurrentPathAllocError)!void {
     alloc = allocator;
     io = inout;
     stdout_buffer = try alloc.alloc(u8, 1024);
@@ -18,11 +19,15 @@ pub fn init(allocator: std.mem.Allocator, inout: std.Io) std.mem.Allocator.Error
     stderr_writer = std.Io.File.stderr().writer(io, stderr_buffer);
     stdout = &stdout_writer.interface;
     stderr = &stderr_writer.interface;
+    const cwd_sentinel = try std.process.currentPathAlloc(io, alloc);
+    defer alloc.free(cwd_sentinel);
+    comp_dir = try alloc.dupe(u8, @ptrCast(cwd_sentinel));
 }
 
 pub fn deinit() void {
     alloc.free(stdout_buffer);
     alloc.free(stderr_buffer);
+    alloc.free(comp_dir);
 }
 
 pub fn printMessage(comptime message: []const u8) void {
