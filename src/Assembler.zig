@@ -1,5 +1,5 @@
 const std = @import("std");
-const errprint = @import("errprint");
+const utils = @import("utils");
 const CliArgs = @import("CliArgs");
 const Program = @import("Program");
 const lexer = @import("lexer");
@@ -28,20 +28,16 @@ pub const AasmFlags = struct {
     quiet: bool = false,
 };
 
-alloc: std.mem.Allocator,
-io: std.Io,
 comp_dir: []const u8 = &.{},
 flags: AasmFlags,
 comp_units: std.ArrayList(CompUnit) = .empty,
 
-pub fn init(io: std.Io, alloc: std.mem.Allocator) AssemblerError!Assembler {
-    const cwd_sentinel = try std.process.currentPathAlloc(io, alloc);
-    const cwd = try alloc.dupe(u8, @ptrCast(cwd_sentinel));
-    alloc.free(cwd_sentinel);
+pub fn init() AssemblerError!Assembler {
+    const cwd_sentinel = try std.process.currentPathAlloc(utils.io, utils.alloc);
+    const cwd = try utils.alloc.dupe(u8, @ptrCast(cwd_sentinel));
+    utils.alloc.free(cwd_sentinel);
 
     const aasm = Assembler{
-        .alloc = alloc,
-        .io = io,
         .comp_dir = cwd,
         .flags = AasmFlags{},
     };
@@ -49,30 +45,30 @@ pub fn init(io: std.Io, alloc: std.mem.Allocator) AssemblerError!Assembler {
     return aasm;
 }
 
-fn loadFileContent(self: *Assembler, abs_path: []const u8) LoadFileError![]const u8 {
-    const file = std.Io.Dir.openFileAbsolute(self.io, abs_path, .{ .mode = .read_only }) catch |err| {
+fn loadFileContent(abs_path: []const u8) LoadFileError![]const u8 {
+    const file = std.Io.Dir.openFileAbsolute(utils.io, abs_path, .{ .mode = .read_only }) catch |err| {
         switch (err) {
             std.Io.File.OpenError.FileNotFound => {
-                errprint.printErrorFmt("file '{s}' not found", .{abs_path});
+                utils.printErrorFmt("file '{s}' not found", .{abs_path});
             },
             else => {},
         }
         return err;
     };
-    defer file.close(self.io);
+    defer file.close(utils.io);
 
-    const file_stat = try file.stat(self.io);
+    const file_stat = try file.stat(utils.io);
     const file_size = file_stat.size;
 
     if (file_size > std.math.pow(u64, 2, 20)) {
-        errprint.printErrorFmt("file '{s}' with size {d} B exceeds 1 MiB file size limit", .{ abs_path, file_size });
+        utils.printErrorFmt("file '{s}' with size {d} B exceeds 1 MiB file size limit", .{ abs_path, file_size });
         return LoadFileError.SourceFileTooBig;
     }
 
-    var content = try self.alloc.alloc(u8, file_size + 1);
-    errdefer self.alloc.free(content);
+    var content = try utils.alloc.alloc(u8, file_size + 1);
+    errdefer utils.alloc.free(content);
 
-    var file_reader = file.reader(self.io, content);
+    var file_reader = file.reader(utils.io, content);
     var reader = &file_reader.interface;
     try reader.readSliceAll(content[0..file_size]);
     content[file_size] = '\n';
@@ -82,10 +78,10 @@ fn loadFileContent(self: *Assembler, abs_path: []const u8) LoadFileError![]const
 
 pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
     if (cli_args.version) {
-        errprint.printMessage("AASM v0.1.0 for Linux systems, x86-64 (AMD64) architecture");
+        utils.printMessage("AASM v0.1.0 for Linux systems, x86-64 (AMD64) architecture");
         return;
     } else if (cli_args.help) {
-        errprint.printMessage("Help");
+        utils.printMessage("Help");
         return;
     } else {
         self.flags.strip = cli_args.strip;
@@ -95,10 +91,10 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
         self.flags.quiet = cli_args.quiet;
     }
     for (cli_args.input_paths.items) |input_rel_path| {
-        const inp_rel_path_copy = try self.alloc.dupe(u8, input_rel_path);
+        const inp_rel_path_copy = try utils.alloc.dupe(u8, input_rel_path);
 
-        const abs_path = try std.fs.path.resolve(self.alloc, &.{ self.comp_dir, input_rel_path });
-        defer self.alloc.free(abs_path);
+        const abs_path = try std.fs.path.resolve(utils.alloc, &.{ self.comp_dir, input_rel_path });
+        defer utils.alloc.free(abs_path);
 
         // std.debug.print("aasm.abs_path: {s}\n", .{abs_path});
         // std.debug.print("aasm.rel_path: {s}\n", .{inp_rel_path_copy});
@@ -107,12 +103,12 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
 
         // std.debug.print("aasm.basename: {s}\n", .{basename});
 
-        const program = try self.alloc.create(Program);
-        errdefer self.alloc.destroy(program);
+        const program = try utils.alloc.create(Program);
+        errdefer utils.alloc.destroy(program);
 
-        const content = try self.loadFileContent(abs_path);
+        const content = try loadFileContent(abs_path);
 
-        program.init(content, basename, self.alloc, self.flags.debug, self.flags.pic, self.flags.warnings, self.flags.quiet);
+        program.init(content, basename, self.flags.debug, self.flags.pic, self.flags.warnings, self.flags.quiet);
         errdefer program.deinit();
 
         try program.lexicalAnalyzis();
@@ -122,12 +118,12 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
         // program.printProgram();
 
         if (!program.flags.has_code and !program.flags.has_data) {
-            errprint.printSrcFileError("source file doesn't contain any data or code block", program.file_name);
+            utils.printSrcFileError("source file doesn't contain any data or code block", program.file_name);
             return AssemblerError.AssemblyError;
         } else if (!program.flags.has_code and program.flags.debug) {
             program.flags.debug = false;
             if (program.flags.warnings) {
-                errprint.printSrcFileWarning("source file doesn't contain code block to debug (debug info will not be generated)", program.file_name);
+                utils.printSrcFileWarning("source file doesn't contain code block to debug (debug info will not be generated)", program.file_name);
             }
         }
 
@@ -142,44 +138,44 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
             program.printSymbolTable();
         }
 
-        const object_file = try self.alloc.create(ObjFileElf);
-        errdefer self.alloc.destroy(object_file);
+        const object_file = try utils.alloc.create(ObjFileElf);
+        errdefer utils.alloc.destroy(object_file);
 
-        try object_file.init(self.alloc, cli_args.output_name);
-        errdefer object_file.deinit(self.alloc);
+        try object_file.init(cli_args.output_name);
+        errdefer object_file.deinit();
 
         try object_file.compileProgram(program, self.comp_dir, inp_rel_path_copy);
 
-        try self.comp_units.append(self.alloc, .{ .rel_path = inp_rel_path_copy, .program = program, .objfile = object_file });
+        try self.comp_units.append(utils.alloc, .{ .rel_path = inp_rel_path_copy, .program = program, .objfile = object_file });
     }
 
     if (cli_args.format == .Object) {
         for (self.comp_units.items) |unit| {
-            try unit.objfile.writeObjFile(self.io, unit.program);
+            try unit.objfile.writeObjFile(unit.program);
         }
     } else if (cli_args.format == .Executable) {
-        const linker = try self.alloc.create(Linker);
-        defer self.alloc.destroy(linker);
-        try linker.init(cli_args.output_name, self.alloc, self.io, self.comp_units.items, .{ .debug = self.flags.debug, .strip = self.flags.strip, .quiet = self.flags.quiet }, cli_args.search_paths);
+        const linker = try utils.alloc.create(Linker);
+        defer utils.alloc.destroy(linker);
+        try linker.init(cli_args.output_name, self.comp_units.items, .{ .debug = self.flags.debug, .strip = self.flags.strip, .quiet = self.flags.quiet }, cli_args.search_paths);
         defer linker.deinit();
 
         try linker.linkObjects();
     } else {
-        errprint.printError("unsupported output format");
+        utils.printError("unsupported output format");
         return AssemblerError.AssemblyError;
     }
 }
 
 pub fn deinit(self: *Assembler) void {
     for (self.comp_units.items) |unit| {
-        unit.objfile.deinit(unit.program.alloc);
-        unit.program.alloc.destroy(unit.objfile);
+        unit.objfile.deinit();
+        utils.alloc.destroy(unit.objfile);
 
         unit.program.deinit();
-        self.alloc.destroy(unit.program);
+        utils.alloc.destroy(unit.program);
 
-        self.alloc.free(unit.rel_path);
+        utils.alloc.free(unit.rel_path);
     }
-    self.comp_units.deinit(self.alloc);
-    self.alloc.free(self.comp_dir);
+    self.comp_units.deinit(utils.alloc);
+    utils.alloc.free(self.comp_dir);
 }

@@ -1,21 +1,18 @@
 const std = @import("std");
-const errprint = @import("errprint");
+const utils = @import("utils");
 const CliArgs = @import("CliArgs");
 const Assembler = @import("Assembler");
 
 fn startAASM(init: std.process.Init) !void {
-    const allocator = init.gpa;
-    const io = init.io;
-
-    try errprint.init(allocator, io);
-    defer errprint.deinit(allocator);
+    try utils.init(init.gpa, init.io);
+    defer utils.deinit();
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    var cli_args = try CliArgs.parse(args, allocator);
-    defer cli_args.deinit(allocator);
+    var cli_args = try CliArgs.parse(args);
+    defer cli_args.deinit();
 
-    var aasm = try Assembler.init(io, allocator);
+    var aasm = try Assembler.init();
     defer aasm.deinit();
 
     try aasm.run(cli_args);
@@ -23,7 +20,7 @@ fn startAASM(init: std.process.Init) !void {
 
 pub fn main(init: std.process.Init) void {
     startAASM(init) catch |err| {
-        errprint.handleError(err);
+        utils.handleError(err);
     };
-    std.process.exit(0);
+    // std.process.exit(0);
 }

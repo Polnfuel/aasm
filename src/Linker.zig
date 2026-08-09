@@ -1,7 +1,7 @@
 const std = @import("std");
 const elf = std.elf;
 
-const errprint = @import("errprint");
+const utils = @import("utils");
 const Assembler = @import("Assembler");
 const CompUnit = Assembler.CompUnit;
 
@@ -105,26 +105,26 @@ const ExeElf = struct {
         strtab: Buffer = .empty,
         shstrtab: Buffer = .empty,
 
-        pub fn deinit(self: *Buffers, alloc: std.mem.Allocator) void {
-            self.plt.deinit(alloc);
-            self.text.deinit(alloc);
-            self.interp.deinit(alloc);
-            self.hash.deinit(alloc);
-            self.dynstr.deinit(alloc);
-            self.dynsym.deinit(alloc);
-            self.reladyn.deinit(alloc);
-            self.relaplt.deinit(alloc);
-            self.dynamic.deinit(alloc);
-            self.gotplt.deinit(alloc);
-            self.data.deinit(alloc);
-            self.debug_line.deinit(alloc);
-            self.debug_line_str.deinit(alloc);
-            self.debug_info.deinit(alloc);
-            self.debug_abrrev.deinit(alloc);
-            self.debug_str.deinit(alloc);
-            self.symtab.deinit(alloc);
-            self.strtab.deinit(alloc);
-            self.shstrtab.deinit(alloc);
+        pub fn deinit(self: *Buffers) void {
+            self.plt.deinit(utils.alloc);
+            self.text.deinit(utils.alloc);
+            self.interp.deinit(utils.alloc);
+            self.hash.deinit(utils.alloc);
+            self.dynstr.deinit(utils.alloc);
+            self.dynsym.deinit(utils.alloc);
+            self.reladyn.deinit(utils.alloc);
+            self.relaplt.deinit(utils.alloc);
+            self.dynamic.deinit(utils.alloc);
+            self.gotplt.deinit(utils.alloc);
+            self.data.deinit(utils.alloc);
+            self.debug_line.deinit(utils.alloc);
+            self.debug_line_str.deinit(utils.alloc);
+            self.debug_info.deinit(utils.alloc);
+            self.debug_abrrev.deinit(utils.alloc);
+            self.debug_str.deinit(utils.alloc);
+            self.symtab.deinit(utils.alloc);
+            self.strtab.deinit(utils.alloc);
+            self.shstrtab.deinit(utils.alloc);
         }
     };
 
@@ -141,7 +141,7 @@ const ExeElf = struct {
     buffs: *Buffers,
     symtab_info: u32,
 
-    pub fn init(self: *ExeElf, alloc: std.mem.Allocator) std.mem.Allocator.Error!void {
+    pub fn init(self: *ExeElf) std.mem.Allocator.Error!void {
         self.entry = null;
         self.has_data = false;
         self.has_dynamic = false;
@@ -149,10 +149,10 @@ const ExeElf = struct {
         self.has_bss = false;
         self.has_debug = false;
         self.has_shtable = true;
-        self.sections = try alloc.create(ExeSections);
+        self.sections = try utils.alloc.create(ExeSections);
         self.sections.* = ExeSections{};
-        self.phdrs = try alloc.create(ExePhdrs);
-        self.buffs = try alloc.create(Buffers);
+        self.phdrs = try utils.alloc.create(ExePhdrs);
+        self.buffs = try utils.alloc.create(Buffers);
         self.buffs.* = Buffers{};
     }
 
@@ -181,17 +181,17 @@ const ExeElf = struct {
         return index;
     }
 
-    pub fn appendStrtabName(self: *ExeElf, name: []const u8, alloc: std.mem.Allocator) std.mem.Allocator.Error!u32 {
+    pub fn appendStrtabName(self: *ExeElf, name: []const u8) std.mem.Allocator.Error!u32 {
         const index: u32 = @truncate(self.buffs.strtab.items.len);
-        try self.buffs.strtab.appendSlice(alloc, name);
-        try self.buffs.strtab.append(alloc, 0);
+        try self.buffs.strtab.appendSlice(utils.alloc, name);
+        try self.buffs.strtab.append(utils.alloc, 0);
         return index;
     }
 
-    pub fn appendShstrtabName(self: *ExeElf, name: []const u8, alloc: std.mem.Allocator) std.mem.Allocator.Error!u32 {
+    pub fn appendShstrtabName(self: *ExeElf, name: []const u8) std.mem.Allocator.Error!u32 {
         const index: u32 = @truncate(self.buffs.shstrtab.items.len);
-        try self.buffs.shstrtab.appendSlice(alloc, name);
-        try self.buffs.shstrtab.append(alloc, 0);
+        try self.buffs.shstrtab.appendSlice(utils.alloc, name);
+        try self.buffs.shstrtab.append(utils.alloc, 0);
         return index;
     }
 
@@ -200,11 +200,11 @@ const ExeElf = struct {
         std.mem.writeInt(T, @ptrCast(self.buffs.text.items[offset .. offset + bytes]), value, .little);
     }
 
-    pub fn deinit(self: *ExeElf, alloc: std.mem.Allocator) void {
-        alloc.destroy(self.sections);
-        alloc.destroy(self.phdrs);
-        self.buffs.deinit(alloc);
-        alloc.destroy(self.buffs);
+    pub fn deinit(self: *ExeElf) void {
+        utils.alloc.destroy(self.sections);
+        utils.alloc.destroy(self.phdrs);
+        self.buffs.deinit();
+        utils.alloc.destroy(self.buffs);
     }
 };
 
@@ -447,8 +447,6 @@ const LibraryFile = struct {
 };
 
 exe: ExeElf,
-alloc: std.mem.Allocator,
-io: std.Io,
 comp_units: []CompUnit,
 flags: Flags,
 dyn_libs: std.ArrayList([]const u8),
@@ -460,20 +458,18 @@ offsets: std.HashMap(FileSection, usize, HM_Context, 80),
 locals: std.StringHashMap(LinkerSymbol),
 globals: std.StringHashMap(LinkerSymbol),
 
-pub fn init(self: *Linker, output_name: []const u8, alloc: std.mem.Allocator, io: std.Io, comp_units: []CompUnit, flags: Flags, search_paths: std.ArrayList([]const u8)) std.mem.Allocator.Error!void {
-    self.alloc = alloc;
-    self.io = io;
+pub fn init(self: *Linker, output_name: []const u8, comp_units: []CompUnit, flags: Flags, search_paths: std.ArrayList([]const u8)) std.mem.Allocator.Error!void {
     self.comp_units = comp_units;
     self.dyn_libs = .empty;
-    self.dyn_funcs = .init(alloc);
-    self.dyn_objects = .init(alloc);
+    self.dyn_funcs = .init(utils.alloc);
+    self.dyn_objects = .init(utils.alloc);
     self.dyn_search_paths = search_paths;
     self.dyn_runpath = .empty;
-    self.offsets = .init(alloc);
-    self.locals = .init(alloc);
-    self.globals = .init(alloc);
+    self.offsets = .init(utils.alloc);
+    self.locals = .init(utils.alloc);
+    self.globals = .init(utils.alloc);
     self.flags = flags;
-    try self.exe.init(alloc);
+    try self.exe.init();
     self.exe.output_name = output_name;
     if (flags.debug) {
         self.exe.has_debug = true;
@@ -497,44 +493,44 @@ fn checkIfValidLibrary(file_handle: std.Io.File.Handle) std.posix.MMapError!bool
 }
 
 fn searchInPath(self: *Linker, cwd_path: []const u8, search_dir_path: []const u8, lib_fullname: []const u8, save_path: bool) LinkerError!?LibraryFile {
-    const abs_file_path = try std.fs.path.resolve(self.alloc, &.{ cwd_path, search_dir_path, lib_fullname });
-    defer self.alloc.free(abs_file_path);
+    const abs_file_path = try std.fs.path.resolve(utils.alloc, &.{ cwd_path, search_dir_path, lib_fullname });
+    defer utils.alloc.free(abs_file_path);
 
     const abs_dir_path = abs_file_path[0 .. abs_file_path.len - lib_fullname.len];
     // std.debug.print("Abs file: {s}\n", .{abs_file_path});
     // std.debug.print("Abs dir: {s}\n", .{abs_dir_path});
 
-    const file = std.Io.Dir.openFileAbsolute(self.io, abs_file_path, .{}) catch return null;
+    const file = std.Io.Dir.openFileAbsolute(utils.io, abs_file_path, .{}) catch return null;
 
     if (!try checkIfValidLibrary(file.handle)) {
-        const search_dir = try std.Io.Dir.openDirAbsolute(self.io, abs_dir_path, .{ .iterate = true });
+        const search_dir = try std.Io.Dir.openDirAbsolute(utils.io, abs_dir_path, .{ .iterate = true });
         var dir_iter = search_dir.iterateAssumeFirstIteration();
-        while (try dir_iter.next(self.io)) |entry| {
+        while (try dir_iter.next(utils.io)) |entry| {
             if (entry.kind == .file and std.mem.startsWith(u8, entry.name, lib_fullname)) {
                 // std.debug.print("File {s}\n", .{entry.name});
-                const dir_file = try search_dir.openFile(self.io, entry.name, .{});
+                const dir_file = try search_dir.openFile(utils.io, entry.name, .{});
                 if (try checkIfValidLibrary(dir_file.handle)) {
                     // std.debug.print("Found valid file {s} in {s}\n", .{ entry.name, abs_dir_path });
                     if (save_path) {
-                        try self.dyn_runpath.append(self.alloc, try self.alloc.dupe(u8, abs_dir_path));
+                        try self.dyn_runpath.append(utils.alloc, try utils.alloc.dupe(u8, abs_dir_path));
                     }
-                    return LibraryFile{ .file = dir_file, .name = try self.alloc.dupe(u8, entry.name) };
+                    return LibraryFile{ .file = dir_file, .name = try utils.alloc.dupe(u8, entry.name) };
                 }
-                dir_file.close(self.io);
+                dir_file.close(utils.io);
             }
         }
         return null;
     } else {
         if (save_path) {
-            try self.dyn_runpath.append(self.alloc, try self.alloc.dupe(u8, abs_dir_path));
+            try self.dyn_runpath.append(utils.alloc, try utils.alloc.dupe(u8, abs_dir_path));
         }
-        return LibraryFile{ .file = file, .name = try self.alloc.dupe(u8, lib_fullname) };
+        return LibraryFile{ .file = file, .name = try utils.alloc.dupe(u8, lib_fullname) };
     }
 }
 
-fn resolveLibFileName(self: *Linker, libname: []const u8) std.mem.Allocator.Error![]const u8 {
-    var buffer = try self.alloc.alloc(u8, libname.len + 6);
-    defer self.alloc.free(buffer);
+fn resolveLibFileName(libname: []const u8) std.mem.Allocator.Error![]const u8 {
+    var buffer = try utils.alloc.alloc(u8, libname.len + 6);
+    defer utils.alloc.free(buffer);
 
     var len: usize = 0;
     if (!std.mem.startsWith(u8, libname, "lib")) {
@@ -548,42 +544,42 @@ fn resolveLibFileName(self: *Linker, libname: []const u8) std.mem.Allocator.Erro
         len += 3;
     }
 
-    const copy = try self.alloc.dupe(u8, buffer[0..len]);
+    const copy = try utils.alloc.dupe(u8, buffer[0..len]);
     return copy;
 }
 
 fn findLib(self: *Linker, lib_fullname: []const u8) LinkerError!DynLibElf {
-    const cwd_path_sent = try std.process.currentPathAlloc(self.io, self.alloc);
-    defer self.alloc.free(cwd_path_sent);
+    const cwd_path_sent = try std.process.currentPathAlloc(utils.io, utils.alloc);
+    defer utils.alloc.free(cwd_path_sent);
     const cwd_path: []const u8 = @ptrCast(cwd_path_sent);
 
     for (self.dyn_search_paths.items) |search_path| {
         const found_file = try self.searchInPath(cwd_path, search_path, lib_fullname, true) orelse continue;
         defer {
-            found_file.file.close(self.io);
-            self.alloc.free(found_file.name);
+            found_file.file.close(utils.io);
+            utils.alloc.free(found_file.name);
         }
 
-        var dynlib = DynLibElf.open(found_file.file, self.io) catch continue;
-        dynlib.resolved_name = try self.alloc.dupe(u8, found_file.name);
+        var dynlib = DynLibElf.open(found_file.file, utils.io) catch continue;
+        dynlib.resolved_name = try utils.alloc.dupe(u8, found_file.name);
         return dynlib;
     }
 
     const syslib_prefix = "/usr/lib64/";
     const found_file = try self.searchInPath(cwd_path, syslib_prefix, lib_fullname, false) orelse {
-        errprint.printErrorFmt("Could not find '{s}' library\n", .{lib_fullname});
+        utils.printErrorFmt("Could not find '{s}' library\n", .{lib_fullname});
         return LinkerError.LinkingFailed;
     };
     defer {
-        found_file.file.close(self.io);
-        self.alloc.free(found_file.name);
+        found_file.file.close(utils.io);
+        utils.alloc.free(found_file.name);
     }
 
-    var dynlib = DynLibElf.open(found_file.file, self.io) catch {
-        errprint.printErrorFmt("Could not find '{s}' library\n", .{lib_fullname});
+    var dynlib = DynLibElf.open(found_file.file, utils.io) catch {
+        utils.printErrorFmt("Could not find '{s}' library\n", .{lib_fullname});
         return LinkerError.LinkingFailed;
     };
-    dynlib.resolved_name = try self.alloc.dupe(u8, found_file.name);
+    dynlib.resolved_name = try utils.alloc.dupe(u8, found_file.name);
     return dynlib;
 }
 
@@ -899,7 +895,7 @@ fn mergeSymbols(self: *Linker) LinkerError!void {
                 const is_global = self.globals.contains(sym_name);
                 const is_import = self.dyn_funcs.contains(sym_name) or self.dyn_objects.contains(sym_name);
                 if (!is_global and !is_import) {
-                    errprint.printSrcFileErrorFmt("unable to resolve external symbol '{s}'", .{sym_name}, unit.program.file_name);
+                    utils.printSrcFileErrorFmt("unable to resolve external symbol '{s}'", .{sym_name}, unit.program.file_name);
                     return LinkerError.LinkingFailed;
                 }
             }
@@ -1045,8 +1041,8 @@ fn linkDebugInfo(self: *Linker, ind: *u8) std.mem.Allocator.Error!void {
     const secs = self.exe.sections;
     const buffs = self.exe.buffs;
 
-    var text_addresses: std.ArrayList(u64) = try .initCapacity(self.alloc, self.comp_units.len);
-    defer text_addresses.deinit(self.alloc);
+    var text_addresses: std.ArrayList(u64) = try .initCapacity(utils.alloc, self.comp_units.len);
+    defer text_addresses.deinit(utils.alloc);
 
     _ = text_addresses.addManyAsSliceAssumeCapacity(self.comp_units.len);
 
@@ -1057,10 +1053,10 @@ fn linkDebugInfo(self: *Linker, ind: *u8) std.mem.Allocator.Error!void {
         }
     }
 
-    var dstr_map: std.StringHashMap(usize) = .init(self.alloc);
+    var dstr_map: std.StringHashMap(usize) = .init(utils.alloc);
     defer dstr_map.deinit();
 
-    var dlstr_map: std.StringHashMap(usize) = .init(self.alloc);
+    var dlstr_map: std.StringHashMap(usize) = .init(utils.alloc);
     defer dlstr_map.deinit();
 
     var dstr_size: usize = 0;
@@ -1075,8 +1071,8 @@ fn linkDebugInfo(self: *Linker, ind: *u8) std.mem.Allocator.Error!void {
             const res = try dstr_map.getOrPut(slice);
             if (!res.found_existing) {
                 res.value_ptr.* = dstr_size;
-                try buffs.debug_str.appendSlice(self.alloc, slice);
-                try buffs.debug_str.append(self.alloc, 0);
+                try buffs.debug_str.appendSlice(utils.alloc, slice);
+                try buffs.debug_str.append(utils.alloc, 0);
                 dstr_size = buffs.debug_str.items.len;
             }
         }
@@ -1090,14 +1086,14 @@ fn linkDebugInfo(self: *Linker, ind: *u8) std.mem.Allocator.Error!void {
             const res = try dlstr_map.getOrPut(slice);
             if (!res.found_existing) {
                 res.value_ptr.* = dlstr_size;
-                try buffs.debug_line_str.appendSlice(self.alloc, slice);
-                try buffs.debug_line_str.append(self.alloc, 0);
+                try buffs.debug_line_str.appendSlice(utils.alloc, slice);
+                try buffs.debug_line_str.append(utils.alloc, 0);
                 dlstr_size = buffs.debug_line_str.items.len;
             }
         }
     }
 
-    try buffs.debug_abrrev.appendSlice(self.alloc, self.comp_units[0].objfile.buffs.debug_abbrev.items);
+    try buffs.debug_abrrev.appendSlice(utils.alloc, self.comp_units[0].objfile.buffs.debug_abbrev.items);
 
     var dline_size: usize = 0;
     var dinfo_size: usize = 0;
@@ -1105,8 +1101,8 @@ fn linkDebugInfo(self: *Linker, ind: *u8) std.mem.Allocator.Error!void {
         dline_size += unit.objfile.buffs.debug_line.items.len;
         dinfo_size += unit.objfile.buffs.debug_info.items.len;
     }
-    buffs.debug_line = try .initCapacity(self.alloc, dline_size);
-    buffs.debug_info = try .initCapacity(self.alloc, dinfo_size);
+    buffs.debug_line = try .initCapacity(utils.alloc, dline_size);
+    buffs.debug_info = try .initCapacity(utils.alloc, dinfo_size);
 
     for (self.comp_units, 0..) |unit, i| {
         const dl_offset = buffs.debug_line.items.len;
@@ -1173,8 +1169,8 @@ fn shdrTable(self: *Linker, ind: *u8) LinkerError!void {
     const secs = self.exe.sections;
     const buffs = self.exe.buffs;
 
-    try buffs.strtab.append(self.alloc, 0);
-    try buffs.symtab.append(self.alloc, elf.Elf64.Sym{ .name = 0, .info = .{ .bind = .LOCAL, .type = .NOTYPE }, .other = .{ .visibility = .DEFAULT }, .shndx = 0, .value = 0, .size = 0 });
+    try buffs.strtab.append(utils.alloc, 0);
+    try buffs.symtab.append(utils.alloc, elf.Elf64.Sym{ .name = 0, .info = .{ .bind = .LOCAL, .type = .NOTYPE }, .other = .{ .visibility = .DEFAULT }, .shndx = 0, .value = 0, .size = 0 });
 
     secs.symtab.ind = incInd(ind);
     secs.symtab.vaddr = 0;
@@ -1186,8 +1182,8 @@ fn shdrTable(self: *Linker, ind: *u8) LinkerError!void {
             .text => secs.text.ind,
             .data => secs.data.ind,
         };
-        try buffs.symtab.append(self.alloc, .{
-            .name = try self.exe.appendStrtabName(sym.key_ptr.*, self.alloc),
+        try buffs.symtab.append(utils.alloc, .{
+            .name = try self.exe.appendStrtabName(sym.key_ptr.*),
             .info = .{ .bind = .LOCAL, .type = switch (sym.value_ptr.shn) {
                 .text => .FUNC,
                 .data => .OBJECT,
@@ -1199,8 +1195,8 @@ fn shdrTable(self: *Linker, ind: *u8) LinkerError!void {
         });
     }
     if (self.exe.has_dynamic) {
-        try buffs.symtab.append(self.alloc, .{
-            .name = try self.exe.appendStrtabName("_DYNAMIC", self.alloc),
+        try buffs.symtab.append(utils.alloc, .{
+            .name = try self.exe.appendStrtabName("_DYNAMIC"),
             .info = .{ .bind = .LOCAL, .type = .OBJECT },
             .other = .{ .visibility = .DEFAULT },
             .shndx = secs.dynamic.ind,
@@ -1208,8 +1204,8 @@ fn shdrTable(self: *Linker, ind: *u8) LinkerError!void {
             .size = 0,
         });
         if (self.exe.has_bss) {
-            try buffs.symtab.append(self.alloc, .{
-                .name = try self.exe.appendStrtabName("_GLOBAL_OFFSET_TABLE", self.alloc),
+            try buffs.symtab.append(utils.alloc, .{
+                .name = try self.exe.appendStrtabName("_GLOBAL_OFFSET_TABLE"),
                 .info = .{ .bind = .LOCAL, .type = .OBJECT },
                 .other = .{ .visibility = .DEFAULT },
                 .shndx = secs.gotplt.ind,
@@ -1227,8 +1223,8 @@ fn shdrTable(self: *Linker, ind: *u8) LinkerError!void {
             .text => secs.text.ind,
             .data => secs.data.ind,
         };
-        try buffs.symtab.append(self.alloc, .{
-            .name = try self.exe.appendStrtabName(sym.key_ptr.*, self.alloc),
+        try buffs.symtab.append(utils.alloc, .{
+            .name = try self.exe.appendStrtabName(sym.key_ptr.*),
             .info = .{ .bind = .GLOBAL, .type = switch (sym.value_ptr.shn) {
                 .text => .FUNC,
                 .data => .OBJECT,
@@ -1243,8 +1239,8 @@ fn shdrTable(self: *Linker, ind: *u8) LinkerError!void {
         for (buffs.dynsym.items[1..]) |sym| {
             const sym_name: []const u8 = std.mem.sliceTo(buffs.dynstr.items[sym.name..], 0);
             var sym_copy = sym;
-            sym_copy.name = try self.exe.appendStrtabName(sym_name, self.alloc);
-            try buffs.symtab.append(self.alloc, sym_copy);
+            sym_copy.name = try self.exe.appendStrtabName(sym_name);
+            try buffs.symtab.append(utils.alloc, sym_copy);
         }
     }
 
@@ -1258,45 +1254,45 @@ fn shdrTable(self: *Linker, ind: *u8) LinkerError!void {
 
 fn shstrtabLoad(self: *Linker, ind: *u8) LinkerError!void {
     const secs = self.exe.sections;
-    try self.exe.buffs.shstrtab.append(self.alloc, 0);
+    try self.exe.buffs.shstrtab.append(utils.alloc, 0);
 
     if (self.exe.has_plt) {
-        secs.plt.name = try self.exe.appendShstrtabName(".plt", self.alloc);
+        secs.plt.name = try self.exe.appendShstrtabName(".plt");
     }
-    secs.text.name = try self.exe.appendShstrtabName(".text", self.alloc);
+    secs.text.name = try self.exe.appendShstrtabName(".text");
     if (self.exe.has_dynamic) {
-        secs.interp.name = try self.exe.appendShstrtabName(".interp", self.alloc);
-        secs.hash.name = try self.exe.appendShstrtabName(".hash", self.alloc);
-        secs.dynsym.name = try self.exe.appendShstrtabName(".dynsym", self.alloc);
-        secs.dynstr.name = try self.exe.appendShstrtabName(".dynstr", self.alloc);
+        secs.interp.name = try self.exe.appendShstrtabName(".interp");
+        secs.hash.name = try self.exe.appendShstrtabName(".hash");
+        secs.dynsym.name = try self.exe.appendShstrtabName(".dynsym");
+        secs.dynstr.name = try self.exe.appendShstrtabName(".dynstr");
         if (self.exe.has_bss) {
-            secs.reladyn.name = try self.exe.appendShstrtabName(".rela.dyn", self.alloc);
+            secs.reladyn.name = try self.exe.appendShstrtabName(".rela.dyn");
         }
         if (self.exe.has_plt) {
-            secs.relaplt.name = try self.exe.appendShstrtabName(".rela.plt", self.alloc);
+            secs.relaplt.name = try self.exe.appendShstrtabName(".rela.plt");
         }
-        secs.dynamic.name = try self.exe.appendShstrtabName(".dynamic", self.alloc);
+        secs.dynamic.name = try self.exe.appendShstrtabName(".dynamic");
         if (self.exe.has_plt) {
-            secs.gotplt.name = try self.exe.appendShstrtabName(".got.plt", self.alloc);
+            secs.gotplt.name = try self.exe.appendShstrtabName(".got.plt");
         }
     }
     if (self.exe.has_data) {
-        secs.data.name = try self.exe.appendShstrtabName(".data", self.alloc);
+        secs.data.name = try self.exe.appendShstrtabName(".data");
     }
     if (self.exe.has_bss) {
-        secs.bss.name = try self.exe.appendShstrtabName(".bss", self.alloc);
+        secs.bss.name = try self.exe.appendShstrtabName(".bss");
     }
     if (self.flags.debug) {
-        secs.debug_line.name = try self.exe.appendShstrtabName(".debug_line", self.alloc);
-        secs.debug_line_str.name = try self.exe.appendShstrtabName(".debug_line_str", self.alloc);
-        secs.debug_info.name = try self.exe.appendShstrtabName(".debug_info", self.alloc);
-        secs.debug_abrrev.name = try self.exe.appendShstrtabName(".debug_abbrev", self.alloc);
-        secs.debug_str.name = try self.exe.appendShstrtabName(".debug_str", self.alloc);
+        secs.debug_line.name = try self.exe.appendShstrtabName(".debug_line");
+        secs.debug_line_str.name = try self.exe.appendShstrtabName(".debug_line_str");
+        secs.debug_info.name = try self.exe.appendShstrtabName(".debug_info");
+        secs.debug_abrrev.name = try self.exe.appendShstrtabName(".debug_abbrev");
+        secs.debug_str.name = try self.exe.appendShstrtabName(".debug_str");
     }
 
-    secs.symtab.name = try self.exe.appendShstrtabName(".symtab", self.alloc);
-    secs.strtab.name = try self.exe.appendShstrtabName(".strtab", self.alloc);
-    secs.shstrtab.name = try self.exe.appendShstrtabName(".shstrtab", self.alloc);
+    secs.symtab.name = try self.exe.appendShstrtabName(".symtab");
+    secs.strtab.name = try self.exe.appendShstrtabName(".strtab");
+    secs.shstrtab.name = try self.exe.appendShstrtabName(".shstrtab");
 
     secs.shstrtab.ind = incInd(ind);
     secs.shstrtab.vaddr = 0;
@@ -1367,8 +1363,8 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
         // secs.interp.offset = std.mem.alignForward(u64, secs.text.offset + secs.text.size, 0x1000);
         secs.interp.offset = secs.text.offset + secs.text.size;
         vaddress += 0x1000;
-        try buffs.interp.appendSlice(self.alloc, "/lib64/ld-linux-x86-64.so.2");
-        try buffs.interp.append(self.alloc, 0);
+        try buffs.interp.appendSlice(utils.alloc, "/lib64/ld-linux-x86-64.so.2");
+        try buffs.interp.append(utils.alloc, 0);
         secs.interp.size = buffs.interp.items.len;
         secs.interp.vaddr = vaddress + secs.interp.offset;
 
@@ -1521,36 +1517,36 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
     };
 
     if (self.exe.has_dynamic) {
-        buffs.dynsym = try .initCapacity(self.alloc, self.exe.sections.dynsym.size / @sizeOf(elf.Elf64.Sym));
+        buffs.dynsym = try .initCapacity(utils.alloc, self.exe.sections.dynsym.size / @sizeOf(elf.Elf64.Sym));
         buffs.dynsym.appendAssumeCapacity(elf.Elf64.Sym{ .name = 0, .info = .{ .bind = .LOCAL, .type = .NOTYPE }, .other = .{ .visibility = .DEFAULT }, .shndx = 0, .value = 0, .size = 0 });
-        buffs.dynstr = try .initCapacity(self.alloc, self.exe.sections.dynstr.size);
+        buffs.dynstr = try .initCapacity(utils.alloc, self.exe.sections.dynstr.size);
         buffs.dynstr.appendAssumeCapacity(0);
 
         if (self.exe.has_plt) {
-            buffs.plt = try .initCapacity(self.alloc, self.exe.sections.plt.size);
-            buffs.gotplt = try .initCapacity(self.alloc, self.exe.sections.gotplt.size / @sizeOf(u64));
-            buffs.relaplt = try .initCapacity(self.alloc, self.exe.sections.relaplt.size / @sizeOf(elf.Elf64.Rela));
+            buffs.plt = try .initCapacity(utils.alloc, self.exe.sections.plt.size);
+            buffs.gotplt = try .initCapacity(utils.alloc, self.exe.sections.gotplt.size / @sizeOf(u64));
+            buffs.relaplt = try .initCapacity(utils.alloc, self.exe.sections.relaplt.size / @sizeOf(elf.Elf64.Rela));
             self.linkPlt();
         }
 
         if (self.exe.has_bss) {
-            buffs.reladyn = try .initCapacity(self.alloc, self.exe.sections.reladyn.size / @sizeOf(elf.Elf64.Rela));
+            buffs.reladyn = try .initCapacity(utils.alloc, self.exe.sections.reladyn.size / @sizeOf(elf.Elf64.Rela));
             self.linkGot();
         }
     }
 
-    buffs.text = try .initCapacity(self.alloc, self.exe.sections.text.size);
-    buffs.data = try .initCapacity(self.alloc, self.exe.sections.data.size);
+    buffs.text = try .initCapacity(utils.alloc, self.exe.sections.text.size);
+    buffs.data = try .initCapacity(utils.alloc, self.exe.sections.data.size);
     try self.mergeTextData();
 
     try self.mergeSymbols();
     self.patchRelocations();
 
     if (self.exe.has_dynamic) {
-        buffs.hash = try .initCapacity(self.alloc, self.exe.sections.hash.size / @sizeOf(u32));
+        buffs.hash = try .initCapacity(utils.alloc, self.exe.sections.hash.size / @sizeOf(u32));
         self.calcHashSection();
 
-        buffs.dynamic = try .initCapacity(self.alloc, self.exe.sections.dynamic.size);
+        buffs.dynamic = try .initCapacity(utils.alloc, self.exe.sections.dynamic.size);
         self.linkDynamic();
     }
 
@@ -1583,7 +1579,7 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
 
 fn linkExe(self: *Linker) LinkerError!void {
     if (self.exe.has_dynamic) {
-        var dyn_libs: std.StringHashMap(std.StringHashMap(void)) = .init(self.alloc);
+        var dyn_libs: std.StringHashMap(std.StringHashMap(void)) = .init(utils.alloc);
         defer dyn_libs.deinit();
 
         for (self.comp_units) |unit| {
@@ -1595,7 +1591,7 @@ fn linkExe(self: *Linker) LinkerError!void {
                         const lib_name = unit.program.shared_libs.items[ind];
                         const res = try dyn_libs.getOrPut(lib_name);
                         if (!res.found_existing) {
-                            res.value_ptr.* = .init(self.alloc);
+                            res.value_ptr.* = .init(utils.alloc);
                         }
                         _ = try res.value_ptr.getOrPut(import.key_ptr.*);
                     }
@@ -1608,13 +1604,13 @@ fn linkExe(self: *Linker) LinkerError!void {
             defer lib.value_ptr.deinit();
 
             const lib_name = lib.key_ptr.*;
-            const lib_fullname = try self.resolveLibFileName(lib_name);
-            defer self.alloc.free(lib_fullname);
+            const lib_fullname = try resolveLibFileName(lib_name);
+            defer utils.alloc.free(lib_fullname);
             // std.debug.print("Try to find library: '{s}' -> '{s}'\n", .{ lib_name, lib_fullname });
             var dyn_lib = try self.findLib(lib_fullname);
             defer dyn_lib.close();
 
-            try self.dyn_libs.append(self.alloc, dyn_lib.resolved_name);
+            try self.dyn_libs.append(utils.alloc, dyn_lib.resolved_name);
             // std.debug.print("Found library '{s}'\n", .{dyn_lib.resolved_name});
 
             var sym_iter = lib.value_ptr.iterator();
@@ -1635,7 +1631,7 @@ fn linkExe(self: *Linker) LinkerError!void {
                         },
                     }
                 } else {
-                    errprint.printErrorFmt("imported symbol '{s}' is not found in '{s}' library", .{ sym_name, lib_name });
+                    utils.printErrorFmt("imported symbol '{s}' is not found in '{s}' library", .{ sym_name, lib_name });
                     return LinkerError.LinkingFailed;
                 }
             }
@@ -1652,7 +1648,7 @@ pub fn linkObjects(self: *Linker) LinkerError!void {
             if (self.exe.entry == null) {
                 self.exe.entry = .{ .name = unit.program.entry, .vaddr = undefined };
             } else {
-                errprint.printError("multiple entry point definition");
+                utils.printError("multiple entry point definition");
                 return LinkerError.LinkingFailed;
             }
         }
@@ -1668,10 +1664,10 @@ pub fn linkObjects(self: *Linker) LinkerError!void {
     }
 
     if (self.exe.entry == null) {
-        errprint.printError("none of source files contains entry point definition");
+        utils.printError("none of source files contains entry point definition");
         return LinkerError.LinkingFailed;
     } else if (!with_code) {
-        errprint.printError("none of source files contains executable code block");
+        utils.printError("none of source files contains executable code block");
         return LinkerError.LinkingFailed;
     }
 
@@ -1686,15 +1682,15 @@ pub fn writeExe(self: *Linker) LinkerError!void {
     const shtable = std.mem.alignForward(usize, secs.shstrtab.offset + secs.shstrtab.size, 0x8);
     const file_size = shtable + @as(usize, (secs.shstrtab.ind + 1)) * @sizeOf(elf.Elf64.Shdr);
 
-    const file_buffer = try self.alloc.alloc(u8, file_size);
-    defer self.alloc.free(file_buffer);
+    const file_buffer = try utils.alloc.alloc(u8, file_size);
+    defer utils.alloc.free(file_buffer);
 
     const cwd = std.Io.Dir.cwd();
-    const file = try cwd.createFile(self.io, self.exe.output_name, .{});
-    try file.setPermissions(self.io, std.Io.File.Permissions.executable_file);
-    defer file.close(self.io);
+    const file = try cwd.createFile(utils.io, self.exe.output_name, .{});
+    try file.setPermissions(utils.io, std.Io.File.Permissions.executable_file);
+    defer file.close(utils.io);
 
-    var file_writer = file.writer(self.io, file_buffer);
+    var file_writer = file.writer(utils.io, file_buffer);
     const writer = &file_writer.interface;
 
     try writer.writeStruct(elf.Elf64.Ehdr{
@@ -2099,14 +2095,14 @@ pub fn writeExe(self: *Linker) LinkerError!void {
 
 pub fn deinit(self: *Linker) void {
     for (self.dyn_libs.items) |lib| {
-        self.alloc.free(lib);
+        utils.alloc.free(lib);
     }
-    self.dyn_libs.deinit(self.alloc);
+    self.dyn_libs.deinit(utils.alloc);
     self.dyn_funcs.deinit();
     self.dyn_objects.deinit();
-    self.dyn_runpath.deinit(self.alloc);
+    self.dyn_runpath.deinit(utils.alloc);
     self.offsets.deinit();
     self.locals.deinit();
     self.globals.deinit();
-    self.exe.deinit(self.alloc);
+    self.exe.deinit();
 }

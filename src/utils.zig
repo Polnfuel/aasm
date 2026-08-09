@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub var alloc: std.mem.Allocator = undefined;
+pub var io: std.Io = undefined;
 var stdout_buffer: []u8 = undefined;
 var stderr_buffer: []u8 = undefined;
 var stdout_writer: std.Io.File.Writer = undefined;
@@ -7,7 +9,9 @@ var stderr_writer: std.Io.File.Writer = undefined;
 var stdout: *std.Io.Writer = undefined;
 var stderr: *std.Io.Writer = undefined;
 
-pub fn init(alloc: std.mem.Allocator, io: std.Io) std.mem.Allocator.Error!void {
+pub fn init(allocator: std.mem.Allocator, inout: std.Io) std.mem.Allocator.Error!void {
+    alloc = allocator;
+    io = inout;
     stdout_buffer = try alloc.alloc(u8, 1024);
     stderr_buffer = try alloc.alloc(u8, 1024);
     stdout_writer = std.Io.File.stdout().writer(io, stdout_buffer);
@@ -16,7 +20,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io) std.mem.Allocator.Error!void {
     stderr = &stderr_writer.interface;
 }
 
-pub fn deinit(alloc: std.mem.Allocator) void {
+pub fn deinit() void {
     alloc.free(stdout_buffer);
     alloc.free(stderr_buffer);
 }

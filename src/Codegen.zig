@@ -1,5 +1,5 @@
 const std = @import("std");
-const errprint = @import("errprint");
+const utils = @import("utils");
 
 const lexer = @import("lexer");
 const TokenType = lexer.TokenType;
@@ -228,10 +228,10 @@ const InstrBytes = struct {
                             self.reloc.?.type = .Rel32D;
                         } else {
                             if (codegen.program.flags.pic) {
-                                errprint.printSrcLineError("label with base syntax cannot be used with -pic flag", codegen.program.file_name, codegen.program.content, codegen.line);
+                                utils.printSrcLineError("label with base syntax cannot be used with -pic flag", codegen.program.file_name, codegen.program.content, codegen.line);
                                 return CodegenError.CodeGenFailed;
                             } else if (codegen.program.flags.warnings) {
-                                errprint.printSrcLineWarning("address will be truncated to 32-bit", codegen.program.file_name, codegen.program.content, codegen.line);
+                                utils.printSrcLineWarning("address will be truncated to 32-bit", codegen.program.file_name, codegen.program.content, codegen.line);
                             }
                             mod = 0b10;
                             rm_code = regCode(rm.mem.addr.base.?.name);
@@ -242,10 +242,10 @@ const InstrBytes = struct {
                         }
                     } else {
                         if (codegen.program.flags.pic) {
-                            errprint.printSrcLineError("label with index syntax cannot be used with -pic flag", codegen.program.file_name, codegen.program.content, codegen.line);
+                            utils.printSrcLineError("label with index syntax cannot be used with -pic flag", codegen.program.file_name, codegen.program.content, codegen.line);
                             return CodegenError.CodeGenFailed;
                         } else if (codegen.program.flags.warnings) {
-                            errprint.printSrcLineWarning("address will be truncated to 32-bit", codegen.program.file_name, codegen.program.content, codegen.line);
+                            utils.printSrcLineWarning("address will be truncated to 32-bit", codegen.program.file_name, codegen.program.content, codegen.line);
                         }
                         mod = 0b10;
                         rm_code = 0b100;
@@ -356,12 +356,12 @@ const InstrBytes = struct {
                             mem.base = mem.index;
                             mem.index = temp;
                         } else {
-                            errprint.printSrcLineErrorFmt("{t} as index is not allowed", .{index.name}, codegen.program.file_name, codegen.program.content, codegen.line);
+                            utils.printSrcLineErrorFmt("{t} as index is not allowed", .{index.name}, codegen.program.file_name, codegen.program.content, codegen.line);
                             return CodegenError.CodeGenFailed;
                         }
                     }
                 } else {
-                    errprint.printSrcLineErrorFmt("{t} as index is not allowed", .{index.name}, codegen.program.file_name, codegen.program.content, codegen.line);
+                    utils.printSrcLineErrorFmt("{t} as index is not allowed", .{index.name}, codegen.program.file_name, codegen.program.content, codegen.line);
                     return CodegenError.CodeGenFailed;
                 }
             }
@@ -384,13 +384,13 @@ const InstrBytes = struct {
         }
         if (self.rex.byte() > 0x00) {
             if (reg.name.isByteRegHigh()) {
-                errprint.printSrcLineErrorFmt("{t} register not encodable with REX prefix", .{reg.name}, codegen.program.file_name, codegen.program.content, codegen.line);
+                utils.printSrcLineErrorFmt("{t} register not encodable with REX prefix", .{reg.name}, codegen.program.file_name, codegen.program.content, codegen.line);
                 return CodegenError.CodeGenFailed;
             }
             switch (rm) {
                 .reg => {
                     if (rm.reg.name.isByteRegHigh()) {
-                        errprint.printSrcLineErrorFmt("{t} register not encodable with REX prefix", .{rm.reg.name}, codegen.program.file_name, codegen.program.content, codegen.line);
+                        utils.printSrcLineErrorFmt("{t} register not encodable with REX prefix", .{rm.reg.name}, codegen.program.file_name, codegen.program.content, codegen.line);
                         return CodegenError.CodeGenFailed;
                     }
                 },
@@ -417,7 +417,7 @@ pub fn init(program: *Program) Codegen {
 }
 
 pub fn deinit(self: *Codegen) void {
-    self.temp_relocs.deinit(self.program.alloc);
+    self.temp_relocs.deinit(utils.alloc);
 }
 
 fn dispMinSize(disp: ?Displacement) u8 {
@@ -436,24 +436,24 @@ fn dispMinSize(disp: ?Displacement) u8 {
 
 fn appendInstrBytes(self: *Codegen) std.mem.Allocator.Error!void {
     if (self.ibytes.as) {
-        try self.program.code_block.buffer.append(self.program.alloc, 0x67);
+        try self.program.code_block.buffer.append(utils.alloc, 0x67);
     }
     if (self.ibytes.os) {
-        try self.program.code_block.buffer.append(self.program.alloc, 0x66);
+        try self.program.code_block.buffer.append(utils.alloc, 0x66);
     }
     if (self.ibytes.rex.byte() > 0x00) {
         self.ibytes.rex.rex = 0b0100;
-        try self.program.code_block.buffer.append(self.program.alloc, self.ibytes.rex.byte());
+        try self.program.code_block.buffer.append(utils.alloc, self.ibytes.rex.byte());
     }
     if (self.ibytes.preopcode) {
-        try self.program.code_block.buffer.append(self.program.alloc, 0x0F);
+        try self.program.code_block.buffer.append(utils.alloc, 0x0F);
     }
-    try self.program.code_block.buffer.append(self.program.alloc, self.ibytes.opcode);
+    try self.program.code_block.buffer.append(utils.alloc, self.ibytes.opcode);
     if (self.ibytes.modrm) |modrm| {
-        try self.program.code_block.buffer.append(self.program.alloc, modrm.byte());
+        try self.program.code_block.buffer.append(utils.alloc, modrm.byte());
     }
     if (self.ibytes.sib) |sib| {
-        try self.program.code_block.buffer.append(self.program.alloc, sib.byte());
+        try self.program.code_block.buffer.append(utils.alloc, sib.byte());
     }
     if (self.ibytes.disp) |disp| {
         if (self.ibytes.reloc) |*reloc| {
@@ -473,7 +473,7 @@ fn checkLabelDefined(self: *const Codegen, label: []const u8) CodegenError!void 
         if (in_datavars == null) {
             const in_imports = self.program.imports.get(label);
             if (in_imports == null) {
-                errprint.printSrcLineErrorFmt("reference to undefined label '{s}'", .{label}, self.program.file_name, self.program.content, self.line);
+                utils.printSrcLineErrorFmt("reference to undefined label '{s}'", .{label}, self.program.file_name, self.program.content, self.line);
                 return CodegenError.CodeGenFailed;
             }
         }
@@ -494,7 +494,7 @@ fn appendImmRelocation(self: *Codegen, imm: CodeOperand, rel_type: RelType) Code
     if (rel_type == .Rel32C or rel_type == .Rel32D) {
         reloc.addend -= 4;
     }
-    try self.program.relocations.append(self.program.alloc, reloc);
+    try self.program.relocations.append(utils.alloc, reloc);
     const reloc_size: u8 = switch (rel_type) {
         .Abs32, .Abs32S, .Rel32C, .Rel32D => 4,
         .Abs64 => 8,
@@ -508,22 +508,22 @@ fn appendImmediateBytes(self: *Codegen, imm: Immediate, bytes: u8) std.mem.Alloc
         .u => imm.u,
     };
     const array = std.mem.toBytes(value);
-    try self.program.code_block.buffer.appendSlice(self.program.alloc, array[0..bytes]);
+    try self.program.code_block.buffer.appendSlice(utils.alloc, array[0..bytes]);
 }
 
 fn appendDisplacement(self: *Codegen, disp: Displacement, bytes: u8) std.mem.Allocator.Error!void {
     const value: u32 = @bitCast(disp);
     const array = std.mem.toBytes(value);
-    try self.program.code_block.buffer.appendSlice(self.program.alloc, array[0..bytes]);
+    try self.program.code_block.buffer.appendSlice(utils.alloc, array[0..bytes]);
 }
 
 fn nearJump(self: *Codegen, imm: CodeOperand, mnem: TokenType, opcode: u8) CodegenError!void {
     if (mnem == .jmp) {
-        try self.program.code_block.buffer.append(self.program.alloc, 0xE9);
+        try self.program.code_block.buffer.append(utils.alloc, 0xE9);
     } else {
-        try self.program.code_block.buffer.appendSlice(self.program.alloc, &.{ 0x0F, opcode });
+        try self.program.code_block.buffer.appendSlice(utils.alloc, &.{ 0x0F, opcode });
     }
-    try self.temp_relocs.append(self.program.alloc, .{
+    try self.temp_relocs.append(utils.alloc, .{
         .name = imm.label.l,
         .offset = self.program.code_block.buffer.items.len,
         .type = .Rel32C,
@@ -550,9 +550,9 @@ fn jumpReloc(self: *Codegen, imm: CodeOperand, mnem: TokenType, opcode: u8) Code
                 if (diff < 0x7F) {
                     const disp_byte: i8 = @truncate(-(diff + 2));
                     if (mnem == .jmp) {
-                        try self.program.code_block.buffer.appendSlice(self.program.alloc, &.{ 0xEB, @bitCast(disp_byte) });
+                        try self.program.code_block.buffer.appendSlice(utils.alloc, &.{ 0xEB, @bitCast(disp_byte) });
                     } else {
-                        try self.program.code_block.buffer.appendSlice(self.program.alloc, &.{ opcode - 0x10, @bitCast(disp_byte) });
+                        try self.program.code_block.buffer.appendSlice(utils.alloc, &.{ opcode - 0x10, @bitCast(disp_byte) });
                     }
                 } else {
                     try self.nearJump(imm, mnem, opcode);
@@ -562,9 +562,9 @@ fn jumpReloc(self: *Codegen, imm: CodeOperand, mnem: TokenType, opcode: u8) Code
         }
     }
     if (mnem == .jmp) {
-        try self.program.code_block.buffer.append(self.program.alloc, 0xE9);
+        try self.program.code_block.buffer.append(utils.alloc, 0xE9);
     } else {
-        try self.program.code_block.buffer.appendSlice(self.program.alloc, &.{ 0x0F, opcode });
+        try self.program.code_block.buffer.appendSlice(utils.alloc, &.{ 0x0F, opcode });
     }
     try self.appendImmRelocation(imm, .Rel32C);
 }
@@ -584,16 +584,16 @@ fn regMemEnconding(self: *Codegen, reg: Register, rm: CodeOperand, opcode: u8, s
             try self.ibytes.define(reg, rm, opcode, self);
             try self.appendInstrBytes();
             if (self.ibytes.reloc) |*reloc| {
-                try self.program.relocations.append(self.program.alloc, reloc.*);
+                try self.program.relocations.append(utils.alloc, reloc.*);
             }
         } else {
-            errprint.printSrcLineError("invalid operand size", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("invalid operand size", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         }
     } else {
         switch (rm) {
-            .reg => errprint.printSrcLineError("registers sizes don't match", self.program.file_name, self.program.content, self.line),
-            .mem => errprint.printSrcLineError("pointer size doesn't match register size", self.program.file_name, self.program.content, self.line),
+            .reg => utils.printSrcLineError("registers sizes don't match", self.program.file_name, self.program.content, self.line),
+            .mem => utils.printSrcLineError("pointer size doesn't match register size", self.program.file_name, self.program.content, self.line),
             else => unreachable,
         }
         return CodegenError.CodeGenFailed;
@@ -613,7 +613,7 @@ fn memImmEncoding1(self: *Codegen, rm: CodeOperand, opcode: u8, digit: u8, imm: 
             if (rm.mem.size) |size| {
                 rm_size = size;
             } else {
-                errprint.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
+                utils.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
                 return CodegenError.CodeGenFailed;
             }
         },
@@ -628,10 +628,10 @@ fn memImmEncoding1(self: *Codegen, rm: CodeOperand, opcode: u8, digit: u8, imm: 
         try self.appendImmediateBytes(imm, imm_bytes);
         if (self.ibytes.reloc) |*reloc| {
             reloc.addend -= imm_bytes;
-            try self.program.relocations.append(self.program.alloc, reloc.*);
+            try self.program.relocations.append(utils.alloc, reloc.*);
         }
     } else {
-        errprint.printSrcLineError("immediate value doesn't fit in memory", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("immediate value doesn't fit in memory", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
 }
@@ -644,7 +644,7 @@ fn memImmEncoding2(self: *Codegen, rm: CodeOperand, opcode: u8, digit: u8, imm: 
             if (rm.mem.size) |size| {
                 rm_size = size;
             } else {
-                errprint.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
+                utils.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
                 return CodegenError.CodeGenFailed;
             }
         },
@@ -687,16 +687,16 @@ fn opImmEncoding(self: *Codegen, reg: Register, opcode: u8, imm: CodeOperand) Co
                     4 => .Abs32,
                     8 => .Abs64,
                     else => {
-                        errprint.printSrcLineError("register is too small for label address", self.program.file_name, self.program.content, self.line);
+                        utils.printSrcLineError("register is too small for label address", self.program.file_name, self.program.content, self.line);
                         return CodegenError.CodeGenFailed;
                     },
                 };
                 if (rel_type == .Abs32) {
                     if (self.program.flags.pic) {
-                        errprint.printSrcLineError("absolute 32-bit address cannot be used with -pic flag", self.program.file_name, self.program.content, self.line);
+                        utils.printSrcLineError("absolute 32-bit address cannot be used with -pic flag", self.program.file_name, self.program.content, self.line);
                         return CodegenError.CodeGenFailed;
                     } else if (self.program.flags.warnings) {
-                        errprint.printSrcLineWarning("address will be truncated to 32-bit", self.program.file_name, self.program.content, self.line);
+                        utils.printSrcLineWarning("address will be truncated to 32-bit", self.program.file_name, self.program.content, self.line);
                     }
                 }
                 try self.appendImmRelocation(imm, rel_type);
@@ -705,7 +705,7 @@ fn opImmEncoding(self: *Codegen, reg: Register, opcode: u8, imm: CodeOperand) Co
             }
         }
     } else {
-        errprint.printSrcLineError("immediate value doesn't fit in register", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("immediate value doesn't fit in register", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
 }
@@ -721,7 +721,7 @@ fn accImmEncoding(self: *Codegen, acc: Register, opcode: u8, imm: Immediate) Cod
         const imm_bytes = @min(4, acc_size);
         try self.appendImmediateBytes(imm, imm_bytes);
     } else {
-        errprint.printSrcLineError("immediate value doesn't fit in register", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("immediate value doesn't fit in register", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
 }
@@ -739,7 +739,7 @@ fn opEncoding(self: *Codegen, reg: Register, opcode: u8, sizes: u4, discard_rexw
         }
         try self.appendInstrBytes();
     } else {
-        errprint.printSrcLineError("invalid operand size", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("invalid operand size", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
 }
@@ -750,7 +750,7 @@ fn memEncoding(self: *Codegen, rm: CodeOperand, digit: u8, opcode: u8, sizes: u4
         .mem => if (rm.mem.size) |sz| {
             rm_size = sz;
         } else {
-            errprint.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
         .reg => {
@@ -767,10 +767,10 @@ fn memEncoding(self: *Codegen, rm: CodeOperand, digit: u8, opcode: u8, sizes: u4
         }
         try self.appendInstrBytes();
         if (self.ibytes.reloc) |*reloc| {
-            try self.program.relocations.append(self.program.alloc, reloc.*);
+            try self.program.relocations.append(utils.alloc, reloc.*);
         }
     } else {
-        errprint.printSrcLineError("invalid operand size", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("invalid operand size", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
 }
@@ -788,35 +788,35 @@ fn immEncoding(self: *Codegen, imm: CodeOperand, opcode: u8, sizes: u4) CodegenE
     }
     if (imm_size & sizes == imm_size) {
         if (imm_size == 2) {
-            try self.program.code_block.buffer.append(self.program.alloc, 0x66);
+            try self.program.code_block.buffer.append(utils.alloc, 0x66);
         }
-        try self.program.code_block.buffer.append(self.program.alloc, opcode);
+        try self.program.code_block.buffer.append(utils.alloc, opcode);
         if (is_label) {
             if (self.program.flags.pic) {
-                errprint.printSrcLineError("absolute 32-bit address cannot be used with -pic flag", self.program.file_name, self.program.content, self.line);
+                utils.printSrcLineError("absolute 32-bit address cannot be used with -pic flag", self.program.file_name, self.program.content, self.line);
                 return CodegenError.CodeGenFailed;
             } else if (self.program.flags.warnings) {
-                errprint.printSrcLineWarning("address will be truncated to 32-bit", self.program.file_name, self.program.content, self.line);
+                utils.printSrcLineWarning("address will be truncated to 32-bit", self.program.file_name, self.program.content, self.line);
             }
             try self.appendImmRelocation(imm, .Abs32);
         } else {
             try self.appendImmediateBytes(imm.imm, imm_size);
         }
     } else {
-        errprint.printSrcLineError("invalid operand size", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("invalid operand size", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
 }
 
 fn zeroEncoding(self: *Codegen, opcode_bytes: []const u8) std.mem.Allocator.Error!void {
-    try self.program.code_block.buffer.appendSlice(self.program.alloc, opcode_bytes);
+    try self.program.code_block.buffer.appendSlice(utils.alloc, opcode_bytes);
 }
 
 // Instructions
 
 fn syscall(self: *Codegen, operands: Operands) CodegenError!void {
     if (operands.items.len != 0) {
-        errprint.printSrcLineError("syscall instruction should have 0 operands", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("syscall instruction should have 0 operands", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     try self.zeroEncoding(&.{ 0x0F, 0x05 });
@@ -824,7 +824,7 @@ fn syscall(self: *Codegen, operands: Operands) CodegenError!void {
 
 fn mov(self: *Codegen, operands: Operands) CodegenError!void {
     if (operands.items.len != 2) {
-        errprint.printSrcLineError("mov instruction should have 2 operands", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("mov instruction should have 2 operands", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const first = operands.items[0];
@@ -859,13 +859,13 @@ fn mov(self: *Codegen, operands: Operands) CodegenError!void {
                 },
                 .label => {},
                 .mem => {
-                    errprint.printSrcLineError("cannot mov memory to memory", self.program.file_name, self.program.content, self.line);
+                    utils.printSrcLineError("cannot mov memory to memory", self.program.file_name, self.program.content, self.line);
                     return CodegenError.CodeGenFailed;
                 },
             }
         },
         else => {
-            errprint.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -873,7 +873,7 @@ fn mov(self: *Codegen, operands: Operands) CodegenError!void {
 
 fn movzx(self: *Codegen, operands: Operands) CodegenError!void {
     if (operands.items.len != 2) {
-        errprint.printSrcLineError("movzx instruction should have 2 operands", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("movzx instruction should have 2 operands", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const first = operands.items[0];
@@ -891,29 +891,29 @@ fn movzx(self: *Codegen, operands: Operands) CodegenError!void {
                                 self.ibytes.setPreOpcode();
                                 try self.appendInstrBytes();
                                 if (self.ibytes.reloc) |*reloc| {
-                                    try self.program.relocations.append(self.program.alloc, reloc.*);
+                                    try self.program.relocations.append(utils.alloc, reloc.*);
                                 }
                             } else {
-                                errprint.printSrcLineError("register size must be greater than memory operand size", self.program.file_name, self.program.content, self.line);
+                                utils.printSrcLineError("register size must be greater than memory operand size", self.program.file_name, self.program.content, self.line);
                                 return CodegenError.CodeGenFailed;
                             }
                         } else {
-                            errprint.printSrcLineError("only 8- and 16-bit sizes allowed for memory operand", self.program.file_name, self.program.content, self.line);
+                            utils.printSrcLineError("only 8- and 16-bit sizes allowed for memory operand", self.program.file_name, self.program.content, self.line);
                             return CodegenError.CodeGenFailed;
                         }
                     } else {
-                        errprint.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
+                        utils.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
                         return CodegenError.CodeGenFailed;
                     }
                 },
                 else => {
-                    errprint.printSrcLineError("second operand must be memory", self.program.file_name, self.program.content, self.line);
+                    utils.printSrcLineError("second operand must be memory", self.program.file_name, self.program.content, self.line);
                     return CodegenError.CodeGenFailed;
                 },
             }
         },
         else => {
-            errprint.printSrcLineError("first operand must be register", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("first operand must be register", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -921,7 +921,7 @@ fn movzx(self: *Codegen, operands: Operands) CodegenError!void {
 
 fn lea(self: *Codegen, operands: Operands) CodegenError!void {
     if (operands.items.len != 2) {
-        errprint.printSrcLineError("lea instruction should have 2 operands", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("lea instruction should have 2 operands", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const first = operands.items[0];
@@ -934,13 +934,13 @@ fn lea(self: *Codegen, operands: Operands) CodegenError!void {
                     try self.regMemEnconding(first.reg, second, opcode, 0b1110);
                 },
                 else => {
-                    errprint.printSrcLineError("second operand must be memory", self.program.file_name, self.program.content, self.line);
+                    utils.printSrcLineError("second operand must be memory", self.program.file_name, self.program.content, self.line);
                     return CodegenError.CodeGenFailed;
                 },
             }
         },
         else => {
-            errprint.printSrcLineError("first operand must be register", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("first operand must be register", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -948,7 +948,7 @@ fn lea(self: *Codegen, operands: Operands) CodegenError!void {
 
 fn push(self: *Codegen, operands: Operands) CodegenError!void {
     if (operands.items.len != 1) {
-        errprint.printSrcLineError("push instruction should have 1 operand", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("push instruction should have 1 operand", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const first = operands.items[0];
@@ -975,7 +975,7 @@ fn push(self: *Codegen, operands: Operands) CodegenError!void {
 
 fn pop(self: *Codegen, operands: Operands) CodegenError!void {
     if (operands.items.len != 1) {
-        errprint.printSrcLineError("pop instruction should have 1 operand", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("pop instruction should have 1 operand", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const first = operands.items[0];
@@ -989,7 +989,7 @@ fn pop(self: *Codegen, operands: Operands) CodegenError!void {
             try self.memEncoding(first, 0, opcode, 0b1010, true);
         },
         else => {
-            errprint.printSrcLineError("pop instruction can only have register or memory as operand", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("pop instruction can only have register or memory as operand", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -997,7 +997,7 @@ fn pop(self: *Codegen, operands: Operands) CodegenError!void {
 
 fn jcc(self: *Codegen, instr: CpuInstruction) CodegenError!void {
     if (instr.operands.items.len != 1) {
-        errprint.printSrcLineErrorFmt("{t} instruction should have 1 operand", .{instr.mnem}, self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineErrorFmt("{t} instruction should have 1 operand", .{instr.mnem}, self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const first = instr.operands.items[0];
@@ -1025,7 +1025,7 @@ fn jcc(self: *Codegen, instr: CpuInstruction) CodegenError!void {
             try self.jumpReloc(first, instr.mnem, opcode);
         },
         else => {
-            errprint.printSrcLineErrorFmt("{t} instruction can jump only to label", .{instr.mnem}, self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineErrorFmt("{t} instruction can jump only to label", .{instr.mnem}, self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -1033,7 +1033,7 @@ fn jcc(self: *Codegen, instr: CpuInstruction) CodegenError!void {
 
 fn jmp(self: *Codegen, operands: Operands) CodegenError!void {
     if (operands.items.len != 1) {
-        errprint.printSrcLineError("jmp instruction should have 1 operand", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("jmp instruction should have 1 operand", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const first = operands.items[0];
@@ -1047,7 +1047,7 @@ fn jmp(self: *Codegen, operands: Operands) CodegenError!void {
             try self.jumpReloc(first, .jmp, opcode);
         },
         else => {
-            errprint.printSrcLineError("jmp instruction cannot have immediate operand", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("jmp instruction cannot have immediate operand", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -1055,7 +1055,7 @@ fn jmp(self: *Codegen, operands: Operands) CodegenError!void {
 
 fn call(self: *Codegen, operands: Operands) CodegenError!void {
     if (operands.items.len != 1) {
-        errprint.printSrcLineError("call instruction should have 1 operand", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("call instruction should have 1 operand", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const first = operands.items[0];
@@ -1066,15 +1066,15 @@ fn call(self: *Codegen, operands: Operands) CodegenError!void {
         },
         .label => {
             if (first.label.l[0] == '.') {
-                errprint.printSrcLineError("call to function's local label is forbidden", self.program.file_name, self.program.content, self.line);
+                utils.printSrcLineError("call to function's local label is forbidden", self.program.file_name, self.program.content, self.line);
                 return CodegenError.CodeGenFailed;
             }
             const opcode: u8 = 0xE8;
-            try self.program.code_block.buffer.append(self.program.alloc, opcode);
+            try self.program.code_block.buffer.append(utils.alloc, opcode);
             try self.appendImmRelocation(first, .Rel32C);
         },
         else => {
-            errprint.printSrcLineError("call instruction cannot have immediate operand", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("call instruction cannot have immediate operand", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -1092,24 +1092,24 @@ fn ret(self: *Codegen, operands: Operands) CodegenError!void {
                     try self.zeroEncoding(&.{0xC2});
                     try self.appendImmediateBytes(oper.imm, 2);
                 } else {
-                    errprint.printSrcLineError("immediate value doesn't fit in 2 bytes", self.program.file_name, self.program.content, self.line);
+                    utils.printSrcLineError("immediate value doesn't fit in 2 bytes", self.program.file_name, self.program.content, self.line);
                     return CodegenError.CodeGenFailed;
                 }
             },
             else => {
-                errprint.printSrcLineError("ret instruction can have only immediate value as operand", self.program.file_name, self.program.content, self.line);
+                utils.printSrcLineError("ret instruction can have only immediate value as operand", self.program.file_name, self.program.content, self.line);
                 return CodegenError.CodeGenFailed;
             },
         }
     } else {
-        errprint.printSrcLineError("ret instruction should have 0 or 1 operand", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("ret instruction should have 0 or 1 operand", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
 }
 
 fn group1(self: *Codegen, instr: CpuInstruction) CodegenError!void {
     if (instr.operands.items.len != 2) {
-        errprint.printSrcLineErrorFmt("{t} instruction should have 2 operands", .{instr.mnem}, self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineErrorFmt("{t} instruction should have 2 operands", .{instr.mnem}, self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const mnem = instr.mnem;
@@ -1193,7 +1193,7 @@ fn group1(self: *Codegen, instr: CpuInstruction) CodegenError!void {
                     }
                 },
                 .label => {
-                    errprint.printSrcLineError("second operand must be register, memory or immediate", self.program.file_name, self.program.content, self.line);
+                    utils.printSrcLineError("second operand must be register, memory or immediate", self.program.file_name, self.program.content, self.line);
                     return CodegenError.CodeGenFailed;
                 },
             }
@@ -1222,7 +1222,7 @@ fn group1(self: *Codegen, instr: CpuInstruction) CodegenError!void {
                     if (first.mem.size) |sz| {
                         ptr_size = sz;
                     } else {
-                        errprint.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
+                        utils.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
                         return CodegenError.CodeGenFailed;
                     }
                     const imm_size = second.imm.fitsInBytes();
@@ -1246,13 +1246,13 @@ fn group1(self: *Codegen, instr: CpuInstruction) CodegenError!void {
                     }
                 },
                 else => {
-                    errprint.printSrcLineError("second operand must be register or immediate", self.program.file_name, self.program.content, self.line);
+                    utils.printSrcLineError("second operand must be register or immediate", self.program.file_name, self.program.content, self.line);
                     return CodegenError.CodeGenFailed;
                 },
             }
         },
         else => {
-            errprint.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -1260,7 +1260,7 @@ fn group1(self: *Codegen, instr: CpuInstruction) CodegenError!void {
 
 fn @"test"(self: *Codegen, operands: Operands) CodegenError!void {
     if (operands.items.len != 2) {
-        errprint.printSrcLineError("test instruction should have 2 operands", self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineError("test instruction should have 2 operands", self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const first = operands.items[0];
@@ -1282,14 +1282,14 @@ fn @"test"(self: *Codegen, operands: Operands) CodegenError!void {
                     if (first.mem.size) |sz| {
                         ptr_size = sz;
                     } else {
-                        errprint.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
+                        utils.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
                         return CodegenError.CodeGenFailed;
                     }
                     const opcode: u8 = if (ptr_size == 1) 0xF6 else 0xF7;
                     try self.memImmEncoding1(first, opcode, 0, second.imm);
                 },
                 else => {
-                    errprint.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
+                    utils.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
                     return CodegenError.CodeGenFailed;
                 },
             }
@@ -1301,13 +1301,13 @@ fn @"test"(self: *Codegen, operands: Operands) CodegenError!void {
                     try self.memRegEncoding(first, second.reg, opcode, 0b1111);
                 },
                 else => {
-                    errprint.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
+                    utils.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
                     return CodegenError.CodeGenFailed;
                 },
             }
         },
         else => {
-            errprint.printSrcLineError("second operand must be register or immediate", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("second operand must be register or immediate", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -1315,7 +1315,7 @@ fn @"test"(self: *Codegen, operands: Operands) CodegenError!void {
 
 fn group2(self: *Codegen, instr: CpuInstruction) CodegenError!void {
     if (instr.operands.items.len != 1) {
-        errprint.printSrcLineErrorFmt("{t} instruction should have 1 operand", .{instr.mnem}, self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineErrorFmt("{t} instruction should have 1 operand", .{instr.mnem}, self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const first = instr.operands.items[0];
@@ -1342,7 +1342,7 @@ fn group2(self: *Codegen, instr: CpuInstruction) CodegenError!void {
             if (first.mem.size == 1) opcode -= 1;
         },
         else => {
-            errprint.printSrcLineError("operand must be register or memory", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("operand must be register or memory", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -1351,7 +1351,7 @@ fn group2(self: *Codegen, instr: CpuInstruction) CodegenError!void {
 
 fn group3(self: *Codegen, instr: CpuInstruction) CodegenError!void {
     if (instr.operands.items.len != 2) {
-        errprint.printSrcLineErrorFmt("{t} instruction should have 2 operands", .{instr.mnem}, self.program.file_name, self.program.content, self.line);
+        utils.printSrcLineErrorFmt("{t} instruction should have 2 operands", .{instr.mnem}, self.program.file_name, self.program.content, self.line);
         return CodegenError.CodeGenFailed;
     }
     const first = instr.operands.items[0];
@@ -1359,11 +1359,11 @@ fn group3(self: *Codegen, instr: CpuInstruction) CodegenError!void {
     const opsize = switch (first) {
         .reg => first.reg.size,
         .mem => first.mem.size orelse {
-            errprint.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
         else => {
-            errprint.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     };
@@ -1385,7 +1385,7 @@ fn group3(self: *Codegen, instr: CpuInstruction) CodegenError!void {
                     else => unreachable,
                 };
             } else {
-                errprint.printSrcLineError("immediate value doesn't fit in 8 bits", self.program.file_name, self.program.content, self.line);
+                utils.printSrcLineError("immediate value doesn't fit in 8 bits", self.program.file_name, self.program.content, self.line);
                 return CodegenError.CodeGenFailed;
             }
         },
@@ -1399,13 +1399,13 @@ fn group3(self: *Codegen, instr: CpuInstruction) CodegenError!void {
                     };
                 },
                 else => {
-                    errprint.printSrcLineError("only cl register allowed as shift second operand", self.program.file_name, self.program.content, self.line);
+                    utils.printSrcLineError("only cl register allowed as shift second operand", self.program.file_name, self.program.content, self.line);
                     return CodegenError.CodeGenFailed;
                 },
             }
         },
         else => {
-            errprint.printSrcLineError("second operand must be imm8 value or cl register", self.program.file_name, self.program.content, self.line);
+            utils.printSrcLineError("second operand must be imm8 value or cl register", self.program.file_name, self.program.content, self.line);
             return CodegenError.CodeGenFailed;
         },
     }
@@ -1424,7 +1424,7 @@ fn group3(self: *Codegen, instr: CpuInstruction) CodegenError!void {
     }
     if (self.ibytes.reloc) |*reloc| {
         if (opt_imm != null) reloc.addend -= 1;
-        try self.program.relocations.append(self.program.alloc, reloc.*);
+        try self.program.relocations.append(utils.alloc, reloc.*);
     }
 }
 
@@ -1456,7 +1456,7 @@ fn genInstruction(self: *Codegen, instr: Program.CodeInstruction) CodegenError!v
         },
         .cpu => {
             if (self.program.flags.debug) {
-                try self.program.line_program.append(self.program.alloc, .{ .offset = self.program.code_block.buffer.items.len, .line = self.line });
+                try self.program.line_program.append(utils.alloc, .{ .offset = self.program.code_block.buffer.items.len, .line = self.line });
             }
             const start = self.program.code_block.buffer.items.len;
             switch (instr.cpu.mnem) {
@@ -1475,7 +1475,7 @@ fn genInstruction(self: *Codegen, instr: Program.CodeInstruction) CodegenError!v
                 .sal, .sar, .shl, .shr => try self.group3(instr.cpu),
                 .@"test" => try self.@"test"(instr.cpu.operands),
                 else => {
-                    errprint.printSrcLineErrorFmt("unsupported instruction: {t}", .{instr.cpu.mnem}, self.program.file_name, self.program.content, self.line);
+                    utils.printSrcLineErrorFmt("unsupported instruction: {t}", .{instr.cpu.mnem}, self.program.file_name, self.program.content, self.line);
                     return CodegenError.CodeGenFailed;
                 },
             }
@@ -1508,7 +1508,7 @@ pub fn genCodeBlockBuffer(self: *Codegen) CodegenError!void {
         try self.patchTempRelocs();
     }
     if (self.program.flags.debug) {
-        try self.program.line_program.append(self.program.alloc, .{
+        try self.program.line_program.append(utils.alloc, .{
             .offset = self.program.code_block.buffer.items.len,
             .line = self.program.line_program.items[self.program.line_program.items.len - 1].line + 1,
         });
@@ -1529,8 +1529,8 @@ test "codegen mov reg, rm" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    try errprint.init(alloc, io);
-    defer errprint.deinit(alloc);
+    try utils.init(alloc, io);
+    defer utils.deinit(alloc);
 
     var prog = try alloc.create(Program);
     defer alloc.destroy(prog);
@@ -1576,8 +1576,8 @@ test "codegen mov reg, imm" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    try errprint.init(alloc, io);
-    defer errprint.deinit(alloc);
+    try utils.init(alloc, io);
+    defer utils.deinit(alloc);
 
     var prog = try alloc.create(Program);
     defer alloc.destroy(prog);
@@ -1622,8 +1622,8 @@ test "codegen push pop ret call jmp" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    try errprint.init(alloc, io);
-    defer errprint.deinit(alloc);
+    try utils.init(alloc, io);
+    defer utils.deinit(alloc);
 
     var prog = try alloc.create(Program);
     defer alloc.destroy(prog);
@@ -1713,8 +1713,8 @@ test "codegen using ah, dh, ch, bh with REX" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
 
-    try errprint.init(alloc, io);
-    defer errprint.deinit(alloc);
+    try utils.init(alloc, io);
+    defer utils.deinit(alloc);
 
     var prog = try alloc.create(Program);
     defer alloc.destroy(prog);

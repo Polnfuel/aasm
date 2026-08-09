@@ -1,5 +1,5 @@
 const std = @import("std");
-
+const utils = @import("utils");
 const lexer = @import("lexer");
 const TokenType = lexer.TokenType;
 const Token = lexer.Token;
@@ -243,34 +243,30 @@ data_vars: std.StringHashMap(DataVariable),
 funcs: std.StringHashMap(Function),
 imports: std.StringHashMap(u16),
 relocations: std.ArrayList(Relocation),
-alloc: std.mem.Allocator,
 
 line_program: std.ArrayList(LineProgramEntry),
 
-pub fn init(self: *Program, content: []const u8, file_name: []const u8, alloc: std.mem.Allocator, debug: bool, pic: bool, warnings: bool, quiet: bool) void {
+pub fn init(self: *Program, content: []const u8, file_name: []const u8, debug: bool, pic: bool, warnings: bool, quiet: bool) void {
     if (!quiet) {
         std.debug.print("program.file_name: {s}\n", .{file_name});
     }
-    self.alloc = alloc;
     self.file_name = file_name;
     self.content = content;
-    self.flags.debug = debug;
-    self.flags.pic = pic;
-    self.flags.warnings = warnings;
-    self.flags.quiet = quiet;
+    self.flags = .{ .debug = debug, .pic = pic, .warnings = warnings, .quiet = quiet };
     self.tokens = .empty;
+    self.entry = &.{};
     self.data_block = .empty;
     self.code_block = .empty;
     self.shared_libs = .empty;
-    self.data_vars = .init(alloc);
-    self.funcs = .init(alloc);
-    self.imports = .init(alloc);
+    self.data_vars = .init(utils.alloc);
+    self.funcs = .init(utils.alloc);
+    self.imports = .init(utils.alloc);
     self.relocations = .empty;
     self.line_program = .empty;
 }
 
 pub fn lexicalAnalyzis(self: *Program) lexer.LexerError!void {
-    self.tokens = try lexer.tokenizeContent(self.alloc, self.content, self.file_name);
+    self.tokens = try lexer.tokenizeContent(self.content, self.file_name);
 }
 
 pub fn syntaxAnalyzis(self: *Program) Parser.ParserError!void {
@@ -497,25 +493,25 @@ pub fn printCPUInstruction(instr: CpuInstruction) void {
 }
 
 pub fn deinit(self: *Program) void {
-    self.alloc.free(self.content);
-    self.tokens.deinit(self.alloc);
+    utils.alloc.free(self.content);
+    self.tokens.deinit(utils.alloc);
     for (self.data_block.instr.items) |*instr| {
-        instr.data.deinit(self.alloc);
+        instr.data.deinit(utils.alloc);
     }
-    self.data_block.instr.deinit(self.alloc);
+    self.data_block.instr.deinit(utils.alloc);
     for (self.code_block.instr.items) |*instr| {
         switch (instr.*) {
-            .cpu => instr.cpu.operands.deinit(self.alloc),
+            .cpu => instr.cpu.operands.deinit(utils.alloc),
             .label => {},
         }
     }
-    self.data_block.buffer.deinit(self.alloc);
-    self.code_block.instr.deinit(self.alloc);
-    self.code_block.buffer.deinit(self.alloc);
-    self.shared_libs.deinit(self.alloc);
+    self.data_block.buffer.deinit(utils.alloc);
+    self.code_block.instr.deinit(utils.alloc);
+    self.code_block.buffer.deinit(utils.alloc);
+    self.shared_libs.deinit(utils.alloc);
     self.data_vars.deinit();
     self.funcs.deinit();
     self.imports.deinit();
-    self.relocations.deinit(self.alloc);
-    self.line_program.deinit(self.alloc);
+    self.relocations.deinit(utils.alloc);
+    self.line_program.deinit(utils.alloc);
 }

@@ -6,8 +6,8 @@ pub fn build(b: *std.Build) void {
 
     const with_llvm = b.option(bool, "llvm", "Use LLVM backend") orelse false;
 
-    const errprint = b.addModule("errprint", .{
-        .root_source_file = b.path("src/errprint.zig"),
+    const utils = b.addModule("utils", .{
+        .root_source_file = b.path("src/utils.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{},
@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "errprint", .module = errprint },
+            .{ .name = "utils", .module = utils },
         },
     });
 
@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "errprint", .module = errprint },
+            .{ .name = "utils", .module = utils },
         },
     });
 
@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "errprint", .module = errprint },
+            .{ .name = "utils", .module = utils },
             .{ .name = "lexer", .module = lexer },
         },
     });
@@ -46,6 +46,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
+            .{ .name = "utils", .module = utils },
             .{ .name = "lexer", .module = lexer },
             .{ .name = "Parser", .module = parser },
         },
@@ -58,7 +59,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "errprint", .module = errprint },
+            .{ .name = "utils", .module = utils },
             .{ .name = "Program", .module = program },
         },
     });
@@ -70,7 +71,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "errprint", .module = errprint },
+            .{ .name = "utils", .module = utils },
             .{ .name = "lexer", .module = lexer },
             .{ .name = "Program", .module = program },
         },
@@ -83,6 +84,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
+            .{ .name = "utils", .module = utils },
             .{ .name = "Program", .module = program },
         },
     });
@@ -92,7 +94,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "errprint", .module = errprint },
+            .{ .name = "utils", .module = utils },
             .{ .name = "ObjFileElf", .module = objfile },
         },
     });
@@ -102,7 +104,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "errprint", .module = errprint },
+            .{ .name = "utils", .module = utils },
             .{ .name = "CliArgs", .module = cli_args },
             .{ .name = "Program", .module = program },
             .{ .name = "lexer", .module = lexer },
@@ -121,7 +123,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "errprint", .module = errprint },
+            .{ .name = "utils", .module = utils },
             .{ .name = "CliArgs", .module = cli_args },
             .{ .name = "Assembler", .module = assembler },
         },
@@ -134,14 +136,6 @@ pub fn build(b: *std.Build) void {
 
     if (with_llvm) {
         exe.use_llvm = true;
-    }
-
-    if (optimize == .ReleaseFast) {
-        exe.root_module.error_tracing = false;
-        exe.root_module.omit_frame_pointer = true;
-        exe.root_module.strip = true;
-        exe.root_module.stack_protector = false;
-        exe.root_module.stack_check = false;
     }
 
     b.installArtifact(exe);

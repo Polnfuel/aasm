@@ -2,6 +2,7 @@ const std = @import("std");
 const elf = std.elf;
 const dwarf = std.dwarf;
 
+const utils = @import("utils");
 const Program = @import("Program");
 
 /// Elf64 object file representation
@@ -94,16 +95,16 @@ dbg_str_sym: u32,
 
 symtab_info: u32,
 
-pub fn init(self: *ObjFileElf, alloc: std.mem.Allocator, output_path: []const u8) std.mem.Allocator.Error!void {
-    self.buffs = try alloc.create(Buffers);
+pub fn init(self: *ObjFileElf, output_path: []const u8) std.mem.Allocator.Error!void {
+    self.buffs = try utils.alloc.create(Buffers);
     self.buffs.* = Buffers{};
-    self.sections = try alloc.create(Sections);
+    self.sections = try utils.alloc.create(Sections);
     self.sections.* = Sections{};
     self.output_path = output_path;
 
-    try self.buffs.symtab.append(alloc, .{ .name = 0, .value = 0, .size = 0, .info = .{ .type = .NOTYPE, .bind = .LOCAL }, .other = .{ .visibility = .DEFAULT }, .shndx = elf.SHN_UNDEF });
-    try self.buffs.strtab.append(alloc, 0);
-    try self.buffs.shstrtab.append(alloc, 0);
+    try self.buffs.symtab.append(utils.alloc, .{ .name = 0, .value = 0, .size = 0, .info = .{ .type = .NOTYPE, .bind = .LOCAL }, .other = .{ .visibility = .DEFAULT }, .shndx = elf.SHN_UNDEF });
+    try self.buffs.strtab.append(utils.alloc, 0);
+    try self.buffs.shstrtab.append(utils.alloc, 0);
 
     self.txt_sym = 0;
     self.dbg_ln_sym = 0;
@@ -142,16 +143,16 @@ fn printSymtab(self: *ObjFileElf) void {
     }
 }
 
-fn appendName(self: *ObjFileElf, alloc: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!u32 {
+fn appendName(self: *ObjFileElf, name: []const u8) std.mem.Allocator.Error!u32 {
     const prev_len = self.buffs.strtab.items.len;
-    try self.buffs.strtab.appendSlice(alloc, name);
-    try self.buffs.strtab.append(alloc, 0);
+    try self.buffs.strtab.appendSlice(utils.alloc, name);
+    try self.buffs.strtab.append(utils.alloc, 0);
     return @truncate(prev_len);
 }
 
-fn appendSectionSymbol(self: *ObjFileElf, alloc: std.mem.Allocator, name: []const u8, shndx: u16) std.mem.Allocator.Error!void {
-    try self.buffs.symtab.append(alloc, .{
-        .name = try self.appendName(alloc, name),
+fn appendSectionSymbol(self: *ObjFileElf, name: []const u8, shndx: u16) std.mem.Allocator.Error!void {
+    try self.buffs.symtab.append(utils.alloc, .{
+        .name = try self.appendName(name),
         .value = 0,
         .info = .{ .type = .SECTION, .bind = .LOCAL },
         .shndx = shndx,
@@ -160,10 +161,10 @@ fn appendSectionSymbol(self: *ObjFileElf, alloc: std.mem.Allocator, name: []cons
     });
 }
 
-fn appendSectionName(self: *ObjFileElf, alloc: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!u32 {
+fn appendSectionName(self: *ObjFileElf, name: []const u8) std.mem.Allocator.Error!u32 {
     const prev_len = self.buffs.shstrtab.items.len;
-    try self.buffs.shstrtab.appendSlice(alloc, name);
-    try self.buffs.shstrtab.append(alloc, 0);
+    try self.buffs.shstrtab.appendSlice(utils.alloc, name);
+    try self.buffs.shstrtab.append(utils.alloc, 0);
     return @truncate(prev_len);
 }
 
@@ -171,14 +172,14 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
     const buffs = self.buffs;
     const secs = self.sections;
 
-    var symbols_map: std.StringHashMap(u32) = .init(program.alloc);
+    var symbols_map: std.StringHashMap(u32) = .init(utils.alloc);
     defer symbols_map.deinit();
 
     var funcs = program.funcs.iterator();
     while (funcs.next()) |sym| {
         if (sym.value_ptr.visib == .Local) {
             const symbol = elf.Elf64.Sym{
-                .name = try self.appendName(program.alloc, sym.key_ptr.*),
+                .name = try self.appendName(sym.key_ptr.*),
                 .value = sym.value_ptr.offset,
                 .size = sym.value_ptr.size,
                 .info = .{ .bind = .LOCAL, .type = .FUNC },
@@ -187,7 +188,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
             };
 
             try symbols_map.put(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
-            try buffs.symtab.append(program.alloc, symbol);
+            try buffs.symtab.append(utils.alloc, symbol);
         }
     }
 
@@ -195,7 +196,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
     while (data_vars.next()) |sym| {
         if (sym.value_ptr.visib == .Local) {
             const symbol = elf.Elf64.Sym{
-                .name = try self.appendName(program.alloc, sym.key_ptr.*),
+                .name = try self.appendName(sym.key_ptr.*),
                 .value = sym.value_ptr.offset,
                 .size = sym.value_ptr.size,
                 .info = .{ .bind = .LOCAL, .type = .OBJECT },
@@ -204,10 +205,10 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
             };
 
             if (program.flags.debug) {
-                try self.addVariableDebugInfo(program, sym.key_ptr.*, @truncate(buffs.symtab.items.len));
+                try self.addVariableDebugInfo(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             }
             try symbols_map.put(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
-            try buffs.symtab.append(program.alloc, symbol);
+            try buffs.symtab.append(utils.alloc, symbol);
         }
     }
 
@@ -217,7 +218,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
     while (funcs.next()) |sym| {
         if (sym.value_ptr.visib == .Export) {
             const symbol = elf.Elf64.Sym{
-                .name = try self.appendName(program.alloc, sym.key_ptr.*),
+                .name = try self.appendName(sym.key_ptr.*),
                 .value = sym.value_ptr.offset,
                 .size = sym.value_ptr.size,
                 .info = .{ .bind = .GLOBAL, .type = .FUNC },
@@ -226,7 +227,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
             };
 
             try symbols_map.put(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
-            try buffs.symtab.append(program.alloc, symbol);
+            try buffs.symtab.append(utils.alloc, symbol);
         }
     }
 
@@ -234,7 +235,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
     while (data_vars.next()) |sym| {
         if (sym.value_ptr.visib == .Export) {
             const symbol = elf.Elf64.Sym{
-                .name = try self.appendName(program.alloc, sym.key_ptr.*),
+                .name = try self.appendName(sym.key_ptr.*),
                 .value = sym.value_ptr.offset,
                 .size = sym.value_ptr.size,
                 .info = .{ .bind = .GLOBAL, .type = .OBJECT },
@@ -243,14 +244,14 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
             };
 
             if (program.flags.debug) {
-                try self.addVariableDebugInfo(program, sym.key_ptr.*, @truncate(buffs.symtab.items.len));
+                try self.addVariableDebugInfo(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             }
             try symbols_map.put(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
-            try buffs.symtab.append(program.alloc, symbol);
+            try buffs.symtab.append(utils.alloc, symbol);
         }
     }
 
-    var lib_imports: std.StringHashMap(void) = .init(program.alloc);
+    var lib_imports: std.StringHashMap(void) = .init(utils.alloc);
     defer lib_imports.deinit();
 
     var imports = program.imports.iterator();
@@ -260,7 +261,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
         }
 
         const symbol = elf.Elf64.Sym{
-            .name = try self.appendName(program.alloc, sym.key_ptr.*),
+            .name = try self.appendName(sym.key_ptr.*),
             .value = 0,
             .size = 0,
             .info = .{ .bind = .GLOBAL, .type = .NOTYPE },
@@ -269,7 +270,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
         };
 
         try symbols_map.put(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
-        try buffs.symtab.append(program.alloc, symbol);
+        try buffs.symtab.append(utils.alloc, symbol);
     }
 
     for (program.relocations.items) |relocation| {
@@ -287,7 +288,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
             .info = .{ .sym = sym_ind, .type = @intFromEnum(rel_type) },
             .addend = relocation.addend,
         };
-        try buffs.relatext.append(program.alloc, rela);
+        try buffs.relatext.append(utils.alloc, rela);
     }
 }
 
@@ -312,31 +313,31 @@ fn writeUleb128(buf: *Buffers.Buffer, a: std.mem.Allocator, arg: anytype) std.me
     }
 }
 
-fn patchDebugInfoHeader(self: *ObjFileElf, program: *Program) std.mem.Allocator.Error!void {
-    try self.buffs.debug_info.append(program.alloc, 0);
+fn patchDebugInfoHeader(self: *ObjFileElf) std.mem.Allocator.Error!void {
+    try self.buffs.debug_info.append(utils.alloc, 0);
 
     const unit_length = self.buffs.debug_info.items.len - 4;
     std.mem.writeInt(u32, self.buffs.debug_info.items[0..4], @truncate(unit_length), .little);
 }
 
-fn addVariableDebugInfo(self: *ObjFileElf, program: *Program, name: []const u8, sym_ind: u32) std.mem.Allocator.Error!void {
+fn addVariableDebugInfo(self: *ObjFileElf, name: []const u8, sym_ind: u32) std.mem.Allocator.Error!void {
     const name_offset: u32 = @truncate(self.buffs.debug_str.items.len);
-    try self.buffs.debug_str.appendSlice(program.alloc, name);
-    try self.buffs.debug_str.append(program.alloc, 0);
+    try self.buffs.debug_str.appendSlice(utils.alloc, name);
+    try self.buffs.debug_str.append(utils.alloc, 0);
 
     const die_offset: u32 = @truncate(self.buffs.debug_info.items.len);
-    try self.buffs.debug_info.appendSlice(program.alloc, &.{
+    try self.buffs.debug_info.appendSlice(utils.alloc, &.{
         0x02, 0,             0, 0, 0,
         0x09, dwarf.OP.addr, 0, 0, 0,
         0,    0,             0, 0, 0,
     });
 
-    try self.buffs.reladebug_info.append(program.alloc, .{
+    try self.buffs.reladebug_info.append(utils.alloc, .{
         .offset = die_offset + 1,
         .info = .{ .sym = self.dbg_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
         .addend = name_offset,
     });
-    try self.buffs.reladebug_info.append(program.alloc, .{
+    try self.buffs.reladebug_info.append(utils.alloc, .{
         .offset = die_offset + 7,
         .info = .{ .sym = sym_ind, .type = @intFromEnum(elf.R_X86_64.@"64") },
         .addend = 0,
@@ -349,19 +350,19 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, cwd_path: []co
     // Names for line number program
     const dir_path = std.fs.path.dirname(rel_path);
     const dir_cnt: u8 = if (dir_path != null) 2 else 1;
-    try buffs.debug_line_str.appendSlice(program.alloc, cwd_path);
-    try buffs.debug_line_str.append(program.alloc, 0);
+    try buffs.debug_line_str.appendSlice(utils.alloc, cwd_path);
+    try buffs.debug_line_str.append(utils.alloc, 0);
     const dir1_ind: u32 = @truncate(buffs.debug_line_str.items.len);
     if (dir_cnt > 1) {
-        try buffs.debug_line_str.appendSlice(program.alloc, dir_path.?);
-        try buffs.debug_line_str.append(program.alloc, 0);
+        try buffs.debug_line_str.appendSlice(utils.alloc, dir_path.?);
+        try buffs.debug_line_str.append(utils.alloc, 0);
     }
     const filename_ind: u32 = @truncate(buffs.debug_line_str.items.len);
-    try buffs.debug_line_str.appendSlice(program.alloc, program.file_name);
-    try buffs.debug_line_str.append(program.alloc, 0);
+    try buffs.debug_line_str.appendSlice(utils.alloc, program.file_name);
+    try buffs.debug_line_str.append(utils.alloc, 0);
 
     // Line number program header and file/directories entries
-    try buffs.debug_line.appendSlice(program.alloc, &.{
+    try buffs.debug_line.appendSlice(utils.alloc, &.{
         0,    0,    0,    0,    0x5,  0x0,
         0x8,  0x0,  0,    0,    0,    0,
         0x01, 0x01, 0x01, 0xfb, 0x0e, 0x0d,
@@ -369,28 +370,28 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, cwd_path: []co
         0,    0,    1,    0,    0,    1,
     });
 
-    try buffs.debug_line.appendSlice(program.alloc, &.{
+    try buffs.debug_line.appendSlice(utils.alloc, &.{
         0x01, 0x01, 0x1f, dir_cnt,
     });
 
     const dirs_start = buffs.debug_line.items.len;
     for (0..dir_cnt) |_| {
-        try buffs.debug_line.appendSlice(program.alloc, &.{ 0, 0, 0, 0 });
+        try buffs.debug_line.appendSlice(utils.alloc, &.{ 0, 0, 0, 0 });
     }
 
-    try buffs.debug_line.appendSlice(program.alloc, &.{
+    try buffs.debug_line.appendSlice(utils.alloc, &.{
         0x02, 0x01, 0x1f, 0x02, 0x0f, 0x02,
     });
     const files_start = buffs.debug_line.items.len;
     for (0..2) |_| {
-        try buffs.debug_line.appendSlice(program.alloc, &.{
+        try buffs.debug_line.appendSlice(utils.alloc, &.{
             0, 0, 0, 0, dir_cnt - 1,
         });
     }
     buffs.debug_line.items[8] = @truncate(buffs.debug_line.items.len - 12);
 
     // Start of Line Number Program
-    try buffs.debug_line.appendSlice(program.alloc, &.{
+    try buffs.debug_line.appendSlice(utils.alloc, &.{
         dwarf.LNS.extended_op, 0x09, dwarf.LNE.set_address,
         0,                     0,    0,
         0,                     0,    0,
@@ -407,21 +408,21 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, cwd_path: []co
         if (line_increment <= max_line_inc) {
             // TODO: if opcode > 255 do else {}
             const opcode: u8 = (line_increment + 5) + (0x0e * address_increment) + 0x0d;
-            try buffs.debug_line.append(program.alloc, opcode);
+            try buffs.debug_line.append(utils.alloc, opcode);
         } else {
-            try buffs.debug_line.appendSlice(program.alloc, &.{
+            try buffs.debug_line.appendSlice(utils.alloc, &.{
                 dwarf.LNS.advance_pc, address_increment,
             });
-            try buffs.debug_line.appendSlice(program.alloc, &.{
+            try buffs.debug_line.appendSlice(utils.alloc, &.{
                 dwarf.LNS.advance_line, line_increment,
             });
-            try buffs.debug_line.append(program.alloc, dwarf.LNS.copy);
+            try buffs.debug_line.append(utils.alloc, dwarf.LNS.copy);
         }
         line += line_increment;
         address += address_increment;
     }
     const last_addr_inc: u8 = @truncate(program.line_program.items[program.line_program.items.len - 1].offset - address);
-    try buffs.debug_line.appendSlice(program.alloc, &.{
+    try buffs.debug_line.appendSlice(utils.alloc, &.{
         dwarf.LNS.advance_pc,  last_addr_inc,
         dwarf.LNS.extended_op, dwarf.LNE.end_sequence,
         dwarf.LNS.copy,
@@ -429,29 +430,29 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, cwd_path: []co
     // End of Line Number Program
 
     // debug_line relocations
-    try buffs.reladebug_line.append(program.alloc, .{
+    try buffs.reladebug_line.append(utils.alloc, .{
         .offset = dirs_start,
         .info = .{ .sym = self.dbg_ln_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
         .addend = 0,
     });
     if (dir_cnt > 1) {
-        try buffs.reladebug_line.append(program.alloc, .{
+        try buffs.reladebug_line.append(utils.alloc, .{
             .offset = dirs_start + 4,
             .info = .{ .sym = self.dbg_ln_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
             .addend = dir1_ind,
         });
     }
-    try buffs.reladebug_line.append(program.alloc, .{
+    try buffs.reladebug_line.append(utils.alloc, .{
         .offset = files_start,
         .info = .{ .sym = self.dbg_ln_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
         .addend = filename_ind,
     });
-    try buffs.reladebug_line.append(program.alloc, .{
+    try buffs.reladebug_line.append(utils.alloc, .{
         .offset = files_start + 5,
         .info = .{ .sym = self.dbg_ln_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
         .addend = filename_ind,
     });
-    try buffs.reladebug_line.append(program.alloc, .{
+    try buffs.reladebug_line.append(utils.alloc, .{
         .offset = text_reloc_offset,
         .info = .{ .sym = self.txt_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
         .addend = 0,
@@ -461,14 +462,14 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, cwd_path: []co
     std.mem.writeInt(u32, buffs.debug_line.items[0..4], @truncate(unit_length), .little);
 
     // Names for compile_unit abbrev
-    try buffs.debug_str.appendSlice(program.alloc, rel_path);
-    try buffs.debug_str.append(program.alloc, 0);
+    try buffs.debug_str.appendSlice(utils.alloc, rel_path);
+    try buffs.debug_str.append(utils.alloc, 0);
     const dir_ind: u32 = @truncate(buffs.debug_str.items.len);
-    try buffs.debug_str.appendSlice(program.alloc, cwd_path);
-    try buffs.debug_str.append(program.alloc, 0);
+    try buffs.debug_str.appendSlice(utils.alloc, cwd_path);
+    try buffs.debug_str.append(utils.alloc, 0);
 
     // DW_TAG_compile_unit abbrev
-    try buffs.debug_abbrev.appendSlice(program.alloc, &.{
+    try buffs.debug_abbrev.appendSlice(utils.alloc, &.{
         0x1,                dwarf.TAG.compile_unit, dwarf.CHILDREN.yes,
         dwarf.AT.stmt_list, dwarf.FORM.sec_offset,  dwarf.AT.low_pc,
         dwarf.FORM.addr,    dwarf.AT.high_pc,       dwarf.FORM.udata,
@@ -477,16 +478,16 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, cwd_path: []co
     });
 
     // DW_TAG_variable
-    try buffs.debug_abbrev.appendSlice(program.alloc, &.{
+    try buffs.debug_abbrev.appendSlice(utils.alloc, &.{
         0x2,                dwarf.TAG.variable, dwarf.CHILDREN.no,
         dwarf.AT.name,      dwarf.FORM.strp,    dwarf.AT.location,
         dwarf.FORM.exprloc, 0x00,               0x00,
     });
 
-    try buffs.debug_abbrev.append(program.alloc, 0);
+    try buffs.debug_abbrev.append(utils.alloc, 0);
 
     // DIE for compile_unit
-    try buffs.debug_info.appendSlice(program.alloc, &.{
+    try buffs.debug_info.appendSlice(utils.alloc, &.{
         0,    0,   0,                0,
         0x05, 0x0, dwarf.UT.compile, 0x08,
         0,    0,   0,                0,
@@ -495,30 +496,30 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, cwd_path: []co
         0,    0,   0,                0,
         0,
     });
-    try writeUleb128(&buffs.debug_info, program.alloc, program.code_block.buffer.items.len);
+    try writeUleb128(&buffs.debug_info, utils.alloc, program.code_block.buffer.items.len);
     const name_offset = buffs.debug_info.items.len;
-    try buffs.debug_info.appendSlice(program.alloc, &.{
+    try buffs.debug_info.appendSlice(utils.alloc, &.{
         0, 0, 0, 0,
         0, 0, 0, 0,
     });
 
     // debug_info compile_unit relocations
-    try buffs.reladebug_info.append(program.alloc, .{
+    try buffs.reladebug_info.append(utils.alloc, .{
         .offset = 13,
         .info = .{ .sym = self.dbg_ln_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
         .addend = 0,
     });
-    try buffs.reladebug_info.append(program.alloc, .{
+    try buffs.reladebug_info.append(utils.alloc, .{
         .offset = 17,
         .info = .{ .sym = self.txt_sym, .type = @intFromEnum(elf.R_X86_64.@"64") },
         .addend = 0,
     });
-    try buffs.reladebug_info.append(program.alloc, .{
+    try buffs.reladebug_info.append(utils.alloc, .{
         .offset = name_offset,
         .info = .{ .sym = self.dbg_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
         .addend = 0,
     });
-    try buffs.reladebug_info.append(program.alloc, .{
+    try buffs.reladebug_info.append(utils.alloc, .{
         .offset = name_offset + 4,
         .info = .{ .sym = self.dbg_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
         .addend = dir_ind,
@@ -533,24 +534,24 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, cwd_path: []const u8
     if (program.flags.has_code) {
         buffs.text = program.code_block.buffer;
         secs.text.ind = 1;
-        secs.text.name = try self.appendSectionName(program.alloc, ".text");
+        secs.text.name = try self.appendSectionName(".text");
         secs.text.size = buffs.text.items.len;
         self.txt_sym = @truncate(buffs.symtab.items.len);
-        try self.appendSectionSymbol(program.alloc, ".text", secs.text.ind);
+        try self.appendSectionSymbol(".text", secs.text.ind);
     }
     secs.data.ind = secs.text.ind;
     secs.data.offset = std.mem.alignForward(usize, secs.text.offset + secs.text.size, 0x8);
     if (program.flags.has_data) {
         buffs.data = program.data_block.buffer;
         secs.data.ind += 1;
-        secs.data.name = try self.appendSectionName(program.alloc, ".data");
+        secs.data.name = try self.appendSectionName(".data");
         secs.data.size = buffs.data.items.len;
-        try self.appendSectionSymbol(program.alloc, ".data", secs.data.ind);
+        try self.appendSectionSymbol(".data", secs.data.ind);
     }
     secs.relatext.ind = secs.data.ind;
     if (program.relocations.items.len > 0) {
         secs.relatext.ind += 1;
-        secs.relatext.name = try self.appendSectionName(program.alloc, ".rela.text");
+        secs.relatext.name = try self.appendSectionName(".rela.text");
         secs.relatext.offset = std.mem.alignForward(usize, secs.data.offset + secs.data.size, 0x8);
         secs.relatext.size = program.relocations.items.len * @sizeOf(elf.Elf64.Rela);
     } else {
@@ -565,20 +566,20 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, cwd_path: []const u8
         secs.debug_str.ind = secs.debug_abbrev.ind + 1;
         secs.reladebug_info.ind = secs.debug_str.ind + 1;
 
-        secs.debug_line.name = try self.appendSectionName(program.alloc, ".debug_line");
+        secs.debug_line.name = try self.appendSectionName(".debug_line");
         self.dbg_ln_sym = @truncate(buffs.symtab.items.len);
-        try self.appendSectionSymbol(program.alloc, ".debug_line", secs.debug_line.ind);
-        secs.debug_line_str.name = try self.appendSectionName(program.alloc, ".debug_line_str");
+        try self.appendSectionSymbol(".debug_line", secs.debug_line.ind);
+        secs.debug_line_str.name = try self.appendSectionName(".debug_line_str");
         self.dbg_ln_str_sym = @truncate(buffs.symtab.items.len);
-        try self.appendSectionSymbol(program.alloc, ".debug_line_str", secs.debug_line_str.ind);
-        secs.reladebug_line.name = try self.appendSectionName(program.alloc, ".rela.debug_line");
-        secs.debug_info.name = try self.appendSectionName(program.alloc, ".debug_info");
-        try self.appendSectionSymbol(program.alloc, ".debug_info", secs.debug_info.ind);
-        secs.debug_abbrev.name = try self.appendSectionName(program.alloc, ".debug_abbrev");
-        secs.debug_str.name = try self.appendSectionName(program.alloc, ".debug_str");
+        try self.appendSectionSymbol(".debug_line_str", secs.debug_line_str.ind);
+        secs.reladebug_line.name = try self.appendSectionName(".rela.debug_line");
+        secs.debug_info.name = try self.appendSectionName(".debug_info");
+        try self.appendSectionSymbol(".debug_info", secs.debug_info.ind);
+        secs.debug_abbrev.name = try self.appendSectionName(".debug_abbrev");
+        secs.debug_str.name = try self.appendSectionName(".debug_str");
         self.dbg_str_sym = @truncate(buffs.symtab.items.len);
-        try self.appendSectionSymbol(program.alloc, ".debug_str", secs.debug_str.ind);
-        secs.reladebug_info.name = try self.appendSectionName(program.alloc, ".rela.debug_info");
+        try self.appendSectionSymbol(".debug_str", secs.debug_str.ind);
+        secs.reladebug_info.name = try self.appendSectionName(".rela.debug_info");
 
         try self.genDwarfDebugInformation(program, cwd_path, rel_path);
     } else {
@@ -586,11 +587,11 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, cwd_path: []const u8
         secs.reladebug_info.offset = secs.relatext.offset + secs.relatext.size;
     }
     secs.symtab.ind = secs.reladebug_info.ind + 1;
-    secs.symtab.name = try self.appendSectionName(program.alloc, ".symtab");
+    secs.symtab.name = try self.appendSectionName(".symtab");
 
     try self.addSymbolsToSymtab(program);
     if (program.flags.debug) {
-        try self.patchDebugInfoHeader(program);
+        try self.patchDebugInfoHeader();
         secs.debug_line.offset = secs.relatext.offset + secs.relatext.size;
         secs.debug_line.size = buffs.debug_line.items.len;
         secs.debug_line_str.offset = secs.debug_line.offset + secs.debug_line.size;
@@ -611,12 +612,12 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, cwd_path: []const u8
     secs.symtab.size = buffs.symtab.items.len * @sizeOf(elf.Elf64.Sym);
 
     secs.strtab.ind = secs.symtab.ind + 1;
-    secs.strtab.name = try self.appendSectionName(program.alloc, ".strtab");
+    secs.strtab.name = try self.appendSectionName(".strtab");
     secs.strtab.offset = secs.symtab.offset + secs.symtab.size;
     secs.strtab.size = buffs.strtab.items.len;
 
     secs.shstrtab.ind = secs.strtab.ind + 1;
-    secs.shstrtab.name = try self.appendSectionName(program.alloc, ".shstrtab");
+    secs.shstrtab.name = try self.appendSectionName(".shstrtab");
     secs.shstrtab.offset = secs.strtab.offset + secs.strtab.size;
     secs.shstrtab.size = buffs.shstrtab.items.len;
 
@@ -627,7 +628,7 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, cwd_path: []const u8
     }
 }
 
-pub fn writeObjFile(self: *ObjFileElf, io: std.Io, program: *Program) ObjectError!void {
+pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
     const buffs = self.buffs;
     const secs = self.sections;
 
@@ -635,20 +636,20 @@ pub fn writeObjFile(self: *ObjFileElf, io: std.Io, program: *Program) ObjectErro
     const file_size = shtable + @as(usize, (secs.shstrtab.ind + 1)) * @sizeOf(elf.Elf64.Shdr);
     std.debug.print("shtable: {x}, filesize: {x}\n", .{ shtable, file_size });
 
-    const file_buffer = try program.alloc.alloc(u8, file_size);
-    defer program.alloc.free(file_buffer);
+    const file_buffer = try utils.alloc.alloc(u8, file_size);
+    defer utils.alloc.free(file_buffer);
 
     const file_name = if (self.output_path.len == 0)
-        try std.mem.concat(program.alloc, u8, &.{ std.fs.path.stem(program.file_name), @ptrCast(".o") })
+        try std.mem.concat(utils.alloc, u8, &.{ std.fs.path.stem(program.file_name), @ptrCast(".o") })
     else
         self.output_path;
-    defer if (self.output_path.len == 0) program.alloc.free(file_name);
+    defer if (self.output_path.len == 0) utils.alloc.free(file_name);
 
     const cwd = std.Io.Dir.cwd();
-    const file = try cwd.createFile(io, file_name, .{});
-    defer file.close(io);
+    const file = try cwd.createFile(utils.io, file_name, .{});
+    defer file.close(utils.io);
 
-    var file_writer = file.writer(io, file_buffer);
+    var file_writer = file.writer(utils.io, file_buffer);
     const writer = &file_writer.interface;
 
     try writer.writeStruct(elf.Elf64.Ehdr{
@@ -884,8 +885,8 @@ pub fn writeObjFile(self: *ObjFileElf, io: std.Io, program: *Program) ObjectErro
     try writer.flush();
 }
 
-pub fn deinit(self: *ObjFileElf, alloc: std.mem.Allocator) void {
-    self.buffs.deinit(alloc);
-    alloc.destroy(self.buffs);
-    alloc.destroy(self.sections);
+pub fn deinit(self: *ObjFileElf) void {
+    self.buffs.deinit(utils.alloc);
+    utils.alloc.destroy(self.buffs);
+    utils.alloc.destroy(self.sections);
 }

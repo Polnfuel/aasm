@@ -1,5 +1,5 @@
 const std = @import("std");
-const errprint = @import("errprint");
+const utils = @import("utils");
 
 const String = struct {
     slice: []u8,
@@ -484,18 +484,18 @@ fn analyzeWord(word: String, line: u16, file_name: []const u8, content: []const 
         if (word.slice.len > 1) {
             token_type = .HashIdent;
         } else {
-            errprint.printSrcLineError("expected label name after #", file_name, content, line);
+            utils.printSrcLineError("expected label name after #", file_name, content, line);
             return LexerError.LexerAnalyzisFailed;
         }
     } else if (word.slice[0] == '.') {
         if (word.slice.len > 1) {
             token_type = .DotIdent;
         } else {
-            errprint.printSrcLineError("expected label name after .", file_name, content, line);
+            utils.printSrcLineError("expected label name after .", file_name, content, line);
             return LexerError.LexerAnalyzisFailed;
         }
     } else if (word.slice[0] == '@') {
-        errprint.printSrcLineError("unsupported keyword name after @", file_name, content, line);
+        utils.printSrcLineError("unsupported keyword name after @", file_name, content, line);
         return LexerError.LexerAnalyzisFailed;
     } else {
         token_type = .Ident;
@@ -519,9 +519,9 @@ const LexerState = enum {
     MinusSign,
 };
 
-pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name: []const u8) LexerError!std.ArrayList(Token) {
+pub fn tokenizeContent(content: []const u8, file_name: []const u8) LexerError!std.ArrayList(Token) {
     var tokens: std.ArrayList(Token) = .empty;
-    errdefer tokens.deinit(alloc);
+    errdefer tokens.deinit(utils.alloc);
 
     var line: u16 = 1;
 
@@ -554,12 +554,12 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                         state = .Word;
                     },
                     .Number => {
-                        errprint.printSrcLineError("invalid character after digit", file_name, content, line);
+                        utils.printSrcLineError("invalid character after digit", file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .MinusSign => {
                         const minus = Token{ .type = .Minus, .value = content[0..0], .line = line };
-                        try tokens.append(alloc, minus);
+                        try tokens.append(utils.alloc, minus);
 
                         word = String.new(content[i..i].ptr);
                         word.addByte();
@@ -567,7 +567,7 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     },
                     .PlusSign => {
                         const plus = Token{ .type = .Plus, .value = content[0..0], .line = line };
-                        try tokens.append(alloc, plus);
+                        try tokens.append(utils.alloc, plus);
 
                         word = String.new(content[i..i].ptr);
                         word.addByte();
@@ -588,14 +588,14 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     },
                     .MinusSign => {
                         const minus = Token{ .type = .Minus, .value = content[0..0], .line = line };
-                        try tokens.append(alloc, minus);
+                        try tokens.append(utils.alloc, minus);
 
                         word = String.new(content[i..i].ptr);
                         word.addByte();
                     },
                     .PlusSign => {
                         const plus = Token{ .type = .Plus, .value = content[0..0], .line = line };
-                        try tokens.append(alloc, plus);
+                        try tokens.append(utils.alloc, plus);
 
                         word = String.new(content[i..i].ptr);
                         word.addByte();
@@ -608,28 +608,28 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                 switch (state) {
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                         word = String.new(content[i..i].ptr + 1);
                         state = .String;
                     },
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                         word = String.new(content[i..i].ptr + 1);
                         state = .String;
                     },
                     .MinusSign => {
                         const minus = Token{ .type = .Minus, .value = content[0..0], .line = line };
-                        try tokens.append(alloc, minus);
+                        try tokens.append(utils.alloc, minus);
                         word = String.new(content[i..i].ptr + 1);
                         state = .String;
                     },
                     .PlusSign => {
                         const plus = Token{ .type = .Plus, .value = content[0..0], .line = line };
-                        try tokens.append(alloc, plus);
+                        try tokens.append(utils.alloc, plus);
                         word = String.new(content[i..i].ptr + 1);
                         state = .String;
-                        // errprint.printSrcLineError("unexpected string after sign", file_name, content, line);
+                        // utils.printSrcLineError("unexpected string after sign", file_name, content, line);
                         // return LexerError.LexerAnalyzisFailed;
                     },
                     .TopLevel => {
@@ -638,7 +638,7 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     },
                     .String => {
                         const token = Token{ .type = .StringLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                         state = .TopLevel;
                     },
                     .Comment => unreachable,
@@ -649,11 +649,11 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     .TopLevel => {},
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
                         continue;
@@ -678,24 +678,24 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                         continue;
                     },
                     .String => {
-                        errprint.printSrcLineError("not closed string literal", file_name, content, line);
+                        utils.printSrcLineError("not closed string literal", file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
-                        errprint.printSrcLineError("unexpected end of line after sign", file_name, content, line);
+                        utils.printSrcLineError("unexpected end of line after sign", file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                 }
                 const newline = Token{ .type = .NewLine, .value = content[0..0], .line = line };
-                try tokens.append(alloc, newline);
+                try tokens.append(utils.alloc, newline);
                 line += 1;
                 state = .TopLevel;
             },
@@ -704,19 +704,19 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     .TopLevel => {},
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
                         if (two_signs) {
-                            errprint.printSrcLineError("more than 2 math signs is not allowed", file_name, content, line);
+                            utils.printSrcLineError("more than 2 math signs is not allowed", file_name, content, line);
                             return LexerError.LexerAnalyzisFailed;
                         }
                         const token = Token{ .type = if (state == .MinusSign) .Minus else .Plus, .value = content[0..0], .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                         two_signs = true;
                     },
                     .Comment, .String => unreachable,
@@ -728,19 +728,19 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     .TopLevel => {},
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
                         if (two_signs) {
-                            errprint.printSrcLineError("more than 2 math signs is not allowed", file_name, content, line);
+                            utils.printSrcLineError("more than 2 math signs is not allowed", file_name, content, line);
                             return LexerError.LexerAnalyzisFailed;
                         }
                         const token = Token{ .type = if (state == .MinusSign) .Minus else .Plus, .value = content[0..0], .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                         two_signs = true;
                     },
                     .Comment, .String => unreachable,
@@ -752,20 +752,20 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     .TopLevel => {},
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
-                        errprint.printSrcLineError("unexpected * after sign", file_name, content, line);
+                        utils.printSrcLineError("unexpected * after sign", file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .Comment, .String => unreachable,
                 }
                 const asteriks = Token{ .type = .Asteriks, .value = content[0..0], .line = line };
-                try tokens.append(alloc, asteriks);
+                try tokens.append(utils.alloc, asteriks);
                 state = .TopLevel;
             },
             ':' => {
@@ -773,20 +773,20 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     .TopLevel => {},
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
-                        errprint.printSrcLineError("unexpected : after sign", file_name, content, line);
+                        utils.printSrcLineError("unexpected : after sign", file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .Comment, .String => unreachable,
                 }
                 const colon = Token{ .type = .Colon, .value = content[0..0], .line = line };
-                try tokens.append(alloc, colon);
+                try tokens.append(utils.alloc, colon);
                 state = .TopLevel;
             },
             ',' => {
@@ -794,20 +794,20 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     .TopLevel => {},
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
-                        errprint.printSrcLineError("unexpected , after sign", file_name, content, line);
+                        utils.printSrcLineError("unexpected , after sign", file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .Comment, .String => unreachable,
                 }
                 const comma = Token{ .type = .Comma, .value = content[0..0], .line = line };
-                try tokens.append(alloc, comma);
+                try tokens.append(utils.alloc, comma);
                 state = .TopLevel;
             },
             '[' => {
@@ -815,20 +815,20 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     .TopLevel => {},
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
-                        errprint.printSrcLineError("unexpected [ after sign", file_name, content, line);
+                        utils.printSrcLineError("unexpected [ after sign", file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .Comment, .String => unreachable,
                 }
                 const obrac = Token{ .type = .OpenBracket, .value = content[0..0], .line = line };
-                try tokens.append(alloc, obrac);
+                try tokens.append(utils.alloc, obrac);
                 state = .TopLevel;
             },
             ']' => {
@@ -836,20 +836,20 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     .TopLevel => {},
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
-                        errprint.printSrcLineError("unexpected ] after sign", file_name, content, line);
+                        utils.printSrcLineError("unexpected ] after sign", file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .Comment, .String => unreachable,
                 }
                 const cbrac = Token{ .type = .CloseBracket, .value = content[0..0], .line = line };
-                try tokens.append(alloc, cbrac);
+                try tokens.append(utils.alloc, cbrac);
                 state = .TopLevel;
             },
             '(' => {
@@ -857,20 +857,20 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     .TopLevel => {},
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
-                        errprint.printSrcLineError("unexpected ( after sign", file_name, content, line);
+                        utils.printSrcLineError("unexpected ( after sign", file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .Comment, .String => unreachable,
                 }
                 const oparen = Token{ .type = .OpenParenthes, .value = content[0..0], .line = line };
-                try tokens.append(alloc, oparen);
+                try tokens.append(utils.alloc, oparen);
                 state = .TopLevel;
             },
             ')' => {
@@ -878,20 +878,20 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                     .TopLevel => {},
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
-                        errprint.printSrcLineError("unexpected ) after sign", file_name, content, line);
+                        utils.printSrcLineError("unexpected ) after sign", file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .Comment, .String => unreachable,
                 }
                 const cparen = Token{ .type = .CloseParenthes, .value = content[0..0], .line = line };
-                try tokens.append(alloc, cparen);
+                try tokens.append(utils.alloc, cparen);
                 state = .TopLevel;
             },
             ';' => {
@@ -900,20 +900,20 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                         if (tokens.getLastOrNull()) |last| {
                             if (last.type != .NewLine) {
                                 const newline = Token{ .type = .NewLine, .value = content[0..0], .line = line };
-                                try tokens.append(alloc, newline);
+                                try tokens.append(utils.alloc, newline);
                             }
                         }
                     },
                     .Word => {
                         const token = try analyzeWord(word, line, file_name, content);
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .Number => {
                         const token = Token{ .type = .NumberLiteral, .value = word.slice, .line = line };
-                        try tokens.append(alloc, token);
+                        try tokens.append(utils.alloc, token);
                     },
                     .MinusSign, .PlusSign => {
-                        errprint.printSrcLineError("unexpected comment after sign", file_name, content, line);
+                        utils.printSrcLineError("unexpected comment after sign", file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .Comment, .String => unreachable,
@@ -928,14 +928,14 @@ pub fn tokenizeContent(alloc: std.mem.Allocator, content: []const u8, file_name:
                         state = .Word;
                     },
                     .Word, .Number, .MinusSign, .PlusSign => {
-                        errprint.printSrcLineErrorFmt("unexpected '{c}'", .{byte}, file_name, content, line);
+                        utils.printSrcLineErrorFmt("unexpected '{c}'", .{byte}, file_name, content, line);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .Comment, .String => unreachable,
                 }
             },
             else => {
-                errprint.printSrcLineError("unknown character", file_name, content, line);
+                utils.printSrcLineError("unknown character", file_name, content, line);
                 return LexerError.LexerAnalyzisFailed;
             },
         }
