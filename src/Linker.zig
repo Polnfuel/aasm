@@ -450,24 +450,24 @@ exe: ExeElf,
 comp_units: []CompUnit,
 flags: Flags,
 dyn_libs: std.ArrayList([]const u8),
-dyn_funcs: std.StringHashMap(u64),
-dyn_objects: std.StringHashMap(Object),
+dyn_funcs: std.StringHashMapUnmanaged(u64),
+dyn_objects: std.StringHashMapUnmanaged(Object),
 dyn_search_paths: std.ArrayList([]const u8),
 dyn_runpath: std.ArrayList([]const u8),
-offsets: std.HashMap(FileSection, usize, HM_Context, 80),
-locals: std.StringHashMap(LinkerSymbol),
-globals: std.StringHashMap(LinkerSymbol),
+offsets: std.HashMapUnmanaged(FileSection, usize, HM_Context, 80),
+locals: std.StringHashMapUnmanaged(LinkerSymbol),
+globals: std.StringHashMapUnmanaged(LinkerSymbol),
 
 pub fn init(self: *Linker, output_name: []const u8, comp_units: []CompUnit, flags: Flags, search_paths: std.ArrayList([]const u8)) std.mem.Allocator.Error!void {
     self.comp_units = comp_units;
     self.dyn_libs = .empty;
-    self.dyn_funcs = .init(utils.alloc);
-    self.dyn_objects = .init(utils.alloc);
+    self.dyn_funcs = .empty;
+    self.dyn_objects = .empty;
     self.dyn_search_paths = search_paths;
     self.dyn_runpath = .empty;
-    self.offsets = .init(utils.alloc);
-    self.locals = .init(utils.alloc);
-    self.globals = .init(utils.alloc);
+    self.offsets = .empty;
+    self.locals = .empty;
+    self.globals = .empty;
     self.flags = flags;
     try self.exe.init();
     self.exe.output_name = output_name;
@@ -813,7 +813,7 @@ fn mergeTextData(self: *Linker) LinkerError!void {
             const next_aligned = std.mem.alignForward(usize, prev_len, 0x10);
             self.exe.addNoOps(next_aligned - prev_len);
             const offset = self.exe.buffs.text.items.len;
-            try self.offsets.putNoClobber(.{ .file = @truncate(i), .section = .text }, offset);
+            try self.offsets.putNoClobber(utils.alloc, .{ .file = @truncate(i), .section = .text }, offset);
             self.exe.buffs.text.appendSliceAssumeCapacity(unit.objfile.buffs.text.items);
         }
         if (unit.program.flags.has_data) {
@@ -821,7 +821,7 @@ fn mergeTextData(self: *Linker) LinkerError!void {
             const next_aligned = std.mem.alignForward(usize, prev_len, 0x8);
             self.exe.buffs.data.appendNTimesAssumeCapacity(0, next_aligned - prev_len);
             const offset = self.exe.buffs.data.items.len;
-            try self.offsets.putNoClobber(.{ .file = @truncate(i), .section = .data }, offset);
+            try self.offsets.putNoClobber(utils.alloc, .{ .file = @truncate(i), .section = .data }, offset);
             self.exe.buffs.data.appendSliceAssumeCapacity(unit.objfile.buffs.data.items);
         }
     }
@@ -846,7 +846,7 @@ fn mergeSymbols(self: *Linker) LinkerError!void {
                 };
                 const sym_address = sh_address + sh_offset + sym.value;
                 const sym_name: []const u8 = std.mem.sliceTo(unit.objfile.buffs.strtab.items[sym.name..], 0);
-                try self.locals.putNoClobber(sym_name, .{
+                try self.locals.putNoClobber(utils.alloc, sym_name, .{
                     .vaddr = sym_address,
                     .shn = switch (sym.info.type) {
                         .FUNC => .text,
@@ -871,7 +871,7 @@ fn mergeSymbols(self: *Linker) LinkerError!void {
                 };
                 const sym_address = sh_address + sh_offset + sym.value;
                 const sym_name: []const u8 = std.mem.sliceTo(unit.objfile.buffs.strtab.items[sym.name..], 0);
-                try self.globals.putNoClobber(sym_name, .{
+                try self.globals.putNoClobber(utils.alloc, sym_name, .{
                     .vaddr = sym_address,
                     .shn = switch (sym.info.type) {
                         .FUNC => .text,
@@ -1053,11 +1053,11 @@ fn linkDebugInfo(self: *Linker, ind: *u8) std.mem.Allocator.Error!void {
         }
     }
 
-    var dstr_map: std.StringHashMap(usize) = .init(utils.alloc);
-    defer dstr_map.deinit();
+    var dstr_map: std.StringHashMapUnmanaged(usize) = .empty;
+    defer dstr_map.deinit(utils.alloc);
 
-    var dlstr_map: std.StringHashMap(usize) = .init(utils.alloc);
-    defer dlstr_map.deinit();
+    var dlstr_map: std.StringHashMapUnmanaged(usize) = .empty;
+    defer dlstr_map.deinit(utils.alloc);
 
     var dstr_size: usize = 0;
     var dlstr_size: usize = 0;
@@ -1068,7 +1068,7 @@ fn linkDebugInfo(self: *Linker, ind: *u8) std.mem.Allocator.Error!void {
             const slice: []const u8 = std.mem.sliceTo(dstr_buf[dstr_local..], 0);
             dstr_local += slice.len + 1;
 
-            const res = try dstr_map.getOrPut(slice);
+            const res = try dstr_map.getOrPut(utils.alloc, slice);
             if (!res.found_existing) {
                 res.value_ptr.* = dstr_size;
                 try buffs.debug_str.appendSlice(utils.alloc, slice);
@@ -1083,7 +1083,7 @@ fn linkDebugInfo(self: *Linker, ind: *u8) std.mem.Allocator.Error!void {
             const slice: []const u8 = std.mem.sliceTo(dlstr_buf[dlstr_local..], 0);
             dlstr_local += slice.len + 1;
 
-            const res = try dlstr_map.getOrPut(slice);
+            const res = try dlstr_map.getOrPut(utils.alloc, slice);
             if (!res.found_existing) {
                 res.value_ptr.* = dlstr_size;
                 try buffs.debug_line_str.appendSlice(utils.alloc, slice);
@@ -1579,8 +1579,8 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
 
 fn linkExe(self: *Linker) LinkerError!void {
     if (self.exe.has_dynamic) {
-        var dyn_libs: std.StringHashMap(std.StringHashMap(void)) = .init(utils.alloc);
-        defer dyn_libs.deinit();
+        var dyn_libs: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(void)) = .empty;
+        defer dyn_libs.deinit(utils.alloc);
 
         for (self.comp_units) |unit| {
             if (unit.program.flags.has_shared) {
@@ -1589,11 +1589,11 @@ fn linkExe(self: *Linker) LinkerError!void {
                     const ind = import.value_ptr.*;
                     if (ind > 0) {
                         const lib_name = unit.program.shared_libs.items[ind];
-                        const res = try dyn_libs.getOrPut(lib_name);
+                        const res = try dyn_libs.getOrPut(utils.alloc, lib_name);
                         if (!res.found_existing) {
-                            res.value_ptr.* = .init(utils.alloc);
+                            res.value_ptr.* = .empty;
                         }
-                        _ = try res.value_ptr.getOrPut(import.key_ptr.*);
+                        _ = try res.value_ptr.getOrPut(utils.alloc, import.key_ptr.*);
                     }
                 }
             }
@@ -1601,7 +1601,7 @@ fn linkExe(self: *Linker) LinkerError!void {
 
         var lib_iter = dyn_libs.iterator();
         while (lib_iter.next()) |lib| {
-            defer lib.value_ptr.deinit();
+            defer lib.value_ptr.deinit(utils.alloc);
 
             const lib_name = lib.key_ptr.*;
             const lib_fullname = try resolveLibFileName(lib_name);
@@ -1620,11 +1620,11 @@ fn linkExe(self: *Linker) LinkerError!void {
                 if (opt_syminfo) |syminfo| {
                     switch (syminfo) {
                         .func => {
-                            try self.dyn_funcs.putNoClobber(sym_name, undefined);
+                            try self.dyn_funcs.putNoClobber(utils.alloc, sym_name, undefined);
                             self.exe.has_plt = true;
                         },
                         .obj => {
-                            try self.dyn_objects.putNoClobber(sym_name, .{ .info = syminfo.obj, .vaddr = undefined });
+                            try self.dyn_objects.putNoClobber(utils.alloc, sym_name, .{ .info = syminfo.obj, .vaddr = undefined });
                             if (syminfo.obj.section == .wdata) {
                                 self.exe.has_bss = true;
                             }
@@ -2098,11 +2098,11 @@ pub fn deinit(self: *Linker) void {
         utils.alloc.free(lib);
     }
     self.dyn_libs.deinit(utils.alloc);
-    self.dyn_funcs.deinit();
-    self.dyn_objects.deinit();
+    self.dyn_funcs.deinit(utils.alloc);
+    self.dyn_objects.deinit(utils.alloc);
     self.dyn_runpath.deinit(utils.alloc);
-    self.offsets.deinit();
-    self.locals.deinit();
-    self.globals.deinit();
+    self.offsets.deinit(utils.alloc);
+    self.locals.deinit(utils.alloc);
+    self.globals.deinit(utils.alloc);
     self.exe.deinit();
 }

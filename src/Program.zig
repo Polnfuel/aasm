@@ -217,7 +217,7 @@ const Function = struct {
     visib: LabelType,
     offset: usize,
     size: usize,
-    local_labels: std.StringHashMap(usize),
+    local_labels: std.StringHashMapUnmanaged(usize),
 };
 
 const ProgramFlags = struct {
@@ -239,9 +239,9 @@ entry: []const u8,
 data_block: DataBlock,
 code_block: CodeBlock,
 shared_libs: std.ArrayList([]const u8),
-data_vars: std.StringHashMap(DataVariable),
-funcs: std.StringHashMap(Function),
-imports: std.StringHashMap(u16),
+data_vars: std.StringHashMapUnmanaged(DataVariable),
+funcs: std.StringHashMapUnmanaged(Function),
+imports: std.StringHashMapUnmanaged(u16),
 relocations: std.ArrayList(Relocation),
 
 line_program: std.ArrayList(LineProgramEntry),
@@ -258,9 +258,9 @@ pub fn init(self: *Program, content: []const u8, file_name: []const u8, debug: b
     self.data_block = .empty;
     self.code_block = .empty;
     self.shared_libs = .empty;
-    self.data_vars = .init(utils.alloc);
-    self.funcs = .init(utils.alloc);
-    self.imports = .init(utils.alloc);
+    self.data_vars = .empty;
+    self.funcs = .empty;
+    self.imports = .empty;
     self.relocations = .empty;
     self.line_program = .empty;
 }
@@ -509,9 +509,9 @@ pub fn deinit(self: *Program) void {
     self.code_block.instr.deinit(utils.alloc);
     self.code_block.buffer.deinit(utils.alloc);
     self.shared_libs.deinit(utils.alloc);
-    self.data_vars.deinit();
-    self.funcs.deinit();
-    self.imports.deinit();
+    self.data_vars.deinit(utils.alloc);
+    self.funcs.deinit(utils.alloc);
+    self.imports.deinit(utils.alloc);
     self.relocations.deinit(utils.alloc);
     self.line_program.deinit(utils.alloc);
 }

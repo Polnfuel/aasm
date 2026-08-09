@@ -319,7 +319,7 @@ fn parseDataInstr(self: *const Parser, tokens: []Token) ParserError!void {
                     i += 1;
                 }
 
-                const in_data = try self.program.data_vars.getOrPut(instr.label);
+                const in_data = try self.program.data_vars.getOrPut(utils.alloc, instr.label);
                 if (in_data.found_existing) {
                     utils.printSrcLineErrorFmt("label '{s}' already defined in this block", .{instr.label}, self.program.file_name, self.program.content, tokens[0].line);
                     return ParserError.ParsingFailed;
@@ -721,7 +721,7 @@ fn parseCodeInstr(self: *Parser, tokens: []Token) ParserError!void {
             const is_func = if (tokens[0].type == .DotIdent) false else true;
 
             if (is_func) {
-                const in_code = try self.program.funcs.getOrPut(label);
+                const in_code = try self.program.funcs.getOrPut(utils.alloc, label);
                 if (in_code.found_existing) {
                     utils.printSrcLineErrorFmt("label '{s}' already defined in this block", .{label}, self.program.file_name, self.program.content, tokens[0].line);
                     return ParserError.ParsingFailed;
@@ -736,12 +736,12 @@ fn parseCodeInstr(self: *Parser, tokens: []Token) ParserError!void {
                     in_code.value_ptr.visib = if (tokens[0].type == .HashIdent) .Export else .Local;
                     in_code.value_ptr.size = 0;
                     in_code.value_ptr.offset = 0;
-                    in_code.value_ptr.local_labels = .init(utils.alloc);
+                    in_code.value_ptr.local_labels = .empty;
                 }
             } else {
                 const function = self.program.funcs.getPtr(self.cur_func);
                 if (function) |func| {
-                    const in_func = try func.local_labels.getOrPut(label);
+                    const in_func = try func.local_labels.getOrPut(utils.alloc, label);
                     if (in_func.found_existing) {
                         utils.printSrcLineErrorFmt("local label '{s}' already defined in function '{s}'", .{ label, self.cur_func }, self.program.file_name, self.program.content, tokens[0].line);
                         return ParserError.ParsingFailed;
@@ -843,7 +843,7 @@ fn parseImportBlock(self: *const Parser, tokens: []Token) ParserError!usize {
     for (tokens[start..], start..) |token, i| {
         if (expect_symbol) {
             if (token.type == .Ident) {
-                const in_import = try self.program.imports.getOrPut(token.value);
+                const in_import = try self.program.imports.getOrPut(utils.alloc, token.value);
                 if (in_import.found_existing) {
                     utils.printSrcLineErrorFmt("label '{s}' already defined in this block", .{token.value}, self.program.file_name, self.program.content, token.line);
                     return ParserError.ParsingFailed;

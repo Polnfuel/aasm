@@ -172,8 +172,8 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
     const buffs = self.buffs;
     const secs = self.sections;
 
-    var symbols_map: std.StringHashMap(u32) = .init(utils.alloc);
-    defer symbols_map.deinit();
+    var symbols_map: std.StringHashMapUnmanaged(u32) = .empty;
+    defer symbols_map.deinit(utils.alloc);
 
     var funcs = program.funcs.iterator();
     while (funcs.next()) |sym| {
@@ -187,7 +187,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
                 .shndx = secs.text.ind,
             };
 
-            try symbols_map.put(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
+            try symbols_map.put(utils.alloc, sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             try buffs.symtab.append(utils.alloc, symbol);
         }
     }
@@ -207,7 +207,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
             if (program.flags.debug) {
                 try self.addVariableDebugInfo(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             }
-            try symbols_map.put(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
+            try symbols_map.put(utils.alloc, sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             try buffs.symtab.append(utils.alloc, symbol);
         }
     }
@@ -226,7 +226,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
                 .shndx = secs.text.ind,
             };
 
-            try symbols_map.put(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
+            try symbols_map.put(utils.alloc, sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             try buffs.symtab.append(utils.alloc, symbol);
         }
     }
@@ -246,18 +246,18 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
             if (program.flags.debug) {
                 try self.addVariableDebugInfo(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             }
-            try symbols_map.put(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
+            try symbols_map.put(utils.alloc, sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             try buffs.symtab.append(utils.alloc, symbol);
         }
     }
 
-    var lib_imports: std.StringHashMap(void) = .init(utils.alloc);
-    defer lib_imports.deinit();
+    var lib_imports: std.StringHashMapUnmanaged(void) = .empty;
+    defer lib_imports.deinit(utils.alloc);
 
     var imports = program.imports.iterator();
     while (imports.next()) |sym| {
         if (sym.value_ptr.* > 0) {
-            try lib_imports.put(sym.key_ptr.*, {});
+            try lib_imports.put(utils.alloc, sym.key_ptr.*, {});
         }
 
         const symbol = elf.Elf64.Sym{
@@ -269,7 +269,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
             .shndx = elf.SHN_UNDEF,
         };
 
-        try symbols_map.put(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
+        try symbols_map.put(utils.alloc, sym.key_ptr.*, @truncate(buffs.symtab.items.len));
         try buffs.symtab.append(utils.alloc, symbol);
     }
 
