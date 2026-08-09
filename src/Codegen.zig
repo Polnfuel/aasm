@@ -1349,6 +1349,85 @@ fn group2(self: *Codegen, instr: CpuInstruction) CodegenError!void {
     try self.memEncoding(first, digit, opcode, 0b1111, false);
 }
 
+fn group3(self: *Codegen, instr: CpuInstruction) CodegenError!void {
+    if (instr.operands.items.len != 2) {
+        errprint.printSrcLineErrorFmt("{t} instruction should have 2 operands", .{instr.mnem}, self.program.file_name, self.program.content, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+    const first = instr.operands.items[0];
+    const second = instr.operands.items[1];
+    const opsize = switch (first) {
+        .reg => first.reg.size,
+        .mem => first.mem.size orelse {
+            errprint.printSrcLineError("unspecified memory pointer size", self.program.file_name, self.program.content, self.line);
+            return CodegenError.CodeGenFailed;
+        },
+        else => {
+            errprint.printSrcLineError("first operand must be register or memory", self.program.file_name, self.program.content, self.line);
+            return CodegenError.CodeGenFailed;
+        },
+    };
+    var opt_imm: ?Immediate = null;
+
+    var opcode: u8 = undefined;
+    switch (second) {
+        .imm => {
+            const imm_size = second.imm.fitsInBytes();
+            if (imm_size == 1) {
+                const is_one = switch (second.imm) {
+                    .i => (second.imm.i == 1),
+                    .u => (second.imm.u == 1),
+                };
+                if (!is_one) opt_imm = second.imm;
+                opcode = switch (opsize) {
+                    1 => if (is_one) 0xD0 else 0xC0,
+                    2, 4, 8 => if (is_one) 0xD1 else 0xC1,
+                    else => unreachable,
+                };
+            } else {
+                errprint.printSrcLineError("immediate value doesn't fit in 8 bits", self.program.file_name, self.program.content, self.line);
+                return CodegenError.CodeGenFailed;
+            }
+        },
+        .reg => {
+            switch (second.reg.name) {
+                .cl => {
+                    opcode = switch (opsize) {
+                        1 => 0xD2,
+                        2, 4, 8 => 0xD3,
+                        else => unreachable,
+                    };
+                },
+                else => {
+                    errprint.printSrcLineError("only cl register allowed as shift second operand", self.program.file_name, self.program.content, self.line);
+                    return CodegenError.CodeGenFailed;
+                },
+            }
+        },
+        else => {
+            errprint.printSrcLineError("second operand must be imm8 value or cl register", self.program.file_name, self.program.content, self.line);
+            return CodegenError.CodeGenFailed;
+        },
+    }
+    const digit: u8 = switch (instr.mnem) {
+        .sal, .shl => 4,
+        .sar => 7,
+        .shr => 5,
+        else => unreachable,
+    };
+    const reg = InstrBytes.digitToReg(digit);
+    try self.ibytes.define(reg, first, opcode, self);
+    self.ibytes.setOsRexW(opsize);
+    try self.appendInstrBytes();
+    if (opt_imm) |imm| {
+        try self.appendImmediateBytes(imm, 1);
+    }
+    if (self.ibytes.reloc) |*reloc| {
+        if (opt_imm != null) reloc.addend -= 1;
+        try self.program.relocations.append(self.program.alloc, reloc.*);
+    }
+}
+
 fn genInstruction(self: *Codegen, instr: Program.CodeInstruction) CodegenError!void {
     switch (instr) {
         .label => {
@@ -1393,6 +1472,7 @@ fn genInstruction(self: *Codegen, instr: Program.CodeInstruction) CodegenError!v
                 .ja, .jae, .jb, .jbe, .jc, .je, .jg, .jge, .jl, .jle, .jna, .jnae, .jnb, .jnbe, .jnc, .jne, .jng, .jnge, .jnl, .jnle, .jno, .jnp, .jns, .jnz, .jo, .jp, .jpe, .jpo, .js, .jz => try self.jcc(instr.cpu),
                 .adc, .add, .@"and", .cmp, .@"or", .sbb, .sub, .xor => try self.group1(instr.cpu),
                 .dec, .div, .idiv, .inc, .mul, .neg, .not => try self.group2(instr.cpu),
+                .sal, .sar, .shl, .shr => try self.group3(instr.cpu),
                 .@"test" => try self.@"test"(instr.cpu.operands),
                 else => {
                     errprint.printSrcLineErrorFmt("unsupported instruction: {t}", .{instr.cpu.mnem}, self.program.file_name, self.program.content, self.line);

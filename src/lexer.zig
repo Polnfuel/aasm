@@ -31,6 +31,7 @@ pub const TokenType = enum(u8) {
     mov, movzx, lea, call, ret, syscall, 
     ja,  jae, jb,   jbe, jc,   je,  jg,  jge, jl,  jle, jna, jnae, jnb, jnbe, jnc, 
     jne, jng, jnge, jnl, jnle, jno, jnp, jns, jnz, jo,  jp,  jpe,  jpo, js,   jz, jmp,
+    sal, sar, shl, shr,
     imul, @"test",
     push, pop,
 
@@ -321,6 +322,14 @@ fn analyzeWord(word: String, line: u16, file_name: []const u8, content: []const 
         token_type = .push;
     } else if (word.is("ret")) {
         token_type = .ret;
+    } else if (word.is("sal")) {
+        token_type = .sal;
+    } else if (word.is("sar")) {
+        token_type = .sar;
+    } else if (word.is("shl")) {
+        token_type = .shl;
+    } else if (word.is("shr")) {
+        token_type = .shr;
     } else if (word.is("sbb")) {
         token_type = .sbb;
     } else if (word.is("sub")) {
