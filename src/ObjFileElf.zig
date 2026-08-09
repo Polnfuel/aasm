@@ -886,4 +886,6 @@ pub fn writeObjFile(self: *ObjFileElf, io: std.Io, program: *Program) ObjectErro
 
 pub fn deinit(self: *ObjFileElf, alloc: std.mem.Allocator) void {
     self.buffs.deinit(alloc);
+    alloc.destroy(self.buffs);
+    alloc.destroy(self.sections);
 }

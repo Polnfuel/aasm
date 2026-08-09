@@ -559,10 +559,13 @@ fn findLib(self: *Linker, lib_fullname: []const u8) LinkerError!DynLibElf {
 
     for (self.dyn_search_paths.items) |search_path| {
         const found_file = try self.searchInPath(cwd_path, search_path, lib_fullname, true) orelse continue;
-        defer found_file.file.close(self.io);
+        defer {
+            found_file.file.close(self.io);
+            self.alloc.free(found_file.name);
+        }
 
         var dynlib = DynLibElf.open(found_file.file, self.io) catch continue;
-        dynlib.resolved_name = found_file.name;
+        dynlib.resolved_name = try self.alloc.dupe(u8, found_file.name);
         return dynlib;
     }
 
@@ -571,13 +574,16 @@ fn findLib(self: *Linker, lib_fullname: []const u8) LinkerError!DynLibElf {
         errprint.printErrorFmt("Could not find '{s}' library\n", .{lib_fullname});
         return LinkerError.LinkingFailed;
     };
-    defer found_file.file.close(self.io);
+    defer {
+        found_file.file.close(self.io);
+        self.alloc.free(found_file.name);
+    }
 
     var dynlib = DynLibElf.open(found_file.file, self.io) catch {
         errprint.printErrorFmt("Could not find '{s}' library\n", .{lib_fullname});
         return LinkerError.LinkingFailed;
     };
-    dynlib.resolved_name = found_file.name;
+    dynlib.resolved_name = try self.alloc.dupe(u8, found_file.name);
     return dynlib;
 }
 
@@ -1599,6 +1605,8 @@ fn linkExe(self: *Linker) LinkerError!void {
 
         var lib_iter = dyn_libs.iterator();
         while (lib_iter.next()) |lib| {
+            defer lib.value_ptr.deinit();
+
             const lib_name = lib.key_ptr.*;
             const lib_fullname = try self.resolveLibFileName(lib_name);
             defer self.alloc.free(lib_fullname);
@@ -1606,9 +1614,8 @@ fn linkExe(self: *Linker) LinkerError!void {
             var dyn_lib = try self.findLib(lib_fullname);
             defer dyn_lib.close();
 
-            // std.debug.print("Found library '{s}'\n", .{dyn_lib.resolved_name});
-
             try self.dyn_libs.append(self.alloc, dyn_lib.resolved_name);
+            // std.debug.print("Found library '{s}'\n", .{dyn_lib.resolved_name});
 
             var sym_iter = lib.value_ptr.iterator();
             while (sym_iter.next()) |sym| {
@@ -2091,6 +2098,9 @@ pub fn writeExe(self: *Linker) LinkerError!void {
 }
 
 pub fn deinit(self: *Linker) void {
+    for (self.dyn_libs.items) |lib| {
+        self.alloc.free(lib);
+    }
     self.dyn_libs.deinit(self.alloc);
     self.dyn_funcs.deinit();
     self.dyn_objects.deinit();

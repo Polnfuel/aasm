@@ -159,6 +159,7 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
         }
     } else if (cli_args.format == .Executable) {
         const linker = try self.alloc.create(Linker);
+        defer self.alloc.destroy(linker);
         try linker.init(cli_args.output_name, self.alloc, self.io, self.comp_units.items, .{ .debug = self.flags.debug, .strip = self.flags.strip, .quiet = self.flags.quiet }, cli_args.search_paths);
         defer linker.deinit();
 
@@ -179,5 +180,6 @@ pub fn deinit(self: *Assembler) void {
 
         self.alloc.free(unit.rel_path);
     }
+    self.comp_units.deinit(self.alloc);
     self.alloc.free(self.comp_dir);
 }
