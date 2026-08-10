@@ -510,6 +510,10 @@ pub fn deinit(self: *Program) void {
     self.code_block.buffer.deinit(utils.alloc);
     self.shared_libs.deinit(utils.alloc);
     self.data_vars.deinit(utils.alloc);
+    var func_iter = self.funcs.iterator();
+    while (func_iter.next()) |func| {
+        func.value_ptr.local_labels.deinit(utils.alloc);
+    }
     self.funcs.deinit(utils.alloc);
     self.imports.deinit(utils.alloc);
     self.relocations.deinit(utils.alloc);
