@@ -526,37 +526,42 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, rel_path: []co
     });
 }
 
+fn incInd(ind: *u8) u8 {
+    const prev = ind.*;
+    ind.* += 1;
+    return prev;
+}
+
 pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8) ObjectError!void {
     const buffs = self.buffs;
     const secs = self.sections;
 
+    var ind: u8 = 1;
+
     secs.text.offset = std.mem.alignForward(usize, @sizeOf(elf.Elf64.Ehdr), 0x8);
     if (program.flags.has_code) {
         buffs.text = program.code_block.buffer;
-        secs.text.ind = 1;
+        secs.text.ind = incInd(&ind);
         secs.text.name = try self.appendSectionName(".text");
         secs.text.size = buffs.text.items.len;
         self.txt_sym = @truncate(buffs.symtab.items.len);
         try self.appendSectionSymbol(".text", secs.text.ind);
     }
-    secs.data.ind = secs.text.ind;
     secs.data.offset = std.mem.alignForward(usize, secs.text.offset + secs.text.size, 0x8);
     if (program.flags.has_data) {
         buffs.data = program.data_block.buffer;
-        secs.data.ind += 1;
+        secs.data.ind = incInd(&ind);
         secs.data.name = try self.appendSectionName(".data");
         secs.data.size = buffs.data.items.len;
     }
-    secs.bss.ind = secs.data.ind;
     secs.bss.offset = std.mem.alignForward(usize, secs.data.offset + secs.data.size, 0x8);
     if (program.flags.has_bss) {
-        secs.bss.ind += 1;
+        secs.bss.ind = incInd(&ind);
         secs.bss.name = try self.appendSectionName(".bss");
         secs.bss.size = program.bss_block.buffer_len;
     }
-    secs.relatext.ind = secs.bss.ind;
     if (program.relocations.items.len > 0) {
-        secs.relatext.ind += 1;
+        secs.relatext.ind = incInd(&ind);
         secs.relatext.name = try self.appendSectionName(".rela.text");
         secs.relatext.offset = std.mem.alignForward(usize, secs.bss.offset, 0x8);
         secs.relatext.size = program.relocations.items.len * @sizeOf(elf.Elf64.Rela);
@@ -564,13 +569,13 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
         secs.relatext.offset = secs.bss.offset;
     }
     if (program.flags.debug) {
-        secs.debug_line.ind = secs.relatext.ind + 1;
-        secs.debug_line_str.ind = secs.debug_line.ind + 1;
-        secs.reladebug_line.ind = secs.debug_line_str.ind + 1;
-        secs.debug_info.ind = secs.reladebug_line.ind + 1;
-        secs.debug_abbrev.ind = secs.debug_info.ind + 1;
-        secs.debug_str.ind = secs.debug_abbrev.ind + 1;
-        secs.reladebug_info.ind = secs.debug_str.ind + 1;
+        secs.debug_line.ind = incInd(&ind);
+        secs.debug_line_str.ind = incInd(&ind);
+        secs.reladebug_line.ind = incInd(&ind);
+        secs.debug_info.ind = incInd(&ind);
+        secs.debug_abbrev.ind = incInd(&ind);
+        secs.debug_str.ind = incInd(&ind);
+        secs.reladebug_info.ind = incInd(&ind);
 
         secs.debug_line.name = try self.appendSectionName(".debug_line");
         self.dbg_ln_sym = @truncate(buffs.symtab.items.len);
@@ -589,10 +594,9 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
 
         try self.genDwarfDebugInformation(program, rel_path);
     } else {
-        secs.reladebug_info.ind = secs.relatext.ind;
         secs.reladebug_info.offset = secs.relatext.offset + secs.relatext.size;
     }
-    secs.symtab.ind = secs.reladebug_info.ind + 1;
+    secs.symtab.ind = incInd(&ind);
     secs.symtab.name = try self.appendSectionName(".symtab");
 
     try self.addSymbolsToSymtab(program);
@@ -617,12 +621,12 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
     secs.symtab.offset = secs.reladebug_info.offset + secs.reladebug_info.size;
     secs.symtab.size = buffs.symtab.items.len * @sizeOf(elf.Elf64.Sym);
 
-    secs.strtab.ind = secs.symtab.ind + 1;
+    secs.strtab.ind = incInd(&ind);
     secs.strtab.name = try self.appendSectionName(".strtab");
     secs.strtab.offset = secs.symtab.offset + secs.symtab.size;
     secs.strtab.size = buffs.strtab.items.len;
 
-    secs.shstrtab.ind = secs.strtab.ind + 1;
+    secs.shstrtab.ind = incInd(&ind);
     secs.shstrtab.name = try self.appendSectionName(".shstrtab");
     secs.shstrtab.offset = secs.strtab.offset + secs.strtab.size;
     secs.shstrtab.size = buffs.shstrtab.items.len;
