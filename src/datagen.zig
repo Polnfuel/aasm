@@ -4,7 +4,7 @@ const Program = @import("Program");
 
 pub const DatagenError = std.mem.Allocator.Error;
 
-fn appendImmediateBytes(buffer: *std.ArrayList(u8), imm: Program.Immediate, bytes: u8) std.mem.Allocator.Error!void {
+fn appendImmediateBytes(buffer: *std.ArrayList(u8), imm: Program.Immediate, bytes: u8) DatagenError!void {
     const value: u64 = switch (imm) {
         .i => @bitCast(imm.i),
         .u => imm.u,
@@ -60,6 +60,26 @@ pub fn genDataBlockBuffer(program: *Program) DatagenError!void {
         if (opt_symbol) |symbol| {
             symbol.offset = offset;
             symbol.size = program.data_block.buffer.items.len - offset;
+        } else unreachable;
+    }
+}
+
+pub fn genBssBlock(program: *Program) void {
+    for (program.bss_block.instr.items) |instruction| {
+        const name = instruction.label;
+        const data_size = instruction.size;
+
+        const next_aligned = std.mem.alignForward(usize, program.bss_block.buffer_len, data_size);
+        const padding = next_aligned - program.bss_block.buffer_len;
+        program.bss_block.buffer_len += padding;
+        const offset = program.bss_block.buffer_len;
+
+        program.bss_block.buffer_len += instruction.size * instruction.count;
+
+        const opt_symbol = program.data_vars.getPtr(name);
+        if (opt_symbol) |symbol| {
+            symbol.offset = offset;
+            symbol.size = program.bss_block.buffer_len - offset;
         } else unreachable;
     }
 }

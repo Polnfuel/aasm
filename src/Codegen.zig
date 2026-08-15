@@ -8,18 +8,10 @@ const Program = @import("Program");
 const Register = Program.Register;
 const Displacement = Program.Displacement;
 const Immediate = Program.Immediate;
-const Scale = Program.Scale;
 const Address = Program.Address;
-const MemOperand = Program.MemOperand;
 const CodeOperand = Program.CodeOperand;
 const CpuInstruction = Program.CpuInstruction;
-const LabelInstruction = Program.LabelInstruction;
-const DataOperand = Program.DataOperand;
-const DataInstruction = Program.DataInstruction;
 const CodeInstruction = Program.CodeInstruction;
-const DataBlock = Program.DataBlock;
-const CodeBlock = Program.CodeBlock;
-const Symbol = Program.Symbol;
 const RelType = Program.RelType;
 const Relocation = Program.Relocation;
 
@@ -217,7 +209,7 @@ const InstrBytes = struct {
             .mem => {
                 if (rm.mem.addr.label) |label| {
                     try codegen.checkLabelDefined(label);
-                    self.reloc = .empty;
+                    self.reloc = Relocation{};
                     self.reloc.?.name = label;
                     self.disp = rm.mem.addr.disp orelse 0;
                     self.disp_bytes = 4;

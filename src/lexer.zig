@@ -20,7 +20,7 @@ const String = struct {
 pub const TokenType = enum(u8) {
     // zig fmt: off
     //Keywords
-    entry, data, code, import,
+    entry, data, code, import, bss,
     repeat,
     d8, d16, d32, d64,
     p8, p16, p32, p64,
@@ -153,7 +153,7 @@ pub const TokenType = enum(u8) {
 
     pub fn isBlockDecl(self: TokenType) bool {
         switch (self) {
-            TokenType.entry, TokenType.import, TokenType.data, TokenType.code => {
+            TokenType.entry, TokenType.import, TokenType.data, TokenType.code, TokenType.bss => {
                 return true;
             },
             else => {
@@ -216,6 +216,8 @@ fn analyzeWord(word: String, line: u16, file_name: []const u8, content: []const 
         token_type = .entry;
     } else if (word.is("@import")) {
         token_type = .import;
+    } else if (word.is("@bss")) {
+        token_type = .bss;
     } else if (word.is("repeat")) {
         token_type = .repeat;
     }

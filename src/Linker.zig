@@ -29,42 +29,34 @@ const ExeElf = struct {
 
     const ExeSections = struct {
         const Section = struct {
-            ind: u8,
-            name: u32,
-            vaddr: u64,
-            offset: u64,
-            size: usize,
-
-            const empty = Section{
-                .ind = 0,
-                .name = 0,
-                .vaddr = 0,
-                .offset = 0,
-                .size = 0,
-            };
+            ind: u8 = 0,
+            name: u32 = 0,
+            vaddr: u64 = 0,
+            offset: u64 = 0,
+            size: usize = 0,
         };
-        plt: Section = .empty,
-        text: Section = .empty,
-        interp: Section = .empty,
-        hash: Section = .empty,
-        dynsym: Section = .empty,
-        dynstr: Section = .empty,
-        reladyn: Section = .empty,
-        relaplt: Section = .empty,
-        dynamic: Section = .empty,
-        gotplt: Section = .empty,
-        data: Section = .empty,
-        bss: Section = .empty,
+        plt: Section = Section{},
+        text: Section = Section{},
+        interp: Section = Section{},
+        hash: Section = Section{},
+        dynsym: Section = Section{},
+        dynstr: Section = Section{},
+        reladyn: Section = Section{},
+        relaplt: Section = Section{},
+        dynamic: Section = Section{},
+        gotplt: Section = Section{},
+        data: Section = Section{},
+        bss: Section = Section{},
 
-        debug_line: Section = .empty,
-        debug_line_str: Section = .empty,
-        debug_info: Section = .empty,
-        debug_abrrev: Section = .empty,
-        debug_str: Section = .empty,
+        debug_line: Section = Section{},
+        debug_line_str: Section = Section{},
+        debug_info: Section = Section{},
+        debug_abrrev: Section = Section{},
+        debug_str: Section = Section{},
 
-        symtab: Section = .empty,
-        strtab: Section = .empty,
-        shstrtab: Section = .empty,
+        symtab: Section = Section{},
+        strtab: Section = Section{},
+        shstrtab: Section = Section{},
 
         pub fn print(self: *ExeSections) void {
             const info = @typeInfo(ExeSections).@"struct";
@@ -94,6 +86,7 @@ const ExeElf = struct {
         dynamic: std.ArrayList(elf.Elf64_Dyn) = .empty,
         gotplt: std.ArrayList(u64) = .empty,
         data: Buffer = .empty,
+        bss: std.ArrayList(void) = .empty,
 
         debug_line: Buffer = .empty,
         debug_line_str: Buffer = .empty,
@@ -131,9 +124,10 @@ const ExeElf = struct {
     output_name: []const u8,
     entry: ?struct { name: []const u8, vaddr: u64 },
     has_data: bool,
+    has_bss: bool,
     has_dynamic: bool,
     has_plt: bool,
-    has_bss: bool,
+    has_copyobj: bool,
     has_debug: bool,
     has_shtable: bool,
     sections: *ExeSections,
@@ -144,9 +138,10 @@ const ExeElf = struct {
     pub fn init(self: *ExeElf) std.mem.Allocator.Error!void {
         self.entry = null;
         self.has_data = false;
+        self.has_bss = false;
         self.has_dynamic = false;
         self.has_plt = false;
-        self.has_bss = false;
+        self.has_copyobj = false;
         self.has_debug = false;
         self.has_shtable = true;
         self.sections = try utils.alloc.create(ExeSections);
@@ -413,18 +408,21 @@ const Flags = struct {
     quiet: bool,
 };
 
-const FileSection = struct {
-    file: u16,
-    section: enum(u1) {
-        text,
-        data,
-    },
+const Shn = enum(u2) {
+    text,
+    data,
+    bss,
+};
+
+const FileSection = packed struct {
+    file: u14,
+    section: Shn,
 };
 
 const HM_Context = struct {
     pub fn hash(self: *const HM_Context, key: FileSection) u64 {
         _ = self;
-        return (key.file * 2 + @intFromEnum(key.section));
+        return (key.file * 3 + @intFromEnum(key.section));
     }
     pub fn eql(self: *const HM_Context, first: FileSection, second: FileSection) bool {
         _ = self;
@@ -434,11 +432,8 @@ const HM_Context = struct {
 
 const LinkerSymbol = packed struct {
     vaddr: u64,
-    size: u31,
-    shn: enum(u1) {
-        text,
-        data,
-    },
+    size: u30,
+    shn: Shn,
 };
 
 const LibraryFile = struct {
@@ -781,9 +776,11 @@ fn linkGot(self: *Linker) void {
     while (dynobject_iter.next()) |obj| {
         switch (obj.value_ptr.info.section) {
             .wdata => {
+                const start = bss_vaddr;
+                bss_vaddr = std.mem.alignForward(u64, bss_vaddr, 0x8);
                 obj.value_ptr.vaddr = bss_vaddr;
                 bss_vaddr += obj.value_ptr.info.size;
-                bss_vaddr = std.mem.alignForward(u64, bss_vaddr, 0x8);
+                self.exe.buffs.bss.appendNTimesAssumeCapacity({}, bss_vaddr - start);
 
                 const sym_name = self.exe.appendDynstrName(obj.key_ptr.*);
                 const sym_ind: u32 = @truncate(dynsym.items.len);
@@ -806,7 +803,7 @@ fn linkGot(self: *Linker) void {
     }
 }
 
-fn mergeTextData(self: *Linker) LinkerError!void {
+fn mergeTextDataBss(self: *Linker) LinkerError!void {
     for (self.comp_units, 0..) |unit, i| {
         if (unit.program.flags.has_code) {
             const prev_len = self.exe.buffs.text.items.len;
@@ -824,6 +821,14 @@ fn mergeTextData(self: *Linker) LinkerError!void {
             try self.offsets.putNoClobber(utils.alloc, .{ .file = @truncate(i), .section = .data }, offset);
             self.exe.buffs.data.appendSliceAssumeCapacity(unit.objfile.buffs.data.items);
         }
+        if (unit.program.flags.has_bss) {
+            const prev_len = self.exe.buffs.bss.items.len;
+            const next_aligned = std.mem.alignForward(usize, prev_len, 0x8);
+            self.exe.buffs.bss.appendNTimesAssumeCapacity({}, next_aligned - prev_len);
+            const offset = self.exe.buffs.bss.items.len;
+            try self.offsets.putNoClobber(utils.alloc, .{ .file = @truncate(i), .section = .bss }, offset);
+            self.exe.buffs.bss.appendNTimesAssumeCapacity({}, unit.program.bss_block.buffer_len);
+        }
     }
 }
 
@@ -831,17 +836,18 @@ fn mergeSymbols(self: *Linker) LinkerError!void {
     for (self.comp_units, 0..) |unit, i| {
         for (unit.objfile.buffs.symtab.items[1..]) |sym| {
             if (sym.info.bind == .LOCAL) {
+                const is_data = sym.shndx == unit.objfile.sections.data.ind;
                 const sh_offset = self.offsets.get(.{
                     .file = @truncate(i),
                     .section = switch (sym.info.type) {
                         .FUNC => .text,
-                        .OBJECT => .data,
+                        .OBJECT => if (is_data) .data else .bss,
                         else => continue,
                     },
                 }).?;
                 const sh_address = switch (sym.info.type) {
                     .FUNC => self.exe.sections.text.vaddr,
-                    .OBJECT => self.exe.sections.data.vaddr,
+                    .OBJECT => if (is_data) self.exe.sections.data.vaddr else self.exe.sections.bss.vaddr,
                     else => unreachable,
                 };
                 const sym_address = sh_address + sh_offset + sym.value;
@@ -850,23 +856,24 @@ fn mergeSymbols(self: *Linker) LinkerError!void {
                     .vaddr = sym_address,
                     .shn = switch (sym.info.type) {
                         .FUNC => .text,
-                        .OBJECT => .data,
+                        .OBJECT => if (is_data) .data else .bss,
                         else => unreachable,
                     },
                     .size = @truncate(sym.size),
                 });
             } else if (sym.info.bind == .GLOBAL) {
+                const is_data = sym.shndx == unit.objfile.sections.data.ind;
                 const sh_offset = self.offsets.get(.{
                     .file = @truncate(i),
                     .section = switch (sym.info.type) {
                         .FUNC => .text,
-                        .OBJECT => .data,
+                        .OBJECT => if (is_data) .data else .bss,
                         else => continue,
                     },
                 }).?;
                 const sh_address = switch (sym.info.type) {
                     .FUNC => self.exe.sections.text.vaddr,
-                    .OBJECT => self.exe.sections.data.vaddr,
+                    .OBJECT => if (is_data) self.exe.sections.data.vaddr else self.exe.sections.bss.vaddr,
                     else => unreachable,
                 };
                 const sym_address = sh_address + sh_offset + sym.value;
@@ -875,7 +882,7 @@ fn mergeSymbols(self: *Linker) LinkerError!void {
                     .vaddr = sym_address,
                     .shn = switch (sym.info.type) {
                         .FUNC => .text,
-                        .OBJECT => .data,
+                        .OBJECT => if (is_data) .data else .bss,
                         else => unreachable,
                     },
                     .size = @truncate(sym.size),
@@ -1020,7 +1027,7 @@ fn linkDynamic(self: *Linker) void {
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_PLTREL, .d_val = elf.DT_RELA });
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_JMPREL, .d_val = self.exe.sections.relaplt.vaddr });
     }
-    if (self.exe.has_bss) {
+    if (self.exe.has_copyobj) {
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_RELA, .d_val = self.exe.sections.reladyn.vaddr });
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_RELASZ, .d_val = self.exe.sections.reladyn.size });
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_RELAENT, .d_val = @sizeOf(elf.Elf64.Rela) });
@@ -1181,12 +1188,13 @@ fn shdrTable(self: *Linker, ind: *u8) LinkerError!void {
         const shn_ind: u8 = switch (sym.value_ptr.shn) {
             .text => secs.text.ind,
             .data => secs.data.ind,
+            .bss => secs.bss.ind,
         };
         try buffs.symtab.append(utils.alloc, .{
             .name = try self.exe.appendStrtabName(sym.key_ptr.*),
             .info = .{ .bind = .LOCAL, .type = switch (sym.value_ptr.shn) {
                 .text => .FUNC,
-                .data => .OBJECT,
+                .data, .bss => .OBJECT,
             } },
             .other = .{ .visibility = .DEFAULT },
             .shndx = shn_ind,
@@ -1203,12 +1211,12 @@ fn shdrTable(self: *Linker, ind: *u8) LinkerError!void {
             .value = secs.dynamic.vaddr,
             .size = 0,
         });
-        if (self.exe.has_bss) {
+        if (self.exe.has_copyobj or self.exe.has_plt) {
             try buffs.symtab.append(utils.alloc, .{
                 .name = try self.exe.appendStrtabName("_GLOBAL_OFFSET_TABLE"),
                 .info = .{ .bind = .LOCAL, .type = .OBJECT },
                 .other = .{ .visibility = .DEFAULT },
-                .shndx = secs.gotplt.ind,
+                .shndx = if (secs.gotplt.ind > 0) secs.gotplt.ind else secs.bss.ind,
                 .value = secs.gotplt.vaddr,
                 .size = 0,
             });
@@ -1222,12 +1230,13 @@ fn shdrTable(self: *Linker, ind: *u8) LinkerError!void {
         const shn_ind: u8 = switch (sym.value_ptr.shn) {
             .text => secs.text.ind,
             .data => secs.data.ind,
+            .bss => secs.bss.ind,
         };
         try buffs.symtab.append(utils.alloc, .{
             .name = try self.exe.appendStrtabName(sym.key_ptr.*),
             .info = .{ .bind = .GLOBAL, .type = switch (sym.value_ptr.shn) {
                 .text => .FUNC,
-                .data => .OBJECT,
+                .data, .bss => .OBJECT,
             } },
             .other = .{ .visibility = .DEFAULT },
             .shndx = shn_ind,
@@ -1265,7 +1274,7 @@ fn shstrtabLoad(self: *Linker, ind: *u8) LinkerError!void {
         secs.hash.name = try self.exe.appendShstrtabName(".hash");
         secs.dynsym.name = try self.exe.appendShstrtabName(".dynsym");
         secs.dynstr.name = try self.exe.appendShstrtabName(".dynstr");
-        if (self.exe.has_bss) {
+        if (self.exe.has_copyobj) {
             secs.reladyn.name = try self.exe.appendShstrtabName(".rela.dyn");
         }
         if (self.exe.has_plt) {
@@ -1421,7 +1430,7 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
 
         secs.reladyn.offset = std.mem.alignForward(u64, secs.dynstr.offset + secs.dynstr.size, 0x8);
         secs.reladyn.size = objects * @sizeOf(elf.Elf64.Rela);
-        if (self.exe.has_bss) {
+        if (self.exe.has_copyobj) {
             secs.reladyn.ind = incInd(&ind);
             secs.reladyn.vaddr = vaddress + secs.reladyn.offset;
         }
@@ -1451,7 +1460,7 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
         if (self.exe.has_plt) {
             secs.dynamic.size += 4 * @sizeOf(elf.Elf64_Dyn);
         }
-        if (self.exe.has_bss) {
+        if (self.exe.has_copyobj) {
             secs.dynamic.size += 3 * @sizeOf(elf.Elf64_Dyn);
         }
         if (self.dyn_runpath.items.len > 0) {
@@ -1491,6 +1500,11 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
             data_size = std.mem.alignForward(usize, data_size, 0x8);
             data_size += dsize;
         }
+        if (unit.program.flags.has_bss) {
+            const bsize = unit.program.bss_block.buffer_len;
+            bss_size = std.mem.alignForward(usize, bss_size, 0x8);
+            bss_size += bsize;
+        }
     }
     secs.data.size = data_size;
     if (self.exe.has_data) {
@@ -1500,7 +1514,7 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
 
     secs.bss.offset = secs.data.offset + secs.data.size;
     secs.bss.size = bss_size;
-    if (self.exe.has_bss) {
+    if (self.exe.has_bss or self.exe.has_copyobj) {
         secs.bss.ind = incInd(&ind);
         secs.bss.vaddr = std.mem.alignForward(u64, vaddress + secs.bss.offset, 0x8);
     }
@@ -1512,9 +1526,11 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
         .vaddr = secs.dynamic.vaddr,
         .paddr = secs.dynamic.vaddr,
         .filesz = secs.data.offset + secs.data.size - secs.dynamic.offset,
-        .memsz = if (self.exe.has_bss) secs.bss.vaddr + secs.bss.size - secs.dynamic.vaddr else secs.data.offset + secs.data.size - secs.dynamic.offset,
+        .memsz = if (secs.bss.size > 0) secs.bss.vaddr + secs.bss.size - secs.dynamic.vaddr else secs.data.offset + secs.data.size - secs.dynamic.offset,
         .@"align" = 0x1000,
     };
+
+    buffs.bss = try .initCapacity(utils.alloc, bss_size);
 
     if (self.exe.has_dynamic) {
         buffs.dynsym = try .initCapacity(utils.alloc, self.exe.sections.dynsym.size / @sizeOf(elf.Elf64.Sym));
@@ -1529,7 +1545,7 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
             self.linkPlt();
         }
 
-        if (self.exe.has_bss) {
+        if (self.exe.has_copyobj) {
             buffs.reladyn = try .initCapacity(utils.alloc, self.exe.sections.reladyn.size / @sizeOf(elf.Elf64.Rela));
             self.linkGot();
         }
@@ -1537,7 +1553,7 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
 
     buffs.text = try .initCapacity(utils.alloc, self.exe.sections.text.size);
     buffs.data = try .initCapacity(utils.alloc, self.exe.sections.data.size);
-    try self.mergeTextData();
+    try self.mergeTextDataBss();
 
     try self.mergeSymbols();
     self.patchRelocations();
@@ -1626,7 +1642,7 @@ fn linkExe(self: *Linker) LinkerError!void {
                         .obj => {
                             try self.dyn_objects.putNoClobber(utils.alloc, sym_name, .{ .info = syminfo.obj, .vaddr = undefined });
                             if (syminfo.obj.section == .wdata) {
-                                self.exe.has_bss = true;
+                                self.exe.has_copyobj = true;
                             }
                         },
                     }
@@ -1660,6 +1676,9 @@ pub fn linkObjects(self: *Linker) LinkerError!void {
         }
         if (unit.program.flags.has_shared) {
             self.exe.has_dynamic = true;
+        }
+        if (unit.program.flags.has_bss) {
+            self.exe.has_bss = true;
         }
     }
 
@@ -1756,7 +1775,7 @@ pub fn writeExe(self: *Linker) LinkerError!void {
         _ = try writer.splatByte(0, padding);
         _ = try writer.write(buffs.dynstr.items);
 
-        if (self.exe.has_bss) {
+        if (self.exe.has_copyobj) {
             padding = secs.reladyn.offset - writer.end;
             _ = try writer.splatByte(0, padding);
             for (buffs.reladyn.items) |rela| {
@@ -1906,7 +1925,7 @@ pub fn writeExe(self: *Linker) LinkerError!void {
                 .offset = secs.dynstr.offset,
                 .size = secs.dynstr.size,
             }, .little);
-            if (self.exe.has_bss) {
+            if (self.exe.has_copyobj) {
                 try writer.writeStruct(elf.Elf64.Shdr{
                     .name = secs.reladyn.name,
                     .type = .RELA,

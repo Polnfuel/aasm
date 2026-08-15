@@ -103,7 +103,7 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
         try program.syntaxAnalyzis();
         // program.printProgram();
 
-        if (!program.flags.has_code and !program.flags.has_data) {
+        if (!program.flags.has_code and !program.flags.has_data and !program.flags.has_bss) {
             utils.printSrcFileError("source file doesn't contain any data or code block", program.file_name);
             return AssemblerError.AssemblyError;
         } else if (!program.flags.has_code and program.flags.debug) {
@@ -115,6 +115,9 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
 
         if (program.flags.has_data) {
             try program.dataGen();
+        }
+        if (program.flags.has_bss) {
+            program.bssGen();
         }
         if (program.flags.has_code) {
             try program.codeGen();

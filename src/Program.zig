@@ -134,7 +134,12 @@ pub const DataInstruction = struct {
     label: []const u8,
     size: u8,
     data: std.ArrayList(DataOperand),
-    line: u16,
+};
+
+pub const BssInstruction = struct {
+    label: []const u8,
+    size: u8,
+    count: u32,
 };
 
 pub const CodeInstruction = union(enum) {
@@ -143,39 +148,18 @@ pub const CodeInstruction = union(enum) {
 };
 
 pub const DataBlock = struct {
-    instr: std.ArrayList(DataInstruction),
-    buffer: Buffer,
+    instr: std.ArrayList(DataInstruction) = .empty,
+    buffer: Buffer = .empty,
+};
 
-    const empty = @This(){
-        .instr = .empty,
-        .buffer = .empty,
-    };
+pub const BssBlock = struct {
+    instr: std.ArrayList(BssInstruction) = .empty,
+    buffer_len: usize = 0,
 };
 
 pub const CodeBlock = struct {
     instr: std.ArrayList(CodeInstruction) = .empty,
     buffer: Buffer = .empty,
-
-    const empty = @This(){
-        .instr = .empty,
-        .buffer = .empty,
-    };
-};
-
-pub const Symbol = struct {
-    offset: u64,
-    type: enum {
-        Local,
-        Export,
-        Import,
-        Hidden,
-    },
-    section: enum {
-        Data,
-        Code,
-        Undef,
-    },
-    shared_ind: u16,
 };
 
 pub const RelType = enum {
@@ -187,17 +171,10 @@ pub const RelType = enum {
 };
 
 pub const Relocation = struct {
-    type: RelType,
-    name: []const u8,
-    offset: u64,
-    addend: i64,
-
-    pub const empty = @This(){
-        .type = .Rel32D,
-        .name = &.{},
-        .offset = 0,
-        .addend = 0,
-    };
+    type: RelType = .Rel32D,
+    name: []const u8 = &.{},
+    offset: u64 = 0,
+    addend: i64 = 0,
 };
 
 pub const LineProgramEntry = struct {
@@ -206,9 +183,11 @@ pub const LineProgramEntry = struct {
 };
 
 const LabelType = enum { Local, Export };
+const BlockType = enum { Data, Bss };
 
 const DataVariable = struct {
     visib: LabelType,
+    block: BlockType,
     offset: usize,
     size: usize,
 };
@@ -223,6 +202,7 @@ const Function = struct {
 const ProgramFlags = struct {
     has_entry: bool = false,
     has_data: bool = false,
+    has_bss: bool = false,
     has_code: bool = false,
     has_shared: bool = false,
     debug: bool = false,
@@ -237,6 +217,7 @@ flags: ProgramFlags,
 tokens: std.ArrayList(Token),
 entry: []const u8,
 data_block: DataBlock,
+bss_block: BssBlock,
 code_block: CodeBlock,
 shared_libs: std.ArrayList([]const u8),
 data_vars: std.StringHashMapUnmanaged(DataVariable),
@@ -255,8 +236,9 @@ pub fn init(self: *Program, content: []const u8, file_name: []const u8, debug: b
     self.flags = .{ .debug = debug, .pic = pic, .warnings = warnings, .quiet = quiet };
     self.tokens = .empty;
     self.entry = &.{};
-    self.data_block = .empty;
-    self.code_block = .empty;
+    self.data_block = DataBlock{};
+    self.bss_block = BssBlock{};
+    self.code_block = CodeBlock{};
     self.shared_libs = .empty;
     self.data_vars = .empty;
     self.funcs = .empty;
@@ -276,6 +258,10 @@ pub fn syntaxAnalyzis(self: *Program) Parser.ParserError!void {
 
 pub fn dataGen(self: *Program) datagen.DatagenError!void {
     try datagen.genDataBlockBuffer(self);
+}
+
+pub fn bssGen(self: *Program) void {
+    datagen.genBssBlock(self);
 }
 
 pub fn codeGen(self: *Program) Codegen.CodegenError!void {
@@ -341,6 +327,13 @@ pub fn printProgram(self: *Program) void {
         }
         std.debug.print("\n", .{});
     }
+    if (self.flags.has_bss) {
+        std.debug.print("bss block\n", .{});
+        for (self.bss_block.instr.items) |instr| {
+            std.debug.print(" {s}: d{d} x{d}\n", .{ instr.label, instr.size * 8, instr.count });
+        }
+        std.debug.print("\n", .{});
+    }
     if (self.flags.has_code) {
         std.debug.print("code block\n", .{});
         for (self.code_block.instr.items) |instr| {
@@ -362,7 +355,11 @@ pub fn printSymbolTable(self: *Program) void {
     std.debug.print("Symbols: \n", .{});
     var data_iter = self.data_vars.iterator();
     while (data_iter.next()) |data_var| {
-        std.debug.print("d  {s} 0 {s:<20} {d:4} {d:4}\n", .{
+        std.debug.print("{s}  {s} 0 {s:<20} {d:4} {d:4}\n", .{
+            switch (data_var.value_ptr.block) {
+                .Data => "d ",
+                .Bss => " b",
+            },
             switch (data_var.value_ptr.visib) {
                 .Export => "EXP",
                 .Local => "LOC",
@@ -374,7 +371,7 @@ pub fn printSymbolTable(self: *Program) void {
     }
     var code_iter = self.funcs.iterator();
     while (code_iter.next()) |func| {
-        std.debug.print(" c {s} 0 {s:<20} {d:4} {d:4}\n", .{
+        std.debug.print("  c {s} 0 {s:<20} {d:4} {d:4}\n", .{
             switch (func.value_ptr.visib) {
                 .Export => "EXP",
                 .Local => "LOC",
@@ -499,14 +496,15 @@ pub fn deinit(self: *Program) void {
         instr.data.deinit(utils.alloc);
     }
     self.data_block.instr.deinit(utils.alloc);
+    self.bss_block.instr.deinit(utils.alloc);
     for (self.code_block.instr.items) |*instr| {
         switch (instr.*) {
             .cpu => instr.cpu.operands.deinit(utils.alloc),
             .label => {},
         }
     }
-    self.data_block.buffer.deinit(utils.alloc);
     self.code_block.instr.deinit(utils.alloc);
+    self.data_block.buffer.deinit(utils.alloc);
     self.code_block.buffer.deinit(utils.alloc);
     self.shared_libs.deinit(utils.alloc);
     self.data_vars.deinit(utils.alloc);

@@ -44,32 +44,26 @@ const Buffers = struct {
 
 const Sections = struct {
     const Section = struct {
-        ind: u8,
-        name: u32,
-        offset: u64,
-        size: usize,
-
-        const empty = Section{
-            .ind = 0,
-            .name = 0,
-            .offset = 0,
-            .size = 0,
-        };
+        ind: u8 = 0,
+        name: u32 = 0,
+        offset: u64 = 0,
+        size: usize = 0,
     };
 
-    text: Section = .empty,
-    data: Section = .empty,
-    relatext: Section = .empty,
-    debug_line: Section = .empty,
-    debug_line_str: Section = .empty,
-    reladebug_line: Section = .empty,
-    debug_info: Section = .empty,
-    debug_abbrev: Section = .empty,
-    debug_str: Section = .empty,
-    reladebug_info: Section = .empty,
-    symtab: Section = .empty,
-    strtab: Section = .empty,
-    shstrtab: Section = .empty,
+    text: Section = Section{},
+    data: Section = Section{},
+    bss: Section = Section{},
+    relatext: Section = Section{},
+    debug_line: Section = Section{},
+    debug_line_str: Section = Section{},
+    reladebug_line: Section = Section{},
+    debug_info: Section = Section{},
+    debug_abbrev: Section = Section{},
+    debug_str: Section = Section{},
+    reladebug_info: Section = Section{},
+    symtab: Section = Section{},
+    strtab: Section = Section{},
+    shstrtab: Section = Section{},
 
     pub fn print(self: *Sections) void {
         const info = @typeInfo(Sections).@"struct";
@@ -201,7 +195,10 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
                 .size = sym.value_ptr.size,
                 .info = .{ .bind = .LOCAL, .type = .OBJECT },
                 .other = .{ .visibility = .DEFAULT },
-                .shndx = secs.data.ind,
+                .shndx = switch (sym.value_ptr.block) {
+                    .Data => secs.data.ind,
+                    .Bss => secs.bss.ind,
+                },
             };
 
             if (program.flags.debug) {
@@ -240,7 +237,10 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
                 .size = sym.value_ptr.size,
                 .info = .{ .bind = .GLOBAL, .type = .OBJECT },
                 .other = .{ .visibility = .DEFAULT },
-                .shndx = secs.data.ind,
+                .shndx = switch (sym.value_ptr.block) {
+                    .Data => secs.data.ind,
+                    .Bss => secs.bss.ind,
+                },
             };
 
             if (program.flags.debug) {
@@ -546,16 +546,22 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
         secs.data.ind += 1;
         secs.data.name = try self.appendSectionName(".data");
         secs.data.size = buffs.data.items.len;
-        try self.appendSectionSymbol(".data", secs.data.ind);
     }
-    secs.relatext.ind = secs.data.ind;
+    secs.bss.ind = secs.data.ind;
+    secs.bss.offset = std.mem.alignForward(usize, secs.data.offset + secs.data.size, 0x8);
+    if (program.flags.has_bss) {
+        secs.bss.ind += 1;
+        secs.bss.name = try self.appendSectionName(".bss");
+        secs.bss.size = program.bss_block.buffer_len;
+    }
+    secs.relatext.ind = secs.bss.ind;
     if (program.relocations.items.len > 0) {
         secs.relatext.ind += 1;
         secs.relatext.name = try self.appendSectionName(".rela.text");
-        secs.relatext.offset = std.mem.alignForward(usize, secs.data.offset + secs.data.size, 0x8);
+        secs.relatext.offset = std.mem.alignForward(usize, secs.bss.offset, 0x8);
         secs.relatext.size = program.relocations.items.len * @sizeOf(elf.Elf64.Rela);
     } else {
-        secs.relatext.offset = secs.data.offset + secs.data.size;
+        secs.relatext.offset = secs.bss.offset;
     }
     if (program.flags.debug) {
         secs.debug_line.ind = secs.relatext.ind + 1;
@@ -739,6 +745,20 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             .addr = 0,
             .offset = secs.data.offset,
             .size = secs.data.size,
+            .link = 0,
+            .info = 0,
+            .addralign = 0x8,
+            .entsize = 0,
+        }, .little);
+    }
+    if (program.flags.has_bss) {
+        try writer.writeStruct(elf.Elf64.Shdr{
+            .name = secs.bss.name,
+            .type = .NOBITS,
+            .flags = .{ .shf = .{ .ALLOC = true, .WRITE = true } },
+            .addr = 0,
+            .offset = secs.bss.offset,
+            .size = secs.bss.size,
             .link = 0,
             .info = 0,
             .addralign = 0x8,
