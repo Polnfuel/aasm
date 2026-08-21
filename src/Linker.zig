@@ -827,7 +827,7 @@ fn mergeTextDataBss(self: *Linker) LinkerError!void {
             self.exe.buffs.bss.appendNTimesAssumeCapacity({}, next_aligned - prev_len);
             const offset = self.exe.buffs.bss.items.len;
             try self.offsets.putNoClobber(utils.alloc, .{ .file = @truncate(i), .section = .bss }, offset);
-            self.exe.buffs.bss.appendNTimesAssumeCapacity({}, unit.program.bss_block.buffer_len);
+            self.exe.buffs.bss.appendNTimesAssumeCapacity({}, unit.program.bss_len);
         }
     }
 }
@@ -1501,7 +1501,7 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
             data_size += dsize;
         }
         if (unit.program.flags.has_bss) {
-            const bsize = unit.program.bss_block.buffer_len;
+            const bsize = unit.program.bss_len;
             bss_size = std.mem.alignForward(usize, bss_size, 0x8);
             bss_size += bsize;
         }

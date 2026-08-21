@@ -1,8 +1,8 @@
 const std = @import("std");
 const utils = @import("utils");
 
-const lexer = @import("lexer");
-const Token = lexer.Token;
+const Lexer = @import("Lexer");
+const Token = Lexer.Token;
 
 const Program = @import("Program");
 const Register = Program.Register;
@@ -10,9 +10,7 @@ const Displacement = Program.Displacement;
 const Immediate = Program.Immediate;
 const Address = Program.Address;
 const CodeOperand = Program.CodeOperand;
-const DataOperand = Program.DataOperand;
-const DataInstruction = Program.DataInstruction;
-const BssInstruction = Program.BssInstruction;
+const RepeatOperand = Program.RepeatOperand;
 const CodeInstruction = Program.CodeInstruction;
 
 const Parser = @This();
@@ -37,10 +35,11 @@ pub fn init(program: *Program) Parser {
     };
 }
 
-/// token must be .NumberLiteral
+/// token must be .NumberLiteral, .HexNumLiteral or .BinNumLiteral
 fn immFromToken(self: *const Parser, token: Token) ParserError!Immediate {
-    const value = std.fmt.parseInt(u64, token.value, 10) catch {
-        utils.printSrcLineErrorFmt("value {s} doesn't fit in 64 bit", .{token.value}, self.program.file_name, self.program.content, token.line);
+    const label = self.program.token_values.items[token.val_ind];
+    const value = std.fmt.parseInt(u64, label, 0) catch {
+        utils.printSrcLineErrorFmt("value {s} doesn't fit in 64 bit", .{label}, self.program.file_name, self.program.content, token.line);
         return ParserError.ParsingFailed;
     };
     const imm = Immediate{ .u = value };
@@ -50,7 +49,7 @@ fn immFromToken(self: *const Parser, token: Token) ParserError!Immediate {
 fn parseEntry(self: *const Parser, tokens: []Token) ParserError!void {
     const next = tokens[0];
     if (next.type == .Ident) {
-        self.program.entry = next.value;
+        self.program.entry = self.program.token_values.items[next.val_ind];
     } else {
         utils.printSrcLineError("expected identifier after entry keyword", self.program.file_name, self.program.content, next.line);
         return ParserError.ParsingFailed;
@@ -69,11 +68,11 @@ fn parseNumber(self: *const Parser, tokens: []Token, consumed: *usize) ParserErr
             plus = plus;
         } else if (token.type == .Minus) {
             plus = !plus;
-        } else if (token.type == .NumberLiteral) {
+        } else if (token.type == .NumberLiteral or token.type == .HexNumLiteral or token.type == .BinNumLiteral) {
             var imm = try self.immFromToken(token);
             if (!plus) {
                 imm.toNegative() catch {
-                    utils.printSrcLineErrorFmt("value -{s} doesn't fit in 64 bit", .{token.value}, self.program.file_name, self.program.content, token.line);
+                    utils.printSrcLineErrorFmt("value -{s} doesn't fit in 64 bit", .{self.program.token_values.items[token.val_ind]}, self.program.file_name, self.program.content, token.line);
                     return ParserError.ParsingFailed;
                 };
             }
@@ -124,7 +123,7 @@ fn parseLabel(self: *const Parser, tokens: []Token) ParserError![]const u8 {
                 utils.printSrcLineError("label cannot follow minus sign", self.program.file_name, self.program.content, token.line);
                 return ParserError.ParsingFailed;
             }
-            return token.value;
+            return self.program.token_values.items[token.val_ind];
         } else {
             utils.printSrcLineError("expected label", self.program.file_name, self.program.content, token.line);
             return ParserError.ParsingFailed;
@@ -158,12 +157,12 @@ fn dispFromImm(self: *const Parser, imm: Immediate, line: u16) ParserError!Displ
     return disp;
 }
 
-fn parseRepeat(self: *const Parser, tokens: []Token, data_size: u8, line: u16, consumed: *usize, max_size: usize) ParserError!DataOperand {
-    var data_oper: DataOperand = undefined;
+fn parseRepeat(self: *const Parser, tokens: []Token, data_size: u8, line: u16, consumed: *usize, max_size: usize) ParserError!RepeatOperand {
+    var repeat_oper: RepeatOperand = undefined;
     var i: usize = 0;
     if (tokens[i].type == .OpenParenthes) {
         switch (tokens[i + 1].type) {
-            .NumberLiteral, .Minus, .Plus => {
+            .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus => {
                 var parsed: usize = 0;
                 const count = try self.parseNumber(tokens[i + 1 ..], &parsed);
                 i += parsed;
@@ -180,13 +179,13 @@ fn parseRepeat(self: *const Parser, tokens: []Token, data_size: u8, line: u16, c
                 }
                 if (tokens[i + 2].type == .Comma) {
                     switch (tokens[i + 3].type) {
-                        .NumberLiteral, .Minus, .Plus => {
+                        .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus => {
                             parsed = 0;
                             const value = try self.parseNumber(tokens[i + 3 ..], &parsed);
                             i += parsed;
                             const value_size = value.fitsInBytes();
                             if (value_size <= data_size) {
-                                data_oper = .{ .repeat = .{ .count = count_value, .item = .{ .num = value } } };
+                                repeat_oper = .{ .count = count_value, .item = .{ .num = value } };
                             } else {
                                 utils.printSrcLineError("value doesn't fit in specified data size", self.program.file_name, self.program.content, tokens[i + 3].line);
                                 return ParserError.ParsingFailed;
@@ -194,7 +193,7 @@ fn parseRepeat(self: *const Parser, tokens: []Token, data_size: u8, line: u16, c
                         },
                         .StringLiteral => {
                             if (data_size == 1) {
-                                data_oper = .{ .repeat = .{ .count = count_value, .item = .{ .str = tokens[3].value } } };
+                                repeat_oper = .{ .count = count_value, .item = .{ .str = self.program.token_values.items[tokens[3].val_ind] } };
                             } else {
                                 utils.printSrcLineError("strings only supported by d8 directive", self.program.file_name, self.program.content, line);
                                 return ParserError.ParsingFailed;
@@ -207,13 +206,13 @@ fn parseRepeat(self: *const Parser, tokens: []Token, data_size: u8, line: u16, c
                     }
                     if (tokens[i + 4].type == .CloseParenthes) {
                         consumed.* = i + 4 + 1;
-                        return data_oper;
+                        return repeat_oper;
                     } else {
-                        utils.printSrcLineErrorFmt("expected ) after {s}", .{tokens[i + 3].value}, self.program.file_name, self.program.content, line);
+                        utils.printSrcLineErrorFmt("expected ) after {s}", .{self.program.token_values.items[tokens[i + 3].val_ind]}, self.program.file_name, self.program.content, line);
                         return ParserError.ParsingFailed;
                     }
                 } else {
-                    utils.printSrcLineErrorFmt("expected , after {s}", .{tokens[i + 1].value}, self.program.file_name, self.program.content, line);
+                    utils.printSrcLineErrorFmt("expected , after {s}", .{self.program.token_values.items[tokens[i + 1].val_ind]}, self.program.file_name, self.program.content, line);
                     return ParserError.ParsingFailed;
                 }
             },
@@ -228,9 +227,17 @@ fn parseRepeat(self: *const Parser, tokens: []Token, data_size: u8, line: u16, c
     }
 }
 
+fn appendImmediateBytes(buffer: *std.ArrayList(u8), imm: Immediate, bytes: u8) std.mem.Allocator.Error!void {
+    const value: u64 = switch (imm) {
+        .i => @bitCast(imm.i),
+        .u => imm.u,
+    };
+    const array = std.mem.toBytes(value);
+    try buffer.appendSlice(utils.alloc, array[0..bytes]);
+}
+
 fn parseDataInstr(self: *const Parser, tokens: []Token) ParserError!void {
     const line = tokens[0].line;
-    var instr: DataInstruction = undefined;
     if (tokens[0].type == .Ident or tokens[0].type == .HashIdent) {
         if (tokens[1].type == .Colon) {
             if (tokens[2].type.isDataDirective()) {
@@ -241,10 +248,12 @@ fn parseDataInstr(self: *const Parser, tokens: []Token) ParserError!void {
                     .d64 => 8,
                     else => unreachable,
                 };
-                instr.label = tokens[0].value;
-                instr.size = data_size;
-                instr.data = .empty;
-                errdefer instr.data.deinit(utils.alloc);
+                const label = self.program.token_values.items[tokens[0].val_ind];
+
+                const next_aligned = std.mem.alignForward(usize, self.program.data_buffer.items.len, data_size);
+                const padding = next_aligned - self.program.data_buffer.items.len;
+                _ = try self.program.data_buffer.addManyAsSlice(utils.alloc, padding);
+                const offset = self.program.data_buffer.items.len;
 
                 var expect_value = true;
                 var i: usize = 3;
@@ -260,14 +269,13 @@ fn parseDataInstr(self: *const Parser, tokens: []Token) ParserError!void {
                                 return ParserError.ParsingFailed;
                             }
                             if (data_size == 1) {
-                                const data_oper = DataOperand{ .str = token.value };
-                                try instr.data.append(utils.alloc, data_oper);
+                                try self.program.data_buffer.appendSlice(utils.alloc, self.program.token_values.items[token.val_ind]);
                             } else {
                                 utils.printSrcLineError("strings only supported by d8 directive", self.program.file_name, self.program.content, line);
                                 return ParserError.ParsingFailed;
                             }
                         },
-                        .NumberLiteral, .Minus, .Plus => {
+                        .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus => {
                             if (expect_value) {
                                 expect_value = false;
                             } else {
@@ -278,8 +286,7 @@ fn parseDataInstr(self: *const Parser, tokens: []Token) ParserError!void {
                             const num = try self.parseNumber(tokens[i..], &parsed);
                             const num_size = num.fitsInBytes();
                             if (num_size <= data_size) {
-                                const data_oper = DataOperand{ .num = num };
-                                try instr.data.append(utils.alloc, data_oper);
+                                try appendImmediateBytes(&self.program.data_buffer, num, data_size);
                             } else {
                                 utils.printSrcLineError("value doesn't fit in specified data size", self.program.file_name, self.program.content, line);
                                 return ParserError.ParsingFailed;
@@ -294,8 +301,19 @@ fn parseDataInstr(self: *const Parser, tokens: []Token) ParserError!void {
                                 return ParserError.ParsingFailed;
                             }
                             var consumed: usize = undefined;
-                            const data_oper = try self.parseRepeat(tokens[i + 1 ..], data_size, line, &consumed, 0x4000);
-                            try instr.data.append(utils.alloc, data_oper);
+                            const repeat_oper = try self.parseRepeat(tokens[i + 1 ..], data_size, line, &consumed, 0x4000);
+                            switch (repeat_oper.item) {
+                                .str => |str| {
+                                    for (0..repeat_oper.count) |_| {
+                                        try self.program.data_buffer.appendSlice(utils.alloc, str);
+                                    }
+                                },
+                                .num => |num| {
+                                    for (0..repeat_oper.count) |_| {
+                                        try appendImmediateBytes(&self.program.data_buffer, num, data_size);
+                                    }
+                                },
+                            }
                             i += consumed;
                         },
                         .Comma => {
@@ -327,24 +345,22 @@ fn parseDataInstr(self: *const Parser, tokens: []Token) ParserError!void {
                     i += 1;
                 }
 
-                const in_data = try self.program.data_vars.getOrPut(utils.alloc, instr.label);
+                const in_data = try self.program.data_vars.getOrPut(utils.alloc, label);
                 if (in_data.found_existing) {
-                    utils.printSrcLineErrorFmt("label '{s}' already defined in this block", .{instr.label}, self.program.file_name, self.program.content, line);
+                    utils.printSrcLineErrorFmt("label '{s}' already defined in this block", .{label}, self.program.file_name, self.program.content, line);
                     return ParserError.ParsingFailed;
-                } else if (self.program.funcs.contains(instr.label)) {
-                    utils.printSrcLineErrorFmt("label '{s}' already defined in code block", .{instr.label}, self.program.file_name, self.program.content, line);
+                } else if (self.program.funcs.contains(label)) {
+                    utils.printSrcLineErrorFmt("label '{s}' already defined in code block", .{label}, self.program.file_name, self.program.content, line);
                     return ParserError.ParsingFailed;
-                } else if (self.program.imports.contains(instr.label)) {
-                    utils.printSrcLineErrorFmt("label '{s}' already defined in import block", .{instr.label}, self.program.file_name, self.program.content, line);
+                } else if (self.program.imports.contains(label)) {
+                    utils.printSrcLineErrorFmt("label '{s}' already defined in import block", .{label}, self.program.file_name, self.program.content, line);
                     return ParserError.ParsingFailed;
                 } else {
                     in_data.value_ptr.visib = if (tokens[0].type == .HashIdent) .Export else .Local;
                     in_data.value_ptr.block = .Data;
-                    in_data.value_ptr.offset = 0;
-                    in_data.value_ptr.size = 0;
+                    in_data.value_ptr.offset = @truncate(offset);
+                    in_data.value_ptr.size = @truncate(self.program.data_buffer.items.len - offset);
                 }
-
-                try self.program.data_block.instr.append(utils.alloc, instr);
             } else {
                 utils.printSrcLineError("expected data size directive", self.program.file_name, self.program.content, line);
                 return ParserError.ParsingFailed;
@@ -361,7 +377,6 @@ fn parseDataInstr(self: *const Parser, tokens: []Token) ParserError!void {
 
 fn parseBssInstr(self: *const Parser, tokens: []Token) ParserError!void {
     const line = tokens[0].line;
-    var instr: BssInstruction = undefined;
     if (tokens[0].type == .Ident or tokens[0].type == .HashIdent) {
         if (tokens[1].type == .Colon) {
             if (tokens[2].type.isDataDirective()) {
@@ -372,23 +387,23 @@ fn parseBssInstr(self: *const Parser, tokens: []Token) ParserError!void {
                     .d64 => 8,
                     else => unreachable,
                 };
-                instr.label = tokens[0].value;
-                instr.size = data_size;
+                const label = self.program.token_values.items[tokens[0].val_ind];
+                var count: u32 = 0;
 
                 var i: usize = 3;
                 const token = tokens[i];
                 switch (token.type) {
-                    .NumberLiteral, .Minus, .Plus => {
+                    .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus => {
                         var parsed: usize = 0;
                         _ = try self.parseNumber(tokens[i..], &parsed);
                         i += parsed;
-                        instr.count = 1;
+                        count = 1;
                     },
                     .repeat => {
                         var consumed: usize = undefined;
-                        const data_oper = try self.parseRepeat(tokens[i + 1 ..], data_size, line, &consumed, 0x10000);
+                        const repeat_oper = try self.parseRepeat(tokens[i + 1 ..], data_size, line, &consumed, 0x10000);
                         i += consumed;
-                        instr.count = data_oper.repeat.count;
+                        count = repeat_oper.count;
                     },
                     else => {
                         utils.printSrcLineError("expected number or 'repeat' statement", self.program.file_name, self.program.content, line);
@@ -397,28 +412,34 @@ fn parseBssInstr(self: *const Parser, tokens: []Token) ParserError!void {
                 }
 
                 if (tokens[i + 1].type != .NewLine) {
-                    utils.printSrcLineError("expected end of line", self.program.file_name, self.program.content, line);
+                    utils.printSrcLineErrorFmt("expected end of line after {s}", .{self.program.token_values.items[tokens[i].val_ind]}, self.program.file_name, self.program.content, line);
                     return ParserError.ParsingFailed;
                 }
 
-                const in_data = try self.program.data_vars.getOrPut(utils.alloc, instr.label);
+                const in_data = try self.program.data_vars.getOrPut(utils.alloc, label);
                 if (in_data.found_existing) {
-                    utils.printSrcLineErrorFmt("label '{s}' already defined in data or bss block", .{instr.label}, self.program.file_name, self.program.content, line);
+                    utils.printSrcLineErrorFmt("label '{s}' already defined in data or bss block", .{label}, self.program.file_name, self.program.content, line);
                     return ParserError.ParsingFailed;
-                } else if (self.program.funcs.contains(instr.label)) {
-                    utils.printSrcLineErrorFmt("label '{s}' already defined in code block", .{instr.label}, self.program.file_name, self.program.content, line);
+                } else if (self.program.funcs.contains(label)) {
+                    utils.printSrcLineErrorFmt("label '{s}' already defined in code block", .{label}, self.program.file_name, self.program.content, line);
                     return ParserError.ParsingFailed;
-                } else if (self.program.imports.contains(instr.label)) {
-                    utils.printSrcLineErrorFmt("label '{s}' already defined in import block", .{instr.label}, self.program.file_name, self.program.content, line);
+                } else if (self.program.imports.contains(label)) {
+                    utils.printSrcLineErrorFmt("label '{s}' already defined in import block", .{label}, self.program.file_name, self.program.content, line);
                     return ParserError.ParsingFailed;
                 } else {
+                    const next_aligned = std.mem.alignForward(u32, self.program.bss_len, data_size);
+                    const padding = next_aligned - self.program.bss_len;
+                    self.program.bss_len += padding;
+                    const offset = self.program.bss_len;
+                    const size = data_size * count;
+
+                    self.program.bss_len += size;
+
                     in_data.value_ptr.visib = if (tokens[0].type == .HashIdent) .Export else .Local;
                     in_data.value_ptr.block = .Bss;
-                    in_data.value_ptr.offset = 0;
-                    in_data.value_ptr.size = 0;
+                    in_data.value_ptr.offset = offset;
+                    in_data.value_ptr.size = size;
                 }
-
-                try self.program.bss_block.instr.append(utils.alloc, instr);
             } else {
                 utils.printSrcLineError("expected data size directive", self.program.file_name, self.program.content, line);
                 return ParserError.ParsingFailed;
@@ -595,7 +616,7 @@ fn parseMemAddrOperand(self: *const Parser, tokens: []Token, consumed: *usize) P
                 }
                 op = .reg;
                 signs = 0;
-            } else if (t == .NumberLiteral) {
+            } else if (t == .NumberLiteral or t == .HexNumLiteral or t == .BinNumLiteral) {
                 if (op == .numaster) {
                     utils.printSrcLineError("invalid scaled index", self.program.file_name, self.program.content, line);
                     return ParserError.ParsingFailed;
@@ -717,7 +738,7 @@ fn parseCodeOperand(self: *const Parser, tokens: []Token) ParserError!CodeOperan
                 return ParserError.ParsingFailed;
             }
             signs = 0;
-        } else if (t == .NumberLiteral) {
+        } else if (t == .NumberLiteral or t == .HexNumLiteral or t == .BinNumLiteral) {
             var parsed: usize = 0;
             const value = try self.parseNumber(tokens[i - signs ..], &parsed);
             if (op == .lbl) {
@@ -732,7 +753,7 @@ fn parseCodeOperand(self: *const Parser, tokens: []Token) ParserError!CodeOperan
             }
             signs = 0;
         } else if (t == .StringLiteral) {
-            if (token.value.len != 1) {
+            if (self.program.token_values.items[token.val_ind].len != 1) {
                 utils.printSrcLineError("string literal must be 1 character long", self.program.file_name, self.program.content, token.line);
                 return ParserError.ParsingFailed;
             }
@@ -742,7 +763,7 @@ fn parseCodeOperand(self: *const Parser, tokens: []Token) ParserError!CodeOperan
                 2 => (tokens[i - 1].type == .Minus or tokens[i - 2].type == .Minus) and !(tokens[i - 1].type == .Minus and tokens[i - 2].type == .Minus),
                 else => unreachable,
             };
-            const value = token.value[0];
+            const value = self.program.token_values.items[token.val_ind][0];
             if (op == .lbl) {
                 oper.label.d = if (!neg) .{ .u = value } else .{ .i = -@as(i32, value) };
                 op = .lblimm;
@@ -779,7 +800,7 @@ fn parseCodeInstr(self: *Parser, tokens: []Token) ParserError!void {
     var instr: CodeInstruction = undefined;
     if (tokens[0].type.isAnyIdent()) {
         if (tokens.len > 1 and tokens[1].type == .Colon) {
-            const label = tokens[0].value;
+            const label = self.program.token_values.items[tokens[0].val_ind];
             const is_func = if (tokens[0].type == .DotIdent) false else true;
 
             if (is_func) {
@@ -864,7 +885,7 @@ fn parseImportBlock(self: *const Parser, tokens: []Token) ParserError!usize {
     if (tokens[0].type == .NewLine) {
         import_name = null;
     } else if (tokens[0].type == .StringLiteral and tokens[1].type == .NewLine) {
-        import_name = tokens[0].value;
+        import_name = self.program.token_values.items[tokens[0].val_ind];
         start += 1;
     } else {
         utils.printSrcLineError("unexpected symbols on line", self.program.file_name, self.program.content, tokens[0].line);
@@ -882,15 +903,16 @@ fn parseImportBlock(self: *const Parser, tokens: []Token) ParserError!usize {
     for (tokens[start..], start..) |token, i| {
         if (expect_symbol) {
             if (token.type == .Ident) {
-                const in_import = try self.program.imports.getOrPut(utils.alloc, token.value);
+                const label = self.program.token_values.items[token.val_ind];
+                const in_import = try self.program.imports.getOrPut(utils.alloc, label);
                 if (in_import.found_existing) {
-                    utils.printSrcLineErrorFmt("label '{s}' already defined in this block", .{token.value}, self.program.file_name, self.program.content, token.line);
+                    utils.printSrcLineErrorFmt("label '{s}' already defined in this block", .{label}, self.program.file_name, self.program.content, token.line);
                     return ParserError.ParsingFailed;
-                } else if (self.program.data_vars.contains(token.value)) {
-                    utils.printSrcLineErrorFmt("label '{s}' already defined in data block", .{token.value}, self.program.file_name, self.program.content, token.line);
+                } else if (self.program.data_vars.contains(label)) {
+                    utils.printSrcLineErrorFmt("label '{s}' already defined in data block", .{label}, self.program.file_name, self.program.content, token.line);
                     return ParserError.ParsingFailed;
-                } else if (self.program.funcs.contains(token.value)) {
-                    utils.printSrcLineErrorFmt("label '{s}' already defined in code block", .{token.value}, self.program.file_name, self.program.content, token.line);
+                } else if (self.program.funcs.contains(label)) {
+                    utils.printSrcLineErrorFmt("label '{s}' already defined in code block", .{label}, self.program.file_name, self.program.content, token.line);
                     return ParserError.ParsingFailed;
                 } else {
                     in_import.value_ptr.* = shared_index;
@@ -963,7 +985,7 @@ pub fn parseTokens(self: *Parser) ParserError!void {
                 if (!self.program.flags.has_data) {
                     const len = try self.parseBlock(self.program.tokens.items[i + 1 ..], .data);
                     i += len;
-                    if (self.program.data_block.instr.items.len > 0) {
+                    if (self.program.data_buffer.items.len > 0) {
                         self.program.flags.has_data = true;
                     }
                 } else {
@@ -975,7 +997,7 @@ pub fn parseTokens(self: *Parser) ParserError!void {
                 if (!self.program.flags.has_bss) {
                     const len = try self.parseBlock(self.program.tokens.items[i + 1 ..], .bss);
                     i += len;
-                    if (self.program.bss_block.instr.items.len > 0) {
+                    if (self.program.bss_len > 0) {
                         self.program.flags.has_bss = true;
                     }
                 } else {

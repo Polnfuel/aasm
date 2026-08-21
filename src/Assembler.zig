@@ -2,9 +2,8 @@ const std = @import("std");
 const utils = @import("utils");
 const CliArgs = @import("CliArgs");
 const Program = @import("Program");
-const lexer = @import("lexer");
+const Lexer = @import("Lexer");
 const Parser = @import("Parser");
-const datagen = @import("datagen");
 const Codegen = @import("Codegen");
 const ObjFileElf = @import("ObjFileElf");
 const Linker = @import("Linker");
@@ -12,7 +11,7 @@ const Linker = @import("Linker");
 pub const Assembler = @This();
 
 const LoadFileError = error{SourceFileTooBig} || std.process.CurrentPathAllocError || std.Io.File.OpenError || std.Io.File.StatError || std.mem.Allocator.Error || std.Io.Reader.Error;
-pub const AssemblerError = error{AssemblyError} || LoadFileError || lexer.LexerError || Parser.ParserError || datagen.DatagenError || Codegen.CodegenError || ObjFileElf.ObjectError || Linker.LinkerError;
+pub const AssemblerError = error{AssemblyError} || LoadFileError || Lexer.LexerError || Parser.ParserError || Codegen.CodegenError || ObjFileElf.ObjectError || Linker.LinkerError;
 
 pub const CompUnit = struct {
     rel_path: []const u8,
@@ -82,12 +81,7 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
         const abs_path = try std.fs.path.resolve(utils.alloc, &.{ utils.comp_dir, rel_path });
         defer utils.alloc.free(abs_path);
 
-        // std.debug.print("aasm.abs_path: {s}\n", .{abs_path});
-        // std.debug.print("aasm.rel_path: {s}\n", .{input_rel_path});
-
         const basename = std.fs.path.basename(input_rel_path);
-
-        // std.debug.print("aasm.basename: {s}\n", .{basename});
 
         const program = try utils.alloc.create(Program);
         errdefer utils.alloc.destroy(program);
@@ -98,7 +92,7 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
         errdefer program.deinit();
 
         try program.lexicalAnalyzis();
-        // lexer.printTokens(program.tokens);
+        // Lexer.printTokens(program);
 
         try program.syntaxAnalyzis();
         // program.printProgram();
@@ -113,12 +107,6 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
             }
         }
 
-        if (program.flags.has_data) {
-            try program.dataGen();
-        }
-        if (program.flags.has_bss) {
-            program.bssGen();
-        }
         if (program.flags.has_code) {
             try program.codeGen();
         }

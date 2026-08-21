@@ -1,10 +1,9 @@
 const std = @import("std");
 const utils = @import("utils");
-const lexer = @import("lexer");
-const TokenType = lexer.TokenType;
-const Token = lexer.Token;
+const Lexer = @import("Lexer");
+const TokenType = Lexer.TokenType;
+const Token = Lexer.Token;
 const Parser = @import("Parser");
-const datagen = @import("datagen");
 const Codegen = @import("Codegen");
 
 const Buffer = std.ArrayList(u8);
@@ -118,43 +117,17 @@ pub const LabelInstruction = struct {
     line: u16,
 };
 
-pub const DataOperand = union(enum) {
-    str: []const u8,
-    num: Immediate,
-    repeat: struct {
-        count: u32,
-        item: union(enum) {
-            str: []u8,
-            num: Immediate,
-        },
-    },
-};
-
-pub const DataInstruction = struct {
-    label: []const u8,
-    size: u8,
-    data: std.ArrayList(DataOperand),
-};
-
-pub const BssInstruction = struct {
-    label: []const u8,
-    size: u8,
+pub const RepeatOperand = struct {
     count: u32,
+    item: union(enum) {
+        str: []const u8,
+        num: Immediate,
+    },
 };
 
 pub const CodeInstruction = union(enum) {
     label: LabelInstruction,
     cpu: CpuInstruction,
-};
-
-pub const DataBlock = struct {
-    instr: std.ArrayList(DataInstruction) = .empty,
-    buffer: Buffer = .empty,
-};
-
-pub const BssBlock = struct {
-    instr: std.ArrayList(BssInstruction) = .empty,
-    buffer_len: usize = 0,
 };
 
 pub const CodeBlock = struct {
@@ -188,8 +161,8 @@ const BlockType = enum { Data, Bss };
 const DataVariable = struct {
     visib: LabelType,
     block: BlockType,
-    offset: usize,
-    size: usize,
+    offset: u32,
+    size: u32,
 };
 
 const Function = struct {
@@ -215,9 +188,10 @@ file_name: []const u8,
 content: []const u8,
 flags: ProgramFlags,
 tokens: std.ArrayList(Token),
+token_values: std.ArrayList([]const u8),
 entry: []const u8,
-data_block: DataBlock,
-bss_block: BssBlock,
+data_buffer: std.ArrayList(u8),
+bss_len: u32,
 code_block: CodeBlock,
 shared_libs: std.ArrayList([]const u8),
 data_vars: std.StringHashMapUnmanaged(DataVariable),
@@ -235,9 +209,10 @@ pub fn init(self: *Program, content: []const u8, file_name: []const u8, debug: b
     self.content = content;
     self.flags = .{ .debug = debug, .pic = pic, .warnings = warnings, .quiet = quiet };
     self.tokens = .empty;
+    self.token_values = .empty;
     self.entry = &.{};
-    self.data_block = DataBlock{};
-    self.bss_block = BssBlock{};
+    self.data_buffer = .empty;
+    self.bss_len = 0;
     self.code_block = CodeBlock{};
     self.shared_libs = .empty;
     self.data_vars = .empty;
@@ -247,21 +222,14 @@ pub fn init(self: *Program, content: []const u8, file_name: []const u8, debug: b
     self.line_program = .empty;
 }
 
-pub fn lexicalAnalyzis(self: *Program) lexer.LexerError!void {
-    self.tokens = try lexer.tokenizeContent(self.content, self.file_name);
+pub fn lexicalAnalyzis(self: *Program) Lexer.LexerError!void {
+    var lexer = Lexer.init(self);
+    try lexer.tokenizeContent();
 }
 
 pub fn syntaxAnalyzis(self: *Program) Parser.ParserError!void {
     var parser = Parser.init(self);
     try parser.parseTokens();
-}
-
-pub fn dataGen(self: *Program) datagen.DatagenError!void {
-    try datagen.genDataBlockBuffer(self);
-}
-
-pub fn bssGen(self: *Program) void {
-    datagen.genBssBlock(self);
 }
 
 pub fn codeGen(self: *Program) Codegen.CodegenError!void {
@@ -282,58 +250,6 @@ pub fn printProgram(self: *Program) void {
         std.debug.print("entry: {s}\n", .{self.entry});
     }
 
-    if (self.flags.has_data) {
-        std.debug.print("data block\n", .{});
-        for (self.data_block.instr.items) |instr| {
-            std.debug.print(" {s}: d{d} ", .{ instr.label, instr.size * 8 });
-            for (instr.data.items, 0..) |item, i| {
-                switch (item) {
-                    .num => {
-                        switch (item.num) {
-                            .i => {
-                                std.debug.print("{d}", .{item.num.i});
-                            },
-                            .u => {
-                                std.debug.print("{d}", .{item.num.u});
-                            },
-                        }
-                    },
-                    .str => {
-                        std.debug.print("\"{s}\"", .{item.str});
-                    },
-                    .repeat => {
-                        switch (item.repeat.item) {
-                            .num => {
-                                switch (item.repeat.item.num) {
-                                    .i => {
-                                        std.debug.print("rep({d}, {d})", .{ item.repeat.count, item.repeat.item.num.i });
-                                    },
-                                    .u => {
-                                        std.debug.print("rep({d}, {d})", .{ item.repeat.count, item.repeat.item.num.u });
-                                    },
-                                }
-                            },
-                            .str => {
-                                std.debug.print("rep({d}, \"{s}\")", .{ item.repeat.count, item.repeat.item.str });
-                            },
-                        }
-                    },
-                }
-                if (i < instr.data.items.len - 1) {
-                    std.debug.print(", ", .{});
-                }
-            }
-            std.debug.print("\n", .{});
-        }
-        std.debug.print("\n", .{});
-    }
-    if (self.flags.has_bss) {
-        std.debug.print("bss block\n", .{});
-        for (self.bss_block.instr.items) |instr| {
-            std.debug.print(" {s}: d{d} x{d}\n", .{ instr.label, instr.size * 8, instr.count });
-        }
-        std.debug.print("\n", .{});
-    }
     if (self.flags.has_code) {
         std.debug.print("code block\n", .{});
         for (self.code_block.instr.items) |instr| {
@@ -402,7 +318,7 @@ pub fn printSymbolTable(self: *Program) void {
     std.debug.print("\n", .{});
 
     std.debug.print("data buffer\n", .{});
-    printBuffer(self.data_block.buffer.items);
+    printBuffer(self.data_buffer.items);
     std.debug.print("\n", .{});
 
     std.debug.print("code buffer\n", .{});
@@ -492,11 +408,7 @@ pub fn printCPUInstruction(instr: CpuInstruction) void {
 pub fn deinit(self: *Program) void {
     utils.alloc.free(self.content);
     self.tokens.deinit(utils.alloc);
-    for (self.data_block.instr.items) |*instr| {
-        instr.data.deinit(utils.alloc);
-    }
-    self.data_block.instr.deinit(utils.alloc);
-    self.bss_block.instr.deinit(utils.alloc);
+    self.token_values.deinit(utils.alloc);
     for (self.code_block.instr.items) |*instr| {
         switch (instr.*) {
             .cpu => instr.cpu.operands.deinit(utils.alloc),
@@ -504,7 +416,7 @@ pub fn deinit(self: *Program) void {
         }
     }
     self.code_block.instr.deinit(utils.alloc);
-    self.data_block.buffer.deinit(utils.alloc);
+    self.data_buffer.deinit(utils.alloc);
     self.code_block.buffer.deinit(utils.alloc);
     self.shared_libs.deinit(utils.alloc);
     self.data_vars.deinit(utils.alloc);

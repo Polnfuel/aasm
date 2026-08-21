@@ -549,7 +549,7 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
     }
     secs.data.offset = std.mem.alignForward(usize, secs.text.offset + secs.text.size, 0x8);
     if (program.flags.has_data) {
-        buffs.data = program.data_block.buffer;
+        buffs.data = program.data_buffer;
         secs.data.ind = incInd(&ind);
         secs.data.name = try self.appendSectionName(".data");
         secs.data.size = buffs.data.items.len;
@@ -558,7 +558,7 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
     if (program.flags.has_bss) {
         secs.bss.ind = incInd(&ind);
         secs.bss.name = try self.appendSectionName(".bss");
-        secs.bss.size = program.bss_block.buffer_len;
+        secs.bss.size = program.bss_len;
     }
     if (program.relocations.items.len > 0) {
         secs.relatext.ind = incInd(&ind);
@@ -644,7 +644,6 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
 
     const shtable = std.mem.alignForward(usize, secs.shstrtab.offset + secs.shstrtab.size, 0x8);
     const file_size = shtable + @as(usize, (secs.shstrtab.ind + 1)) * @sizeOf(elf.Elf64.Shdr);
-    std.debug.print("shtable: {x}, filesize: {x}\n", .{ shtable, file_size });
 
     const file_buffer = try utils.alloc.alloc(u8, file_size);
     defer utils.alloc.free(file_buffer);
@@ -685,13 +684,11 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
         _ = try writer.splatByte(0, padding);
         _ = try writer.write(buffs.text.items);
     }
-    std.debug.print("writer.end c: {x}\n", .{writer.end});
     if (program.flags.has_data) {
         padding = secs.data.offset - writer.end;
         _ = try writer.splatByte(0, padding);
         _ = try writer.write(buffs.data.items);
     }
-    std.debug.print("writer.end d: {x}\n", .{writer.end});
     if (secs.relatext.size > 0) {
         padding = secs.relatext.offset - writer.end;
         _ = try writer.splatByte(0, padding);
@@ -699,7 +696,6 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             try writer.writeStruct(rela, .little);
         }
     }
-    std.debug.print("writer.end rt: {x}\n", .{writer.end});
     if (program.flags.debug) {
         _ = try writer.write(buffs.debug_line.items);
         _ = try writer.write(buffs.debug_line_str.items);
@@ -713,17 +709,12 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             try writer.writeStruct(rela, .little);
         }
     }
-    std.debug.print("writer.end db: {x}\n", .{writer.end});
     for (buffs.symtab.items) |sym| {
         try writer.writeStruct(sym, .little);
     }
-    std.debug.print("writer.end sy: {x}\n", .{writer.end});
     _ = try writer.write(buffs.strtab.items);
-    std.debug.print("writer.end st: {x}\n", .{writer.end});
     _ = try writer.write(buffs.shstrtab.items);
-    std.debug.print("writer.end sh: {x}\n", .{writer.end});
 
-    std.debug.print("shtable: {x}, writer.end: {x}\n", .{ shtable, writer.end });
     padding = shtable - writer.end;
     _ = try writer.splatByte(0, padding);
     try writer.writeStruct(elf.Elf64.Shdr{ .name = 0, .type = .NULL, .addr = 0, .addralign = 0, .entsize = 0, .flags = .{ .shf = .{} }, .info = 0, .link = 0, .offset = 0, .size = 0 }, .little);

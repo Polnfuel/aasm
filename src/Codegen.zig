@@ -1,8 +1,8 @@
 const std = @import("std");
 const utils = @import("utils");
 
-const lexer = @import("lexer");
-const TokenType = lexer.TokenType;
+const Lexer = @import("Lexer");
+const TokenType = Lexer.TokenType;
 
 const Program = @import("Program");
 const Register = Program.Register;

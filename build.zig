@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const with_llvm = b.option(bool, "llvm", "Use LLVM backend") orelse false;
+    const exe_name = b.option([]const u8, "name", "specify output name") orelse "aasm";
 
     const utils = b.addModule("utils", .{
         .root_source_file = b.path("src/utils.zig"),
@@ -23,7 +24,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const lexer = b.addModule("lexer", .{
-        .root_source_file = b.path("src/lexer.zig"),
+        .root_source_file = b.path("src/Lexer.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -37,7 +38,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "utils", .module = utils },
-            .{ .name = "lexer", .module = lexer },
+            .{ .name = "Lexer", .module = lexer },
         },
     });
 
@@ -47,24 +48,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "utils", .module = utils },
-            .{ .name = "lexer", .module = lexer },
+            .{ .name = "Lexer", .module = lexer },
             .{ .name = "Parser", .module = parser },
         },
     });
 
+    lexer.addImport("Program", program);
     parser.addImport("Program", program);
-
-    const datagen = b.addModule("datagen", .{
-        .root_source_file = b.path("src/datagen.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "utils", .module = utils },
-            .{ .name = "Program", .module = program },
-        },
-    });
-
-    program.addImport("datagen", datagen);
 
     const codegen = b.addModule("Codegen", .{
         .root_source_file = b.path("src/Codegen.zig"),
@@ -72,7 +62,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "utils", .module = utils },
-            .{ .name = "lexer", .module = lexer },
+            .{ .name = "Lexer", .module = lexer },
             .{ .name = "Program", .module = program },
         },
     });
@@ -107,9 +97,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "utils", .module = utils },
             .{ .name = "CliArgs", .module = cli_args },
             .{ .name = "Program", .module = program },
-            .{ .name = "lexer", .module = lexer },
+            .{ .name = "Lexer", .module = lexer },
             .{ .name = "Parser", .module = parser },
-            .{ .name = "datagen", .module = datagen },
             .{ .name = "Codegen", .module = codegen },
             .{ .name = "ObjFileElf", .module = objfile },
             .{ .name = "Linker", .module = linker },
@@ -130,7 +119,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe = b.addExecutable(.{
-        .name = "aasm",
+        .name = exe_name,
         .root_module = main_module,
     });
 
