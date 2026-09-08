@@ -4,6 +4,7 @@ const dwarf = std.dwarf;
 
 const utils = @import("utils");
 const Program = @import("Program");
+const Label = Program.Label;
 
 /// Elf64 object file representation
 const ObjFileElf = @This();
@@ -166,14 +167,14 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
     const buffs = self.buffs;
     const secs = self.sections;
 
-    var symbols_map: std.StringHashMapUnmanaged(u32) = .empty;
+    var symbols_map: std.AutoHashMapUnmanaged(Label, u32) = .empty;
     defer symbols_map.deinit(utils.alloc);
 
     var funcs = program.funcs.iterator();
     while (funcs.next()) |sym| {
         if (sym.value_ptr.visib == .Local) {
             const symbol = elf.Elf64.Sym{
-                .name = try self.appendName(sym.key_ptr.*),
+                .name = try self.appendName(utils.stringValue(sym.key_ptr.*)),
                 .value = sym.value_ptr.offset,
                 .size = sym.value_ptr.size,
                 .info = .{ .bind = .LOCAL, .type = .FUNC },
@@ -190,7 +191,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
     while (data_vars.next()) |sym| {
         if (sym.value_ptr.visib == .Local) {
             const symbol = elf.Elf64.Sym{
-                .name = try self.appendName(sym.key_ptr.*),
+                .name = try self.appendName(utils.stringValue(sym.key_ptr.*)),
                 .value = sym.value_ptr.offset,
                 .size = sym.value_ptr.size,
                 .info = .{ .bind = .LOCAL, .type = .OBJECT },
@@ -201,7 +202,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
                 },
             };
 
-            if (program.flags.debug) {
+            if (utils.flags.debug) {
                 try self.addVariableDebugInfo(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             }
             try symbols_map.put(utils.alloc, sym.key_ptr.*, @truncate(buffs.symtab.items.len));
@@ -215,7 +216,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
     while (funcs.next()) |sym| {
         if (sym.value_ptr.visib == .Export) {
             const symbol = elf.Elf64.Sym{
-                .name = try self.appendName(sym.key_ptr.*),
+                .name = try self.appendName(utils.stringValue(sym.key_ptr.*)),
                 .value = sym.value_ptr.offset,
                 .size = sym.value_ptr.size,
                 .info = .{ .bind = .GLOBAL, .type = .FUNC },
@@ -232,7 +233,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
     while (data_vars.next()) |sym| {
         if (sym.value_ptr.visib == .Export) {
             const symbol = elf.Elf64.Sym{
-                .name = try self.appendName(sym.key_ptr.*),
+                .name = try self.appendName(utils.stringValue(sym.key_ptr.*)),
                 .value = sym.value_ptr.offset,
                 .size = sym.value_ptr.size,
                 .info = .{ .bind = .GLOBAL, .type = .OBJECT },
@@ -243,7 +244,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
                 },
             };
 
-            if (program.flags.debug) {
+            if (utils.flags.debug) {
                 try self.addVariableDebugInfo(sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             }
             try symbols_map.put(utils.alloc, sym.key_ptr.*, @truncate(buffs.symtab.items.len));
@@ -251,7 +252,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
         }
     }
 
-    var lib_imports: std.StringHashMapUnmanaged(void) = .empty;
+    var lib_imports: std.AutoHashMapUnmanaged(Label, void) = .empty;
     defer lib_imports.deinit(utils.alloc);
 
     var imports = program.imports.iterator();
@@ -261,7 +262,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
         }
 
         const symbol = elf.Elf64.Sym{
-            .name = try self.appendName(sym.key_ptr.*),
+            .name = try self.appendName(utils.stringValue(sym.key_ptr.*)),
             .value = 0,
             .size = 0,
             .info = .{ .bind = .GLOBAL, .type = .NOTYPE },
@@ -320,9 +321,9 @@ fn patchDebugInfoHeader(self: *ObjFileElf) std.mem.Allocator.Error!void {
     std.mem.writeInt(u32, self.buffs.debug_info.items[0..4], @truncate(unit_length), .little);
 }
 
-fn addVariableDebugInfo(self: *ObjFileElf, name: []const u8, sym_ind: u32) std.mem.Allocator.Error!void {
+fn addVariableDebugInfo(self: *ObjFileElf, name: Label, sym_ind: u32) std.mem.Allocator.Error!void {
     const name_offset: u32 = @truncate(self.buffs.debug_str.items.len);
-    try self.buffs.debug_str.appendSlice(utils.alloc, name);
+    try self.buffs.debug_str.appendSlice(utils.alloc, utils.stringValue(name));
     try self.buffs.debug_str.append(utils.alloc, 0);
 
     const die_offset: u32 = @truncate(self.buffs.debug_info.items.len);
@@ -538,7 +539,7 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
 
     var ind: u8 = 1;
 
-    secs.text.offset = std.mem.alignForward(usize, @sizeOf(elf.Elf64.Ehdr), 0x8);
+    secs.text.offset = std.mem.alignForward(u64, @sizeOf(elf.Elf64.Ehdr), 0x8);
     if (program.flags.has_code) {
         buffs.text = program.code_block.buffer;
         secs.text.ind = incInd(&ind);
@@ -568,7 +569,7 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
     } else {
         secs.relatext.offset = secs.bss.offset;
     }
-    if (program.flags.debug) {
+    if (utils.flags.debug) {
         secs.debug_line.ind = incInd(&ind);
         secs.debug_line_str.ind = incInd(&ind);
         secs.reladebug_line.ind = incInd(&ind);
@@ -600,7 +601,7 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
     secs.symtab.name = try self.appendSectionName(".symtab");
 
     try self.addSymbolsToSymtab(program);
-    if (program.flags.debug) {
+    if (utils.flags.debug) {
         try self.patchDebugInfoHeader();
         secs.debug_line.offset = secs.relatext.offset + secs.relatext.size;
         secs.debug_line.size = buffs.debug_line.items.len;
@@ -631,7 +632,7 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
     secs.shstrtab.offset = secs.strtab.offset + secs.strtab.size;
     secs.shstrtab.size = buffs.shstrtab.items.len;
 
-    if (!program.flags.quiet) {
+    if (!utils.flags.quiet) {
         secs.print();
         self.printStrtab();
         self.printSymtab();
@@ -644,6 +645,10 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
 
     const shtable = std.mem.alignForward(usize, secs.shstrtab.offset + secs.shstrtab.size, 0x8);
     const file_size = shtable + @as(usize, (secs.shstrtab.ind + 1)) * @sizeOf(elf.Elf64.Shdr);
+    if (!utils.flags.quiet) {
+        std.debug.print("shtable start: {x}\n", .{shtable});
+        std.debug.print("file size: {d}\n", .{file_size});
+    }
 
     const file_buffer = try utils.alloc.alloc(u8, file_size);
     defer utils.alloc.free(file_buffer);
@@ -696,7 +701,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             try writer.writeStruct(rela, .little);
         }
     }
-    if (program.flags.debug) {
+    if (utils.flags.debug) {
         _ = try writer.write(buffs.debug_line.items);
         _ = try writer.write(buffs.debug_line_str.items);
         for (buffs.reladebug_line.items) |rela| {
@@ -709,6 +714,8 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             try writer.writeStruct(rela, .little);
         }
     }
+    padding = secs.symtab.offset - writer.end;
+    _ = try writer.splatByte(0, padding);
     for (buffs.symtab.items) |sym| {
         try writer.writeStruct(sym, .little);
     }
@@ -774,7 +781,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             .entsize = @sizeOf(elf.Elf64.Rela),
         }, .little);
     }
-    if (program.flags.debug) {
+    if (utils.flags.debug) {
         try writer.writeStruct(elf.Elf64.Shdr{
             .name = secs.debug_line.name,
             .type = .PROGBITS,

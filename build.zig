@@ -23,6 +23,8 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    utils.addImport("CliArgs", cli_args);
+
     const lexer = b.addModule("lexer", .{
         .root_source_file = b.path("src/Lexer.zig"),
         .target = target,
@@ -53,6 +55,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    utils.addImport("Program", program);
     lexer.addImport("Program", program);
     parser.addImport("Program", program);
 
@@ -129,13 +132,22 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    const mod_tests = b.addTest(.{
-        .root_module = codegen,
-        .filters = b.args orelse &.{},
+    const codegen_test = b.addTest(.{
+        .root_module = b.addModule("codgentest", .{
+            .root_source_file = b.path("test/codegen.zig"),
+            .target = target,
+            .imports = &.{
+                .{ .name = "utils", .module = utils },
+                .{ .name = "CliArgs", .module = cli_args },
+                .{ .name = "Program", .module = program },
+                .{ .name = "Lexer", .module = lexer },
+                .{ .name = "Parser", .module = parser },
+                .{ .name = "Codegen", .module = codegen },
+            },
+        }),
     });
 
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-
+    const run_codgen_test = b.addRunArtifact(codegen_test);
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_codgen_test.step);
 }

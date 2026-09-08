@@ -18,9 +18,10 @@ fn startAASM(init: std.process.Init) !void {
     try aasm.run(cli_args);
 }
 
-pub fn main(init: std.process.Init) void {
+pub fn main(init: std.process.Init) u8 {
     startAASM(init) catch |err| {
         utils.handleError(err);
+        return 1;
     };
-    // std.process.exit(0);
+    return 0;
 }

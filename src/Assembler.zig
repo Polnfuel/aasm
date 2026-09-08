@@ -10,8 +10,7 @@ const Linker = @import("Linker");
 
 pub const Assembler = @This();
 
-const LoadFileError = error{SourceFileTooBig} || std.process.CurrentPathAllocError || std.Io.File.OpenError || std.Io.File.StatError || std.mem.Allocator.Error || std.Io.Reader.Error;
-pub const AssemblerError = error{AssemblyError} || LoadFileError || Lexer.LexerError || Parser.ParserError || Codegen.CodegenError || ObjFileElf.ObjectError || Linker.LinkerError;
+pub const AssemblerError = error{AssemblyError} || utils.LoadFileError || Lexer.LexerError || Parser.ParserError || Codegen.CodegenError || ObjFileElf.ObjectError || Linker.LinkerError;
 
 pub const CompUnit = struct {
     rel_path: []const u8,
@@ -19,46 +18,100 @@ pub const CompUnit = struct {
     objfile: *ObjFileElf,
 };
 
-pub const AasmFlags = struct {
-    strip: bool = false,
-    debug: bool = false,
-    pic: bool = false,
-    warnings: bool = true,
-    quiet: bool = false,
-};
-
-flags: AasmFlags = AasmFlags{},
 comp_units: std.ArrayList(CompUnit) = .empty,
 
-fn loadFileContent(abs_path: []const u8) LoadFileError![]const u8 {
-    const file = std.Io.Dir.openFileAbsolute(utils.io, abs_path, .{ .mode = .read_only }) catch |err| {
-        switch (err) {
-            std.Io.File.OpenError.FileNotFound => {
-                utils.printErrorFmt("file '{s}' not found", .{abs_path});
-            },
-            else => {},
-        }
-        return err;
-    };
-    defer file.close(utils.io);
+/// First stage of Assembler job
+fn createProgramsAndObjfiles(self: *Assembler, cli_inputs: [][]const u8, cli_output: []const u8) AssemblerError!void {
+    self.comp_units = try .initCapacity(utils.alloc, cli_inputs.len);
+    for (cli_inputs) |path| {
+        const rel_path = try utils.alloc.dupe(u8, path);
+        errdefer utils.alloc.free(rel_path);
+        const abs_path = try std.fs.path.resolve(utils.alloc, &.{ utils.comp_dir, path });
+        defer utils.alloc.free(abs_path);
 
-    const file_stat = try file.stat(utils.io);
-    const file_size = file_stat.size;
+        const content = try utils.loadFileContent(abs_path);
+        const basename = std.fs.path.basename(rel_path);
 
-    if (file_size > std.math.pow(u64, 2, 20)) {
-        utils.printErrorFmt("file '{s}' with size {d} B exceeds 1 MiB file size limit", .{ abs_path, file_size });
-        return LoadFileError.SourceFileTooBig;
+        const program = try utils.alloc.create(Program);
+        errdefer utils.alloc.destroy(program);
+
+        program.init(content, basename);
+        errdefer program.deinit();
+
+        const object_file = try utils.alloc.create(ObjFileElf);
+        errdefer utils.alloc.destroy(object_file);
+
+        try object_file.init(cli_output);
+        errdefer object_file.deinit();
+
+        self.comp_units.appendAssumeCapacity(.{ .rel_path = rel_path, .program = program, .objfile = object_file });
     }
+}
 
-    var content = try utils.alloc.alloc(u8, file_size + 1);
-    errdefer utils.alloc.free(content);
+/// Second stage of Assembler job
+fn lexicalAnalyzis(self: *Assembler) AssemblerError!void {
+    for (self.comp_units.items) |unit| {
+        var lexer = Lexer.init(unit.program);
+        try lexer.tokenizeContent();
 
-    var file_reader = file.reader(utils.io, content);
-    var reader = &file_reader.interface;
-    try reader.readSliceAll(content[0..file_size]);
-    content[file_size] = '\n';
+        // Lexer.printTokens(unit.program);
+    }
+    utils.deinitStrings();
+}
 
-    return content;
+/// Third stage of Assembler job
+fn syntaxAnalyzis(self: *Assembler) AssemblerError!void {
+    for (self.comp_units.items) |unit| {
+        var parser = Parser.init(unit.program);
+        try parser.parseTokens();
+
+        if (!unit.program.flags.has_code and !unit.program.flags.has_data and !unit.program.flags.has_bss) {
+            utils.printSrcFileError("source file doesn't contain any data or code block", unit.program);
+            return AssemblerError.AssemblyError;
+        } else if (!unit.program.flags.has_code and utils.flags.debug) {
+            // TODO: Still generate debug info about compilation unit
+            if (utils.flags.warnings) {
+                utils.printSrcFileWarning("source file doesn't contain code block to debug (debug info will not be generated)", unit.program);
+            }
+        }
+
+        // unit.program.printProgram();
+    }
+}
+
+/// Fourth stage of Assembler job
+fn codegenPrograms(self: *Assembler) AssemblerError!void {
+    for (self.comp_units.items) |unit| {
+        if (unit.program.flags.has_code) {
+            var codegen = Codegen.init(unit.program);
+            defer codegen.deinit();
+            try codegen.generateCode();
+
+            // unit.program.printSymbolTable();
+        }
+    }
+}
+
+/// Fifth stage of Assembler job
+fn resolveObjfiles(self: *Assembler) AssemblerError!void {
+    for (self.comp_units.items) |unit| {
+        try unit.objfile.compileProgram(unit.program, unit.rel_path);
+    }
+}
+
+fn writeObjfiles(self: *Assembler) AssemblerError!void {
+    for (self.comp_units.items) |unit| {
+        try unit.objfile.writeObjFile(unit.program);
+    }
+}
+
+fn linkObjfiles(self: *Assembler, cli_output: []const u8, cli_search_paths: [][]const u8) AssemblerError!void {
+    const linker = try utils.alloc.create(Linker);
+    defer utils.alloc.destroy(linker);
+    try linker.init(cli_output, self.comp_units.items, cli_search_paths);
+    defer linker.deinit();
+
+    try linker.linkObjects();
 }
 
 pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
@@ -69,74 +122,19 @@ pub fn run(self: *Assembler, cli_args: CliArgs) AssemblerError!void {
         utils.printMessage("Help");
         return;
     } else {
-        self.flags.strip = cli_args.strip;
-        self.flags.debug = cli_args.debug;
-        self.flags.pic = cli_args.pic;
-        self.flags.warnings = !cli_args.no_warnings;
-        self.flags.quiet = cli_args.quiet;
+        utils.setFlags(cli_args);
     }
-    for (cli_args.input_paths.items) |rel_path| {
-        const input_rel_path = try utils.alloc.dupe(u8, rel_path);
 
-        const abs_path = try std.fs.path.resolve(utils.alloc, &.{ utils.comp_dir, rel_path });
-        defer utils.alloc.free(abs_path);
-
-        const basename = std.fs.path.basename(input_rel_path);
-
-        const program = try utils.alloc.create(Program);
-        errdefer utils.alloc.destroy(program);
-
-        const content = try loadFileContent(abs_path);
-
-        program.init(content, basename, self.flags.debug, self.flags.pic, self.flags.warnings, self.flags.quiet);
-        errdefer program.deinit();
-
-        try program.lexicalAnalyzis();
-        // Lexer.printTokens(program);
-
-        try program.syntaxAnalyzis();
-        // program.printProgram();
-
-        if (!program.flags.has_code and !program.flags.has_data and !program.flags.has_bss) {
-            utils.printSrcFileError("source file doesn't contain any data or code block", program.file_name);
-            return AssemblerError.AssemblyError;
-        } else if (!program.flags.has_code and program.flags.debug) {
-            program.flags.debug = false;
-            if (program.flags.warnings) {
-                utils.printSrcFileWarning("source file doesn't contain code block to debug (debug info will not be generated)", program.file_name);
-            }
-        }
-
-        if (program.flags.has_code) {
-            try program.codeGen();
-        }
-
-        if (!self.flags.quiet) {
-            program.printSymbolTable();
-        }
-
-        const object_file = try utils.alloc.create(ObjFileElf);
-        errdefer utils.alloc.destroy(object_file);
-
-        try object_file.init(cli_args.output_name);
-        errdefer object_file.deinit();
-
-        try object_file.compileProgram(program, input_rel_path);
-
-        try self.comp_units.append(utils.alloc, .{ .rel_path = input_rel_path, .program = program, .objfile = object_file });
-    }
+    try self.createProgramsAndObjfiles(cli_args.input_paths.items, cli_args.output_name);
+    try self.lexicalAnalyzis();
+    try self.syntaxAnalyzis();
+    try self.codegenPrograms();
+    try self.resolveObjfiles();
 
     if (cli_args.format == .Object) {
-        for (self.comp_units.items) |unit| {
-            try unit.objfile.writeObjFile(unit.program);
-        }
+        try self.writeObjfiles();
     } else if (cli_args.format == .Executable) {
-        const linker = try utils.alloc.create(Linker);
-        defer utils.alloc.destroy(linker);
-        try linker.init(cli_args.output_name, self.comp_units.items, .{ .debug = self.flags.debug, .strip = self.flags.strip, .quiet = self.flags.quiet }, cli_args.search_paths);
-        defer linker.deinit();
-
-        try linker.linkObjects();
+        try self.linkObjfiles(cli_args.output_name, cli_args.search_paths.items);
     } else {
         utils.printError("unsupported output format");
         return AssemblerError.AssemblyError;

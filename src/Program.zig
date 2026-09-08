@@ -11,50 +11,53 @@ const Buffer = std.ArrayList(u8);
 /// System-agnostic source file internal representation
 const Program = @This();
 
-pub const Register = struct {
-    name: TokenType,
-    size: u8,
+pub const MemSize = u8;
+pub const Label = u16;
 
-    /// Caller must be sure that reg param is actually register name
+pub const Register = packed struct(u16) {
+    name: TokenType,
+    size: MemSize,
+
     pub fn init(reg: TokenType) Register {
         const r = @intFromEnum(reg);
+        const r128_start = @intFromEnum(TokenType.xmm0);
+        const r128_end = @intFromEnum(TokenType.xmm15);
         const r64_end = @intFromEnum(TokenType.r15);
         const r32_end = @intFromEnum(TokenType.r15d);
         const r16_end = @intFromEnum(TokenType.r15w);
-        if (r <= r64_end) {
-            return Register{ .name = reg, .size = 8 };
-        } else if (r <= r32_end) {
-            return Register{ .name = reg, .size = 4 };
-        } else if (r <= r16_end) {
-            return Register{ .name = reg, .size = 2 };
-        } else {
-            return Register{ .name = reg, .size = 1 };
+        const r8_end = @intFromEnum(TokenType.r15b);
+        if (r >= r128_start) {
+            if (r <= r128_end) {
+                return Register{ .name = reg, .size = 16 };
+            } else if (r <= r64_end) {
+                return Register{ .name = reg, .size = 8 };
+            } else if (r <= r32_end) {
+                return Register{ .name = reg, .size = 4 };
+            } else if (r <= r16_end) {
+                return Register{ .name = reg, .size = 2 };
+            } else if (r <= r8_end) {
+                return Register{ .name = reg, .size = 1 };
+            }
         }
+        return Register{ .name = .rip, .size = 0 };
     }
 };
 
-pub const Displacement = i32;
-pub const Scale = u8;
+pub const Immediate = packed struct(u72) {
+    bits: u64,
+    sign: enum(u8) { u, i },
 
-pub const Address = struct {
-    base: ?Register,
-    scale: ?Scale,
-    index: ?Register,
-    disp: ?Displacement,
-    label: ?[]const u8,
-};
+    pub fn negative(self: Immediate) i64 {
+        return @bitCast(self.bits);
+    }
 
-pub const Immediate = union(enum) {
-    u: u64,
-    i: i64,
-
-    pub fn toNegative(self: *Immediate) std.fmt.ParseIntError!void {
-        switch (self.*) {
+    pub fn negate(self: *Immediate) std.fmt.ParseIntError!void {
+        switch (self.sign) {
             .u => {
-                const unsigned = self.u;
-                if (unsigned < std.math.maxInt(i64)) {
-                    const signed: i64 = @intCast(unsigned);
-                    self.* = .{ .i = -signed };
+                const unsigned = self.bits;
+                if (unsigned <= std.math.maxInt(u63) + 1) {
+                    const a: u64 = std.math.maxInt(u64) - unsigned +% 1;
+                    self.* = .{ .bits = @bitCast(a), .sign = .i };
                 } else {
                     return std.fmt.ParseIntError.Overflow;
                 }
@@ -63,25 +66,26 @@ pub const Immediate = union(enum) {
         }
     }
 
-    pub fn fitsInBytes(self: Immediate) u8 {
-        switch (self) {
+    pub fn fitsInBytes(self: Immediate) MemSize {
+        switch (self.sign) {
             .i => {
-                if (self.i >= std.math.minInt(i8) and self.i <= std.math.maxInt(i8)) {
+                const i: i64 = @bitCast(self.bits);
+                if (i >= std.math.minInt(i8) and i <= std.math.maxInt(i8)) {
                     return 1;
-                } else if (self.i >= std.math.minInt(i16) and self.i <= std.math.maxInt(i16)) {
+                } else if (i >= std.math.minInt(i16) and i <= std.math.maxInt(i16)) {
                     return 2;
-                } else if (self.i >= std.math.minInt(i32) and self.i <= std.math.maxInt(i32)) {
+                } else if (i >= std.math.minInt(i32) and i <= std.math.maxInt(i32)) {
                     return 4;
                 } else {
                     return 8;
                 }
             },
             .u => {
-                if (self.u <= std.math.maxInt(u8)) {
+                if (self.bits <= std.math.maxInt(u8)) {
                     return 1;
-                } else if (self.u <= std.math.maxInt(u16)) {
+                } else if (self.bits <= std.math.maxInt(u16)) {
                     return 2;
-                } else if (self.u <= std.math.maxInt(u32)) {
+                } else if (self.bits <= std.math.maxInt(u32)) {
                     return 4;
                 } else {
                     return 8;
@@ -91,38 +95,52 @@ pub const Immediate = union(enum) {
     }
 };
 
-pub const MemOperand = struct {
-    addr: Address,
-    size: ?u8,
+pub const Displacement = i32;
+
+pub const MemOperand = packed struct(u96) {
+    disp: Displacement,
+    base: Register,
+    index: Register,
+    label: Label,
+    scale: MemSize,
+    size: MemSize,
 };
 
-pub const CodeOperand = union(enum) {
-    reg: Register,
-    mem: MemOperand,
-    imm: Immediate,
-    label: struct {
-        l: []const u8,
-        d: Immediate,
+pub const CodeOperand = packed struct(u104) {
+    op: packed union(u96) {
+        reg: packed struct { r: Register, _p: u80 = 0 },
+        mem: MemOperand,
+        label: packed struct { d: Immediate, l: Label, _p: u8 = 0 },
+        imm: packed struct { i: Immediate, _p: u24 = 0 },
     },
+    tag: enum(u8) { reg, mem, imm, lbl },
+
+    pub fn initReg(reg: Register) CodeOperand {
+        return .{ .op = .{ .reg = .{ .r = reg } }, .tag = .reg };
+    }
+    pub fn initMem(mem: MemOperand) CodeOperand {
+        return .{ .op = .{ .mem = mem }, .tag = .mem };
+    }
+    pub fn initImm(imm: Immediate) CodeOperand {
+        return .{ .op = .{ .imm = .{ .i = imm } }, .tag = .imm };
+    }
+    pub fn initLbl(lbl: Label, imm: ?Immediate) CodeOperand {
+        return .{ .op = .{ .label = .{ .l = lbl, .d = if (imm) |i| i else .{ .bits = 0, .sign = .u } } }, .tag = .lbl };
+    }
 };
 
 pub const CpuInstruction = struct {
+    operands: struct {
+        index: u16,
+        len: u16,
+    },
     mnem: TokenType,
-    operands: std.ArrayList(CodeOperand),
     line: u16,
 };
 
 pub const LabelInstruction = struct {
-    name: []const u8,
+    name: Label,
     line: u16,
-};
-
-pub const RepeatOperand = struct {
-    count: u32,
-    item: union(enum) {
-        str: []const u8,
-        num: Immediate,
-    },
 };
 
 pub const CodeInstruction = union(enum) {
@@ -132,6 +150,7 @@ pub const CodeInstruction = union(enum) {
 
 pub const CodeBlock = struct {
     instr: std.ArrayList(CodeInstruction) = .empty,
+    operands: std.ArrayList(CodeOperand) = .empty,
     buffer: Buffer = .empty,
 };
 
@@ -144,15 +163,15 @@ pub const RelType = enum {
 };
 
 pub const Relocation = struct {
-    type: RelType = .Rel32D,
-    name: []const u8 = &.{},
-    offset: u64 = 0,
     addend: i64 = 0,
+    offset: u32 = 0,
+    name: Label = 0,
+    type: RelType = .Rel32D,
 };
 
 pub const LineProgramEntry = struct {
-    offset: usize,
-    line: usize,
+    offset: u32,
+    line: u32,
 };
 
 const LabelType = enum { Local, Export };
@@ -167,9 +186,9 @@ const DataVariable = struct {
 
 const Function = struct {
     visib: LabelType,
-    offset: usize,
-    size: usize,
-    local_labels: std.StringHashMapUnmanaged(usize),
+    offset: u32,
+    size: u32,
+    local_labels: std.AutoHashMapUnmanaged(Label, u32),
 };
 
 const ProgramFlags = struct {
@@ -178,39 +197,30 @@ const ProgramFlags = struct {
     has_bss: bool = false,
     has_code: bool = false,
     has_shared: bool = false,
-    debug: bool = false,
-    pic: bool = false,
-    warnings: bool = true,
-    quiet: bool = false,
 };
 
 file_name: []const u8,
 content: []const u8,
 flags: ProgramFlags,
 tokens: std.ArrayList(Token),
-token_values: std.ArrayList([]const u8),
-entry: []const u8,
+entry: Label,
 data_buffer: std.ArrayList(u8),
 bss_len: u32,
 code_block: CodeBlock,
-shared_libs: std.ArrayList([]const u8),
-data_vars: std.StringHashMapUnmanaged(DataVariable),
-funcs: std.StringHashMapUnmanaged(Function),
-imports: std.StringHashMapUnmanaged(u16),
+shared_libs: std.ArrayList(Label),
+data_vars: std.AutoHashMapUnmanaged(Label, DataVariable),
+funcs: std.AutoHashMapUnmanaged(Label, Function),
+imports: std.AutoHashMapUnmanaged(Label, u16),
 relocations: std.ArrayList(Relocation),
 
 line_program: std.ArrayList(LineProgramEntry),
 
-pub fn init(self: *Program, content: []const u8, file_name: []const u8, debug: bool, pic: bool, warnings: bool, quiet: bool) void {
-    if (!quiet) {
-        std.debug.print("program.file_name: {s}\n", .{file_name});
-    }
+pub fn init(self: *Program, content: []const u8, file_name: []const u8) void {
     self.file_name = file_name;
     self.content = content;
-    self.flags = .{ .debug = debug, .pic = pic, .warnings = warnings, .quiet = quiet };
+    self.flags = ProgramFlags{};
     self.tokens = .empty;
-    self.token_values = .empty;
-    self.entry = &.{};
+    self.entry = 0;
     self.data_buffer = .empty;
     self.bss_len = 0;
     self.code_block = CodeBlock{};
@@ -222,22 +232,6 @@ pub fn init(self: *Program, content: []const u8, file_name: []const u8, debug: b
     self.line_program = .empty;
 }
 
-pub fn lexicalAnalyzis(self: *Program) Lexer.LexerError!void {
-    var lexer = Lexer.init(self);
-    try lexer.tokenizeContent();
-}
-
-pub fn syntaxAnalyzis(self: *Program) Parser.ParserError!void {
-    var parser = Parser.init(self);
-    try parser.parseTokens();
-}
-
-pub fn codeGen(self: *Program) Codegen.CodegenError!void {
-    var codegen = Codegen.init(self);
-    defer codegen.deinit();
-    try codegen.genCodeBlockBuffer();
-}
-
 pub fn printBuffer(buf: []const u8) void {
     for (buf) |byte| {
         std.debug.print("{x:02}", .{byte});
@@ -247,7 +241,7 @@ pub fn printBuffer(buf: []const u8) void {
 
 pub fn printProgram(self: *Program) void {
     if (self.flags.has_entry) {
-        std.debug.print("entry: {s}\n", .{self.entry});
+        std.debug.print("entry: {s}\n", .{utils.stringValue(self.entry)});
     }
 
     if (self.flags.has_code) {
@@ -255,10 +249,10 @@ pub fn printProgram(self: *Program) void {
         for (self.code_block.instr.items) |instr| {
             switch (instr) {
                 .cpu => {
-                    printCPUInstruction(instr.cpu);
+                    self.printCPUInstruction(instr.cpu);
                 },
                 .label => {
-                    std.debug.print("{s}:", .{instr.label.name});
+                    std.debug.print("{s}:", .{utils.stringValue(instr.label.name)});
                 },
             }
             std.debug.print("\n", .{});
@@ -280,7 +274,7 @@ pub fn printSymbolTable(self: *Program) void {
                 .Export => "EXP",
                 .Local => "LOC",
             },
-            data_var.key_ptr.*,
+            utils.stringValue(data_var.key_ptr.*),
             data_var.value_ptr.offset,
             data_var.value_ptr.size,
         });
@@ -292,14 +286,14 @@ pub fn printSymbolTable(self: *Program) void {
                 .Export => "EXP",
                 .Local => "LOC",
             },
-            func.key_ptr.*,
+            utils.stringValue(func.key_ptr.*),
             func.value_ptr.offset,
             func.value_ptr.size,
         });
         var locals_iter = func.value_ptr.local_labels.iterator();
         while (locals_iter.next()) |local| {
-            std.debug.print("         {s:<20} {d:4}\n", .{
-                local.key_ptr.*,
+            std.debug.print("          {s:<20} {d:4}\n", .{
+                utils.stringValue(local.key_ptr.*),
                 local.value_ptr.*,
             });
         }
@@ -308,12 +302,12 @@ pub fn printSymbolTable(self: *Program) void {
     while (import_iter.next()) |imp| {
         std.debug.print("-- IMP {d:1} {s:<20} 0\n", .{
             imp.value_ptr.*,
-            imp.key_ptr.*,
+            utils.stringValue(imp.key_ptr.*),
         });
     }
     std.debug.print("imports\n", .{});
     for (self.shared_libs.items, 0..) |lib, i| {
-        std.debug.print("{d}: {s}\n", .{ i, lib });
+        std.debug.print("{d}: {s}\n", .{ i, utils.stringValue(lib) });
     }
     std.debug.print("\n", .{});
 
@@ -327,7 +321,12 @@ pub fn printSymbolTable(self: *Program) void {
 
     std.debug.print("Relocations: \n", .{});
     for (self.relocations.items) |reloc| {
-        std.debug.print("{s:<20} {d:016}  {t:6} {d:12}\n", .{ reloc.name, reloc.offset, reloc.type, reloc.addend });
+        std.debug.print("{s:<20} {d:016}  {t:6} {d:12}\n", .{
+            utils.stringValue(reloc.name),
+            reloc.offset,
+            reloc.type,
+            reloc.addend,
+        });
     }
     std.debug.print("\n", .{});
 
@@ -338,68 +337,69 @@ pub fn printSymbolTable(self: *Program) void {
     std.debug.print("\n", .{});
 }
 
-pub fn printCPUInstruction(instr: CpuInstruction) void {
+pub fn printCPUInstruction(self: *Program, instr: CpuInstruction) void {
     std.debug.print("\x1b[35m {t} \x1b[0m", .{instr.mnem});
-    for (instr.operands.items, 0..) |oper, i| {
-        switch (oper) {
+    for (0..instr.operands.len) |i| {
+        const oper = self.code_block.operands.items[instr.operands.index + i];
+        switch (oper.tag) {
             .imm => {
-                switch (oper.imm) {
+                switch (oper.op.imm.i.sign) {
                     .i => {
-                        std.debug.print("\x1b[33m{d}\x1b[0m", .{oper.imm.i});
+                        std.debug.print("\x1b[33m{d}\x1b[0m", .{oper.op.imm.i.negative()});
                     },
                     .u => {
-                        std.debug.print("\x1b[33m{d}\x1b[0m", .{oper.imm.u});
+                        std.debug.print("\x1b[33m{d}\x1b[0m", .{oper.op.imm.i.bits});
                     },
                 }
             },
-            .label => {
-                std.debug.print("\x1b[34m{s}\x1b[0m", .{oper.label.l});
-                switch (oper.label.d) {
+            .lbl => {
+                std.debug.print("\x1b[34m{s}\x1b[0m", .{utils.stringValue(oper.op.label.l)});
+                switch (oper.op.label.d.sign) {
                     .u => {
-                        if (oper.label.d.u != 0) {
-                            std.debug.print("\x1b[33m +{d}\x1b[0m", .{oper.label.d.u});
+                        if (oper.op.label.d.bits != 0) {
+                            std.debug.print("\x1b[33m +{d}\x1b[0m", .{oper.op.label.d.bits});
                         }
                     },
                     .i => {
-                        if (oper.label.d.i != 0) {
-                            std.debug.print("\x1b[33m {s}{d}\x1b[0m", .{ if (oper.label.d.i > 0) "+" else "", oper.label.d.i });
+                        if (oper.op.label.d.bits != 0) {
+                            std.debug.print("\x1b[33m {s}{d}\x1b[0m", .{ if (oper.op.label.d.negative() > 0) "+" else "", oper.op.label.d.negative() });
                         }
                     },
                 }
             },
             .reg => {
-                std.debug.print("\x1b[36m{t}\x1b[0m", .{oper.reg.name});
+                std.debug.print("\x1b[36m{t}\x1b[0m", .{oper.op.reg.r.name});
             },
             .mem => {
-                const base = if (oper.mem.addr.base) |bs| bs.name else null;
-                const index = if (oper.mem.addr.index) |in| in.name else null;
-                const scale = oper.mem.addr.scale;
-                const disp = oper.mem.addr.disp;
-                const label = oper.mem.addr.label;
+                const base = if (oper.op.mem.base.size > 0) oper.op.mem.base.name else null;
+                const index = if (oper.op.mem.index.size > 0) oper.op.mem.index.name else null;
+                const scale = oper.op.mem.scale;
+                const disp = oper.op.mem.disp;
+                const label = oper.op.mem.label;
 
-                if (oper.mem.size) |sz| {
-                    std.debug.print("p{d} ", .{sz * 8});
+                if (oper.op.mem.size > 0) {
+                    std.debug.print("p{d} ", .{oper.op.mem.size * 8});
                 }
                 std.debug.print("[", .{});
-                if (base != null) {
-                    std.debug.print("\x1b[36m{t}\x1b[0m", .{base.?});
+                if (oper.op.mem.base.size > 0) {
+                    std.debug.print("\x1b[36m{t}\x1b[0m", .{oper.op.mem.base.name});
                 }
                 if (index != null) {
                     std.debug.print("{s}\x1b[31m{t}\x1b[0m", .{ if (base != null) " + " else "", index.? });
                 }
-                if (scale != null) {
-                    std.debug.print("*\x1b[32m{d}\x1b[0m", .{scale.?});
+                if (scale > 0) {
+                    std.debug.print("*\x1b[32m{d}\x1b[0m", .{scale});
                 }
-                if (disp != null) {
-                    std.debug.print("\x1b[33m{s}{s}{d}\x1b[0m", .{ if (base != null or index != null) " " else "", if (disp.? >= 0) "+" else "", disp.? });
+                if (disp != 0) {
+                    std.debug.print("\x1b[33m{s}{s}{d}\x1b[0m", .{ if (base != null or index != null) " " else "", if (disp >= 0) "+" else "", disp });
                 }
-                if (label != null) {
-                    std.debug.print("\x1b[34m{s}{s}\x1b[0m", .{ if (base != null or index != null or disp != null) " + " else "", label.? });
+                if (label > 0) {
+                    std.debug.print("\x1b[34m{s}{s}\x1b[0m", .{ if (base != null or index != null or disp != 0) " + " else "", utils.stringValue(label) });
                 }
                 std.debug.print("]", .{});
             },
         }
-        if (i < instr.operands.items.len - 1) {
+        if (i < instr.operands.len - 1) {
             std.debug.print(", ", .{});
         }
     }
@@ -408,13 +408,7 @@ pub fn printCPUInstruction(instr: CpuInstruction) void {
 pub fn deinit(self: *Program) void {
     utils.alloc.free(self.content);
     self.tokens.deinit(utils.alloc);
-    self.token_values.deinit(utils.alloc);
-    for (self.code_block.instr.items) |*instr| {
-        switch (instr.*) {
-            .cpu => instr.cpu.operands.deinit(utils.alloc),
-            .label => {},
-        }
-    }
+    self.code_block.operands.deinit(utils.alloc);
     self.code_block.instr.deinit(utils.alloc);
     self.data_buffer.deinit(utils.alloc);
     self.code_block.buffer.deinit(utils.alloc);

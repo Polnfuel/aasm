@@ -5,9 +5,10 @@ const Lexer = @This();
 
 const String = struct {
     slice: []u8,
+    col: u16,
 
-    pub fn new(ptr: [*]const u8) String {
-        return String{ .slice = ptr[0..0] };
+    pub fn new(ptr: [*]const u8, col: u16) String {
+        return String{ .slice = ptr[0..0], .col = col };
     }
 
     pub fn addByte(self: *String) void {
@@ -24,16 +25,20 @@ pub const TokenType = enum(u8) {
     p8, p16, p32, p64,
 
     //Instruction mnemonics
-    adc, add, @"and", cmp, @"or", sbb, sub, xor,
-    dec, div, idiv, inc, mul, neg, not,
-    mov, movzx, lea, call, ret, syscall, 
-    ja,  jae, jb,   jbe, jc,   je,  jg,  jge, jl,  jle, jna, jnae, jnb, jnbe, jnc, 
-    jne, jng, jnge, jnl, jnle, jno, jnp, jns, jnz, jo,  jp,  jpe,  jpo, js,   jz, jmp,
-    sal, sar, shl, shr,
-    imul, @"test",
-    push, pop,
+    adc, add, @"and", call, cmp, dec, div, 
+    idiv, imul, inc,
+    ja,  jae, jb,   jbe,  jc,   je,   jg,  jge, 
+    jl,  jle, jna,  jnae, jnb,  jnbe, jnc, 
+    jne, jng, jnge, jnl,  jnle, jno,  jnp, jns, 
+    jnz, jo,  jp,   jpe,  jpo,  js,   jz,  jmp,
+    lea, mov, movdqa, movdqu, movzx, mul, neg, 
+    not, @"or", pop, push, rcl, rcr, ret, rol, ror,
+    sal, sar, sbb, shl, shr, sub, syscall, @"test", xor,
 
     //Registers
+    //128-bit
+    xmm0, xmm1,  xmm2,  xmm3,  xmm4,  xmm5,  xmm6,  xmm7,
+    xmm8, xmm9, xmm10, xmm11, xmm12, xmm13, xmm14, xmm15,
     //64-bit
     rax, rbx, rcx, rdx, rdi, rsi, rsp, rbp, rip,
     r8,  r9,  r10, r11, r12, r13, r14, r15,
@@ -60,11 +65,12 @@ pub const TokenType = enum(u8) {
     OpenBracket, CloseBracket,
     OpenParenthes, CloseParenthes,
     NewLine,
+    Eof,
 
     // zig fmt: on
 
     pub fn isReg(self: TokenType) bool {
-        const lower = @intFromEnum(TokenType.rax);
+        const lower = @intFromEnum(TokenType.xmm0);
         const upper = @intFromEnum(TokenType.r15b);
         const r = @intFromEnum(self);
         if (r >= lower and r <= upper) {
@@ -76,7 +82,7 @@ pub const TokenType = enum(u8) {
 
     pub fn isMnemonic(self: TokenType) bool {
         const lower = @intFromEnum(TokenType.adc);
-        const upper = @intFromEnum(TokenType.pop);
+        const upper = @intFromEnum(TokenType.xor);
         const m = @intFromEnum(self);
         if (m >= lower and m <= upper) {
             return true;
@@ -101,7 +107,8 @@ pub const TokenType = enum(u8) {
         const is = (r >= @intFromEnum(TokenType.r8) and r <= @intFromEnum(TokenType.r15)) or
             (r >= @intFromEnum(TokenType.r8d) and r <= @intFromEnum(TokenType.r15d)) or
             (r >= @intFromEnum(TokenType.r8w) and r <= @intFromEnum(TokenType.r15w)) or
-            (r >= @intFromEnum(TokenType.r8b) and r <= @intFromEnum(TokenType.r15b));
+            (r >= @intFromEnum(TokenType.r8b) and r <= @intFromEnum(TokenType.r15b)) or
+            (r >= @intFromEnum(TokenType.xmm8) and r <= @intFromEnum(TokenType.xmm15));
         return is;
     }
 
@@ -183,6 +190,7 @@ pub const Token = struct {
     type: TokenType,
     val_ind: u16,
     line: u16,
+    col: u16,
 };
 
 pub const LexerError = error{LexerAnalyzisFailed} || std.mem.Allocator.Error;
@@ -214,63 +222,85 @@ const keywords: std.StaticStringMap(TokenType) = .initComptime(&.{
     .{ "adc", TokenType.adc },
     .{ "add", TokenType.add },
     .{ "and", TokenType.@"and" },
+    .{ "call", TokenType.call },
     .{ "cmp", TokenType.cmp },
-    .{ "or", TokenType.@"or" },
-    .{ "sbb", TokenType.sbb },
-    .{ "sub", TokenType.sub },
-    .{ "xor", TokenType.xor },
     .{ "dec", TokenType.dec },
     .{ "div", TokenType.div },
     .{ "idiv", TokenType.idiv },
+    .{ "imul", TokenType.imul },
     .{ "inc", TokenType.inc },
-    .{ "mul", TokenType.mul },
-    .{ "neg", TokenType.neg },
-    .{ "not", TokenType.not },
-    .{ "mov", TokenType.mov },
-    .{ "movzx", TokenType.movzx },
-    .{ "lea", TokenType.lea },
-    .{ "call", TokenType.call },
-    .{ "ret", TokenType.ret },
-    .{ "syscall", TokenType.syscall },
-    .{ "ja", TokenType.ja },
     .{ "jae", TokenType.jae },
-    .{ "jb", TokenType.jb },
+    .{ "ja", TokenType.ja },
     .{ "jbe", TokenType.jbe },
+    .{ "jb", TokenType.jb },
     .{ "jc", TokenType.jc },
     .{ "je", TokenType.je },
-    .{ "jg", TokenType.jg },
     .{ "jge", TokenType.jge },
-    .{ "jl", TokenType.jl },
+    .{ "jg", TokenType.jg },
     .{ "jle", TokenType.jle },
-    .{ "jna", TokenType.jna },
+    .{ "jl", TokenType.jl },
+    .{ "jmp", TokenType.jmp },
     .{ "jnae", TokenType.jnae },
-    .{ "jnb", TokenType.jnb },
+    .{ "jna", TokenType.jna },
     .{ "jnbe", TokenType.jnbe },
+    .{ "jnb", TokenType.jnb },
     .{ "jnc", TokenType.jnc },
     .{ "jne", TokenType.jne },
-    .{ "jng", TokenType.jng },
     .{ "jnge", TokenType.jnge },
-    .{ "jnl", TokenType.jnl },
+    .{ "jng", TokenType.jng },
     .{ "jnle", TokenType.jnle },
+    .{ "jnl", TokenType.jnl },
     .{ "jno", TokenType.jno },
     .{ "jnp", TokenType.jnp },
     .{ "jns", TokenType.jns },
     .{ "jnz", TokenType.jnz },
     .{ "jo", TokenType.jo },
-    .{ "jp", TokenType.jp },
     .{ "jpe", TokenType.jpe },
     .{ "jpo", TokenType.jpo },
+    .{ "jp", TokenType.jp },
     .{ "js", TokenType.js },
     .{ "jz", TokenType.jz },
-    .{ "jmp", TokenType.jmp },
+    .{ "lea", TokenType.lea },
+    .{ "mov", TokenType.mov },
+    .{ "movdqa", TokenType.movdqa },
+    .{ "movdqu", TokenType.movdqu },
+    .{ "movzx", TokenType.movzx },
+    .{ "mul", TokenType.mul },
+    .{ "neg", TokenType.neg },
+    .{ "not", TokenType.not },
+    .{ "or", TokenType.@"or" },
+    .{ "pop", TokenType.pop },
+    .{ "push", TokenType.push },
+    .{ "rcl", TokenType.rcl },
+    .{ "rcr", TokenType.rcr },
+    .{ "ret", TokenType.ret },
+    .{ "rol", TokenType.rol },
+    .{ "ror", TokenType.ror },
     .{ "sal", TokenType.sal },
     .{ "sar", TokenType.sar },
+    .{ "sbb", TokenType.sbb },
     .{ "shl", TokenType.shl },
     .{ "shr", TokenType.shr },
-    .{ "imul", TokenType.imul },
+    .{ "sub", TokenType.sub },
+    .{ "syscall", TokenType.syscall },
     .{ "test", TokenType.@"test" },
-    .{ "push", TokenType.push },
-    .{ "pop", TokenType.pop },
+    .{ "xor", TokenType.xor },
+    .{ "xmm0", TokenType.xmm0 },
+    .{ "xmm1", TokenType.xmm1 },
+    .{ "xmm2", TokenType.xmm2 },
+    .{ "xmm3", TokenType.xmm3 },
+    .{ "xmm4", TokenType.xmm4 },
+    .{ "xmm5", TokenType.xmm5 },
+    .{ "xmm6", TokenType.xmm6 },
+    .{ "xmm7", TokenType.xmm7 },
+    .{ "xmm8", TokenType.xmm8 },
+    .{ "xmm9", TokenType.xmm9 },
+    .{ "xmm10", TokenType.xmm10 },
+    .{ "xmm11", TokenType.xmm11 },
+    .{ "xmm12", TokenType.xmm12 },
+    .{ "xmm13", TokenType.xmm13 },
+    .{ "xmm14", TokenType.xmm14 },
+    .{ "xmm15", TokenType.xmm15 },
     .{ "rax", TokenType.rax },
     .{ "rbx", TokenType.rbx },
     .{ "rcx", TokenType.rcx },
@@ -348,32 +378,27 @@ pub fn init(program: *Program) Lexer {
     return Lexer{ .program = program };
 }
 
-fn addValue(self: *Lexer, value: []const u8) LexerError!u16 {
-    try self.program.token_values.append(utils.alloc, value);
-    return @truncate(self.program.token_values.items.len - 1);
-}
-
 fn analyzeWord(self: *Lexer, word: String, line: u16) LexerError!Token {
     var token_type: TokenType = undefined;
     if (keywords.get(word.slice)) |keyword| {
         token_type = keyword;
     } else {
         if (word.slice[0] == '#') {
-            if (word.slice.len > 1) {
+            if (word.slice.len > 1 and byteIsLetter(word.slice[1])) {
                 token_type = .HashIdent;
             } else {
-                utils.printSrcLineError("expected label name after #", self.program.file_name, self.program.content, line);
+                utils.printSrcLineColError("expected label name", self.program, line, word.col + 1);
                 return LexerError.LexerAnalyzisFailed;
             }
         } else if (word.slice[0] == '.') {
-            if (word.slice.len > 1) {
+            if (word.slice.len > 1 and byteIsLetter(word.slice[1])) {
                 token_type = .DotIdent;
             } else {
-                utils.printSrcLineError("expected label name after .", self.program.file_name, self.program.content, line);
+                utils.printSrcLineColError("expected label name", self.program, line, word.col + 1);
                 return LexerError.LexerAnalyzisFailed;
             }
         } else if (word.slice[0] == '@') {
-            utils.printSrcLineError("unsupported keyword name after @", self.program.file_name, self.program.content, line);
+            utils.printSrcLineColError("unknown keyword name", self.program, line, word.col + 1);
             return LexerError.LexerAnalyzisFailed;
         } else {
             token_type = .Ident;
@@ -381,14 +406,14 @@ fn analyzeWord(self: *Lexer, word: String, line: u16) LexerError!Token {
     }
 
     return Token{ .type = token_type, .val_ind = switch (token_type) {
-        .Ident, .DotIdent => try self.addValue(word.slice),
-        .HashIdent => try self.addValue(word.slice[1..]),
+        .Ident, .DotIdent => try utils.putString(word.slice),
+        .HashIdent => try utils.putString(word.slice[1..]),
         else => 0,
-    }, .line = line };
+    }, .line = line, .col = word.col };
 }
 
-fn startNewWord(self: *Lexer, word: *String, i: usize) void {
-    word.* = String.new(self.program.content[i..i].ptr);
+fn startNewWord(self: *Lexer, word: *String, i: usize, col: u16) void {
+    word.* = String.new(self.program.content[i..i].ptr, col);
     word.addByte();
 }
 
@@ -397,16 +422,16 @@ fn emitWord(self: *Lexer, word: String, line: u16) LexerError!void {
     try self.program.tokens.append(utils.alloc, token);
 }
 
-fn emitNumber(self: *Lexer, word: String, line: u16, num_type: TokenType) LexerError!void {
+fn emitNumber(self: *Lexer, word: String, num_type: TokenType, line: u16) LexerError!void {
     if (num_type != .NumberLiteral and word.slice.len < 3) {
-        utils.printSrcLineErrorFmt("uxpected digits after {s}", .{word.slice}, self.program.file_name, self.program.content, line);
+        utils.printSrcLineColError("expected digit", self.program, line, word.col + 2);
         return LexerError.LexerAnalyzisFailed;
     }
-    const token = Token{ .type = num_type, .val_ind = try self.addValue(word.slice), .line = line };
+    const token = Token{ .type = num_type, .val_ind = try utils.putString(word.slice), .line = line, .col = word.col };
     try self.program.tokens.append(utils.alloc, token);
 }
 
-fn emitSeparator(self: *Lexer, byte: u8, line: u16) LexerError!void {
+fn emitSeparator(self: *Lexer, byte: u8, line: u16, col: u16) LexerError!void {
     const token = Token{ .type = switch (byte) {
         '*' => .Asteriks,
         ':' => .Colon,
@@ -416,13 +441,20 @@ fn emitSeparator(self: *Lexer, byte: u8, line: u16) LexerError!void {
         '(' => .OpenParenthes,
         ')' => .CloseParenthes,
         else => unreachable,
-    }, .val_ind = 0, .line = line };
+    }, .val_ind = 0, .line = line, .col = col };
     try self.program.tokens.append(utils.alloc, token);
 }
 
-fn emitSign(self: *Lexer, state: LexerState, line: u16) LexerError!void {
-    const token = Token{ .type = if (state == .MinusSign) .Minus else .Plus, .val_ind = 0, .line = line };
+fn emitSign(self: *Lexer, state: LexerState, line: u16, col: u16) LexerError!void {
+    const token = Token{ .type = if (state == .MinusSign) .Minus else .Plus, .val_ind = 0, .line = line, .col = col };
     try self.program.tokens.append(utils.alloc, token);
+}
+
+fn byteIsLetter(byte: u8) bool {
+    return switch (byte) {
+        'A'...'Z', 'a'...'z', '_' => true,
+        else => false,
+    };
 }
 
 fn byteIsHex(byte: u8) bool {
@@ -434,21 +466,24 @@ fn byteIsHex(byte: u8) bool {
 
 pub fn tokenizeContent(self: *Lexer) LexerError!void {
     const tokens = &self.program.tokens;
+    const program = self.program;
     const content = self.program.content;
-    const file_name = self.program.file_name;
 
     var line: u16 = 1;
+    var col: u16 = 0;
 
     var state: LexerState = .TopLevel;
-    var word: String = String.new(content.ptr);
+    var word: String = String.new(content.ptr, col);
 
     var string = false;
     var comment = false;
     var two_signs = false;
     var start_zero = false;
     var num_type: TokenType = .NumberLiteral;
+    var sign_col: u16 = 0;
 
     for (content, 0..) |byte, i| {
+        col += 1;
         if (state != .MinusSign and state != .PlusSign and two_signs) {
             two_signs = false;
         }
@@ -464,7 +499,7 @@ pub fn tokenizeContent(self: *Lexer) LexerError!void {
             'A'...'Z', 'a'...'z', '_' => {
                 switch (state) {
                     .TopLevel => {
-                        self.startNewWord(&word, i);
+                        self.startNewWord(&word, i, col);
                         state = .Word;
                     },
                     .Word => word.addByte(),
@@ -480,12 +515,12 @@ pub fn tokenizeContent(self: *Lexer) LexerError!void {
                             word.addByte();
                             continue;
                         }
-                        utils.printSrcLineError("invalid character after digit", file_name, content, line);
+                        utils.printSrcLineColError("invalid character after digit", program, line, col);
                         return LexerError.LexerAnalyzisFailed;
                     },
                     .PlusSign, .MinusSign => {
-                        try self.emitSign(state, line);
-                        self.startNewWord(&word, i);
+                        try self.emitSign(state, line, sign_col);
+                        self.startNewWord(&word, i, col);
                         state = .Word;
                     },
                 }
@@ -493,21 +528,21 @@ pub fn tokenizeContent(self: *Lexer) LexerError!void {
             '0'...'9' => {
                 switch (state) {
                     .TopLevel => {
-                        self.startNewWord(&word, i);
+                        self.startNewWord(&word, i, col);
                         start_zero = byte == '0';
                         num_type = .NumberLiteral;
                     },
                     .Word, .Number => {
                         if (state == .Number and num_type == .BinNumLiteral and (byte != '0' and byte != '1')) {
-                            utils.printSrcLineError("invalid digit in binary number", file_name, content, line);
+                            utils.printSrcLineColError("invalid digit in binary number", program, line, col);
                             return LexerError.LexerAnalyzisFailed;
                         }
                         word.addByte();
                         continue;
                     },
                     .PlusSign, .MinusSign => {
-                        try self.emitSign(state, line);
-                        self.startNewWord(&word, i);
+                        try self.emitSign(state, line, sign_col);
+                        self.startNewWord(&word, i, col);
                         start_zero = byte == '0';
                         num_type = .NumberLiteral;
                     },
@@ -516,7 +551,7 @@ pub fn tokenizeContent(self: *Lexer) LexerError!void {
             },
             '"' => {
                 if (string) {
-                    const token = Token{ .type = .StringLiteral, .val_ind = try self.addValue(word.slice), .line = line };
+                    const token = Token{ .type = .StringLiteral, .val_ind = try utils.putString(word.slice), .line = line, .col = word.col };
                     try tokens.append(utils.alloc, token);
                     state = .TopLevel;
                     string = false;
@@ -525,17 +560,17 @@ pub fn tokenizeContent(self: *Lexer) LexerError!void {
                 switch (state) {
                     .TopLevel => {},
                     .Word => try self.emitWord(word, line),
-                    .Number => try self.emitNumber(word, line, num_type),
-                    .PlusSign, .MinusSign => try self.emitSign(state, line),
+                    .Number => try self.emitNumber(word, num_type, line),
+                    .PlusSign, .MinusSign => try self.emitSign(state, line, sign_col),
                 }
-                word = String.new(content[i..i].ptr + 1);
+                word = String.new(content[i..i].ptr + 1, col + 1);
                 string = true;
             },
             ' ' => {
                 switch (state) {
                     .TopLevel => {},
                     .Word => try self.emitWord(word, line),
-                    .Number => try self.emitNumber(word, line, num_type),
+                    .Number => try self.emitNumber(word, num_type, line),
                     .PlusSign, .MinusSign => continue,
                 }
                 state = .TopLevel;
@@ -543,11 +578,12 @@ pub fn tokenizeContent(self: *Lexer) LexerError!void {
             '\n' => {
                 if (comment) {
                     line += 1;
+                    col = 0;
                     state = .TopLevel;
                     comment = false;
                     continue;
                 } else if (string) {
-                    utils.printSrcLineError("not closed string literal", file_name, content, line);
+                    utils.printSrcLineColError("not closed string literal", program, line, col);
                     return LexerError.LexerAnalyzisFailed;
                 }
                 switch (state) {
@@ -555,20 +591,22 @@ pub fn tokenizeContent(self: *Lexer) LexerError!void {
                         if (tokens.getLastOrNull()) |last| {
                             if (last.type == .NewLine) {
                                 line += 1;
+                                col = 0;
                                 continue;
                             }
                         }
                     },
                     .Word => try self.emitWord(word, line),
-                    .Number => try self.emitNumber(word, line, num_type),
+                    .Number => try self.emitNumber(word, num_type, line),
                     .PlusSign, .MinusSign => {
-                        utils.printSrcLineError("unexpected end of line after sign", file_name, content, line);
+                        utils.printSrcLineColError("unexpected end of line after sign", program, line, col);
                         return LexerError.LexerAnalyzisFailed;
                     },
                 }
-                const newline = Token{ .type = .NewLine, .val_ind = 0, .line = line };
+                const newline = Token{ .type = .NewLine, .val_ind = 0, .line = line, .col = col };
                 try tokens.append(utils.alloc, newline);
                 line += 1;
+                col = 0;
                 state = .TopLevel;
                 comment = false;
             },
@@ -576,29 +614,30 @@ pub fn tokenizeContent(self: *Lexer) LexerError!void {
                 switch (state) {
                     .TopLevel => {},
                     .Word => try self.emitWord(word, line),
-                    .Number => try self.emitNumber(word, line, num_type),
+                    .Number => try self.emitNumber(word, num_type, line),
                     .PlusSign, .MinusSign => {
                         if (two_signs) {
-                            utils.printSrcLineError("more than 2 math signs is not allowed", file_name, content, line);
+                            utils.printSrcLineColError("more than 2 math signs is not allowed", program, line, col);
                             return LexerError.LexerAnalyzisFailed;
                         }
-                        try self.emitSign(state, line);
+                        try self.emitSign(state, line, sign_col);
                         two_signs = true;
                     },
                 }
+                sign_col = col;
                 state = if (byte == '+') .PlusSign else .MinusSign;
             },
             '*', ':', ',', '[', ']', '(', ')' => {
                 switch (state) {
                     .TopLevel => {},
                     .Word => try self.emitWord(word, line),
-                    .Number => try self.emitNumber(word, line, num_type),
+                    .Number => try self.emitNumber(word, num_type, line),
                     .PlusSign, .MinusSign => {
-                        utils.printSrcLineErrorFmt("unexpected '{c}' after sign", .{byte}, file_name, content, line);
+                        utils.printSrcLineColError("unexpected character after sign", program, line, col);
                         return LexerError.LexerAnalyzisFailed;
                     },
                 }
-                try self.emitSeparator(byte, line);
+                try self.emitSeparator(byte, line, col);
                 state = .TopLevel;
             },
             ';' => {
@@ -606,15 +645,15 @@ pub fn tokenizeContent(self: *Lexer) LexerError!void {
                     .TopLevel => {
                         if (tokens.getLastOrNull()) |last| {
                             if (last.type != .NewLine) {
-                                const newline = Token{ .type = .NewLine, .val_ind = 0, .line = line };
+                                const newline = Token{ .type = .NewLine, .val_ind = 0, .line = line, .col = col };
                                 try tokens.append(utils.alloc, newline);
                             }
                         }
                     },
                     .Word => try self.emitWord(word, line),
-                    .Number => try self.emitNumber(word, line, num_type),
+                    .Number => try self.emitNumber(word, num_type, line),
                     .PlusSign, .MinusSign => {
-                        utils.printSrcLineError("unexpected comment after sign", file_name, content, line);
+                        utils.printSrcLineColError("unexpected character after sign", program, line, col);
                         return LexerError.LexerAnalyzisFailed;
                     },
                 }
@@ -623,39 +662,44 @@ pub fn tokenizeContent(self: *Lexer) LexerError!void {
             '@', '#', '.' => {
                 switch (state) {
                     .TopLevel => {
-                        self.startNewWord(&word, i);
+                        self.startNewWord(&word, i, col);
                         state = .Word;
                     },
                     .Word, .Number, .PlusSign, .MinusSign => {
-                        utils.printSrcLineErrorFmt("unexpected '{c}' after sign", .{byte}, file_name, content, line);
+                        utils.printSrcLineColError("unexpected character after sign", program, line, col);
                         return LexerError.LexerAnalyzisFailed;
                     },
                 }
             },
             else => {
-                utils.printSrcLineErrorFmt("unknown character '{c}'", .{byte}, file_name, content, line);
+                utils.printSrcLineColError("unknown character", program, line, col);
                 return LexerError.LexerAnalyzisFailed;
             },
         }
     }
+
+    try program.tokens.append(utils.alloc, .{ .type = .Eof, .val_ind = 0, .line = 0, .col = 0 });
 }
 
 pub fn printTokens(program: *Program) void {
+    for (program.tokens.items) |token| {
+        std.debug.print("{any}\n", .{token});
+    }
     for (program.tokens.items) |token| {
         if (token.type.isMnemonic()) {
             std.debug.print("\x1b[34m{t}\x1b[0m ", .{token.type});
         } else if (token.type.isReg()) {
             std.debug.print("\x1b[35m{t}\x1b[0m ", .{token.type});
         } else if (token.type == .NewLine) {
-            std.debug.print("\n", .{});
+            std.debug.print("\\n\n", .{});
         } else if (token.type == .StringLiteral) {
-            std.debug.print("\x1b[36m{s}\x1b[0m ", .{program.token_values.items[token.val_ind]});
+            std.debug.print("\x1b[36m{s}\x1b[0m ", .{utils.stringValue(token.val_ind)});
         } else if (token.type == .NumberLiteral) {
-            std.debug.print("\x1b[31m{s}\x1b[0m ", .{program.token_values.items[token.val_ind]});
+            std.debug.print("\x1b[31m{s}\x1b[0m ", .{utils.stringValue(token.val_ind)});
         } else if (token.type == .HexNumLiteral) {
-            std.debug.print("\x1b[32m{s}\x1b[0m ", .{program.token_values.items[token.val_ind]});
+            std.debug.print("\x1b[32m{s}\x1b[0m ", .{utils.stringValue(token.val_ind)});
         } else if (token.type == .BinNumLiteral) {
-            std.debug.print("\x1b[33m{s}\x1b[0m ", .{program.token_values.items[token.val_ind]});
+            std.debug.print("\x1b[33m{s}\x1b[0m ", .{utils.stringValue(token.val_ind)});
         } else if (token.type == .OpenBracket) {
             std.debug.print("[ ", .{});
         } else if (token.type == .CloseBracket) {
@@ -675,7 +719,7 @@ pub fn printTokens(program: *Program) void {
         } else if (token.type == .Colon) {
             std.debug.print(": ", .{});
         } else if (token.type == .Ident or token.type == .HashIdent or token.type == .DotIdent) {
-            std.debug.print("\x1b[37m{s}\x1b[0m ", .{program.token_values.items[token.val_ind]});
+            std.debug.print("\x1b[37m{s}\x1b[0m ", .{utils.stringValue(token.val_ind)});
         } else {
             std.debug.print("{t} ", .{token.type});
         }

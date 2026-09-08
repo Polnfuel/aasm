@@ -4,6 +4,7 @@ const elf = std.elf;
 const utils = @import("utils");
 const Assembler = @import("Assembler");
 const CompUnit = Assembler.CompUnit;
+const Label = u16;
 
 const Linker = @This();
 
@@ -402,12 +403,6 @@ const DynLibElf = struct {
     }
 };
 
-const Flags = struct {
-    debug: bool,
-    strip: bool,
-    quiet: bool,
-};
-
 const Shn = enum(u2) {
     text,
     data,
@@ -443,17 +438,16 @@ const LibraryFile = struct {
 
 exe: ExeElf,
 comp_units: []CompUnit,
-flags: Flags,
 dyn_libs: std.ArrayList([]const u8),
 dyn_funcs: std.StringHashMapUnmanaged(u64),
 dyn_objects: std.StringHashMapUnmanaged(Object),
-dyn_search_paths: std.ArrayList([]const u8),
+dyn_search_paths: [][]const u8,
 dyn_runpath: std.ArrayList([]const u8),
 offsets: std.HashMapUnmanaged(FileSection, usize, HM_Context, 80),
 locals: std.StringHashMapUnmanaged(LinkerSymbol),
 globals: std.StringHashMapUnmanaged(LinkerSymbol),
 
-pub fn init(self: *Linker, output_name: []const u8, comp_units: []CompUnit, flags: Flags, search_paths: std.ArrayList([]const u8)) std.mem.Allocator.Error!void {
+pub fn init(self: *Linker, output_name: []const u8, comp_units: []CompUnit, search_paths: [][]const u8) std.mem.Allocator.Error!void {
     self.comp_units = comp_units;
     self.dyn_libs = .empty;
     self.dyn_funcs = .empty;
@@ -463,14 +457,10 @@ pub fn init(self: *Linker, output_name: []const u8, comp_units: []CompUnit, flag
     self.offsets = .empty;
     self.locals = .empty;
     self.globals = .empty;
-    self.flags = flags;
     try self.exe.init();
     self.exe.output_name = output_name;
-    if (flags.debug) {
-        self.exe.has_debug = true;
-    } else if (flags.strip) {
-        self.exe.has_shtable = false;
-    }
+    self.exe.has_debug = utils.flags.debug;
+    self.exe.has_shtable = !utils.flags.strip;
 }
 
 fn checkIfValidLibrary(file_handle: std.Io.File.Handle) std.posix.MMapError!bool {
@@ -548,7 +538,7 @@ fn findLib(self: *Linker, lib_fullname: []const u8) LinkerError!DynLibElf {
     defer utils.alloc.free(cwd_path_sent);
     const cwd_path: []const u8 = @ptrCast(cwd_path_sent);
 
-    for (self.dyn_search_paths.items) |search_path| {
+    for (self.dyn_search_paths) |search_path| {
         const found_file = try self.searchInPath(cwd_path, search_path, lib_fullname, true) orelse continue;
         defer {
             found_file.file.close(utils.io);
@@ -888,7 +878,7 @@ fn mergeSymbols(self: *Linker) LinkerError!void {
                     .size = @truncate(sym.size),
                 });
 
-                if (unit.program.flags.has_entry and std.mem.eql(u8, sym_name, unit.program.entry)) {
+                if (unit.program.flags.has_entry and std.mem.eql(u8, sym_name, utils.stringValue(unit.program.entry))) {
                     self.exe.entry.?.vaddr = sym_address;
                 }
             }
@@ -902,7 +892,7 @@ fn mergeSymbols(self: *Linker) LinkerError!void {
                 const is_global = self.globals.contains(sym_name);
                 const is_import = self.dyn_funcs.contains(sym_name) or self.dyn_objects.contains(sym_name);
                 if (!is_global and !is_import) {
-                    utils.printSrcFileErrorFmt("unable to resolve external symbol '{s}'", .{sym_name}, unit.program.file_name);
+                    utils.printSrcFileErrorFmt("unable to resolve external symbol '{s}'", .{sym_name}, unit.program);
                     return LinkerError.LinkingFailed;
                 }
             }
@@ -990,7 +980,7 @@ fn calcHashSection(self: *Linker) void {
         }
     }
 
-    if (!self.flags.quiet) {
+    if (!utils.flags.quiet) {
         std.debug.print("hash:\n", .{});
         std.debug.print("{d:4} {d:4}\n", .{ hash.items[0], hash.items[1] });
         var i: usize = 0;
@@ -1291,7 +1281,7 @@ fn shstrtabLoad(self: *Linker, ind: *u8) LinkerError!void {
     if (self.exe.has_bss) {
         secs.bss.name = try self.exe.appendShstrtabName(".bss");
     }
-    if (self.flags.debug) {
+    if (self.exe.has_debug) {
         secs.debug_line.name = try self.exe.appendShstrtabName(".debug_line");
         secs.debug_line_str.name = try self.exe.appendShstrtabName(".debug_line_str");
         secs.debug_info.name = try self.exe.appendShstrtabName(".debug_info");
@@ -1579,7 +1569,7 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
         secs.shstrtab.offset = secs.debug_str.offset;
     }
 
-    if (!self.flags.quiet) {
+    if (!utils.flags.quiet) {
         self.printBuffers();
         self.printDynstr();
         self.printDynsym();
@@ -1595,7 +1585,8 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
 
 fn linkExe(self: *Linker) LinkerError!void {
     if (self.exe.has_dynamic) {
-        var dyn_libs: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(void)) = .empty;
+        // lib -> hash map of import symbols
+        var dyn_libs: std.AutoHashMapUnmanaged(Label, std.AutoHashMapUnmanaged(Label, void)) = .empty;
         defer dyn_libs.deinit(utils.alloc);
 
         for (self.comp_units) |unit| {
@@ -1619,7 +1610,7 @@ fn linkExe(self: *Linker) LinkerError!void {
         while (lib_iter.next()) |lib| {
             defer lib.value_ptr.deinit(utils.alloc);
 
-            const lib_name = lib.key_ptr.*;
+            const lib_name = utils.stringValue(lib.key_ptr.*);
             const lib_fullname = try resolveLibFileName(lib_name);
             defer utils.alloc.free(lib_fullname);
             // std.debug.print("Try to find library: '{s}' -> '{s}'\n", .{ lib_name, lib_fullname });
@@ -1631,7 +1622,7 @@ fn linkExe(self: *Linker) LinkerError!void {
 
             var sym_iter = lib.value_ptr.iterator();
             while (sym_iter.next()) |sym| {
-                const sym_name = sym.key_ptr.*;
+                const sym_name = utils.stringValue(sym.key_ptr.*);
                 const opt_syminfo = dyn_lib.lookup(sym_name);
                 if (opt_syminfo) |syminfo| {
                     switch (syminfo) {
@@ -1643,6 +1634,7 @@ fn linkExe(self: *Linker) LinkerError!void {
                             try self.dyn_objects.putNoClobber(utils.alloc, sym_name, .{ .info = syminfo.obj, .vaddr = undefined });
                             if (syminfo.obj.section == .wdata) {
                                 self.exe.has_copyobj = true;
+                                self.exe.has_bss = true;
                             }
                         },
                     }
@@ -1662,7 +1654,7 @@ pub fn linkObjects(self: *Linker) LinkerError!void {
     for (self.comp_units) |unit| {
         if (unit.program.flags.has_entry) {
             if (self.exe.entry == null) {
-                self.exe.entry = .{ .name = unit.program.entry, .vaddr = undefined };
+                self.exe.entry = .{ .name = utils.stringValue(unit.program.entry), .vaddr = undefined };
             } else {
                 utils.printError("multiple entry point definition");
                 return LinkerError.LinkingFailed;
@@ -1700,6 +1692,10 @@ pub fn writeExe(self: *Linker) LinkerError!void {
 
     const shtable = std.mem.alignForward(usize, secs.shstrtab.offset + secs.shstrtab.size, 0x8);
     const file_size = shtable + @as(usize, (secs.shstrtab.ind + 1)) * @sizeOf(elf.Elf64.Shdr);
+    if (!utils.flags.quiet) {
+        std.debug.print("shtable start: {x}\n", .{shtable});
+        std.debug.print("file size: {d}\n", .{file_size});
+    }
 
     const file_buffer = try utils.alloc.alloc(u8, file_size);
     defer utils.alloc.free(file_buffer);
