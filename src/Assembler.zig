@@ -50,13 +50,13 @@ fn createProgramsAndObjfiles(self: *Assembler, cli_inputs: [][]const u8, cli_out
 
 /// Second stage of Assembler job
 fn lexicalAnalyzis(self: *Assembler) AssemblerError!void {
+    defer utils.deinitStrings();
     for (self.comp_units.items) |unit| {
         var lexer = Lexer.init(unit.program);
         try lexer.tokenizeContent();
 
         // Lexer.printTokens(unit.program);
     }
-    utils.deinitStrings();
 }
 
 /// Third stage of Assembler job
