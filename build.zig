@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const with_llvm = b.option(bool, "llvm", "Use LLVM backend") orelse false;
-    const exe_name = b.option([]const u8, "name", "specify output name") orelse "aasm";
+    const exe_name = b.option([]const u8, "name", "Specify output name") orelse "aasm";
 
     const utils = b.addModule("utils", .{
         .root_source_file = b.path("src/utils.zig"),
@@ -25,12 +25,20 @@ pub fn build(b: *std.Build) void {
 
     utils.addImport("CliArgs", cli_args);
 
+    const token_type = b.addModule("TokenType", .{
+        .root_source_file = b.path("src/TokenType.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{},
+    });
+
     const lexer = b.addModule("lexer", .{
         .root_source_file = b.path("src/Lexer.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "utils", .module = utils },
+            .{ .name = "TokenType", .module = token_type },
         },
     });
 
@@ -145,6 +153,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "Codegen", .module = codegen },
             },
         }),
+        .filters = b.args orelse &.{},
     });
 
     const run_codgen_test = b.addRunArtifact(codegen_test);

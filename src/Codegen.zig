@@ -74,9 +74,15 @@ const InstrBytes = struct {
     as: bool = false,
     /// 0x66
     os: bool = false,
+    f2: bool = false,
+    f3: bool = false,
     rex: RexByte = RexByte.default(),
     /// 0x0F
     twobyteop: bool = false,
+    /// 0x38
+    threebyte38: bool = false,
+    /// 0x3A
+    threebyte3a: bool = false,
     opcode: u8 = 0x00,
     modrm: ?ModRmByte = null,
     need_sib: bool = false,
@@ -91,17 +97,7 @@ const InstrBytes = struct {
     }
 
     fn regCode(reg: TokenType) u3 {
-        switch (reg) {
-            .rax, .eax, .ax, .al, .r8, .r8d, .r8w, .r8b, .xmm0, .xmm8 => return 0b000,
-            .rcx, .ecx, .cx, .cl, .r9, .r9d, .r9w, .r9b, .xmm1, .xmm9 => return 0b001,
-            .rdx, .edx, .dx, .dl, .r10, .r10d, .r10w, .r10b, .xmm2, .xmm10 => return 0b010,
-            .rbx, .ebx, .bx, .bl, .r11, .r11d, .r11w, .r11b, .xmm3, .xmm11 => return 0b011,
-            .rsp, .esp, .sp, .ah, .spl, .r12, .r12d, .r12w, .r12b, .xmm4, .xmm12 => return 0b100,
-            .rbp, .ebp, .bp, .ch, .bpl, .r13, .r13d, .r13w, .r13b, .xmm5, .xmm13 => return 0b101,
-            .rsi, .esi, .si, .dh, .sil, .r14, .r14d, .r14w, .r14b, .xmm6, .xmm14 => return 0b110,
-            .rdi, .edi, .di, .bh, .dil, .r15, .r15d, .r15w, .r15b, .xmm7, .xmm15 => return 0b111,
-            else => unreachable,
-        }
+        return @truncate(@intFromEnum(reg) >> 11);
     }
 
     fn digitToReg(digit: u8) Register {
@@ -130,17 +126,13 @@ const InstrBytes = struct {
         }
     }
 
-    fn setTwoByteOp(self: *InstrBytes) void {
-        self.twobyteop = true;
-    }
-
     fn swapBaseIndex(mem: MemOperand, codegen: *const Codegen) CodegenError!MemOperand {
-        if (mem.index.size > 0) {
+        if (mem.index.size() > 0) {
             const with_scale = if (mem.scale > 1) true else false;
             const index_code = regCode(mem.index.name);
             if (index_code == 0b100 and !mem.index.name.isAdditionalReg()) {
                 if (!with_scale) {
-                    if (mem.base.size > 0) {
+                    if (mem.base.size() > 0) {
                         const base_code = regCode(mem.base.name);
                         if (base_code != 0b100 or mem.base.name.isAdditionalReg()) {
                             var swapped = mem;
@@ -176,20 +168,20 @@ const InstrBytes = struct {
             }
         }
 
-        if (mem.index.size > 0) {
+        if (mem.index.size() > 0) {
             index = regCode(mem.index.name);
             if (mem.index.name.isAdditionalReg()) {
                 self.rex.setX();
             }
-            self.as = (mem.index.size == 4);
+            self.as = (mem.index.size() == 4);
         }
 
-        if (mem.base.size > 0) {
+        if (mem.base.size() > 0) {
             base = regCode(mem.base.name);
             if (mem.base.name.isAdditionalReg()) {
                 self.rex.setB();
             }
-            self.as = (mem.base.size == 4);
+            self.as = (mem.base.size() == 4);
         }
 
         self.sib = SibByte{ .base = base, .index = index, .ss = scale };
@@ -199,7 +191,7 @@ const InstrBytes = struct {
         var mod: u2 = undefined;
         var rm_code: u3 = undefined;
         const reg_code: u3 = regCode(reg.name);
-        self.setOsRexW(reg.size);
+        self.setOsRexW(reg.size());
         if (reg.name.isAdditionalReg()) {
             self.rex.setR();
         } else if (reg.name.isByteRegAdditional()) {
@@ -225,8 +217,8 @@ const InstrBytes = struct {
                     self.reloc.?.name = label;
                     self.disp = disp;
                     self.disp_bytes = 4;
-                    if (rm.op.mem.index.size == 0) {
-                        if (base.size == 0 or base.name == .rip) {
+                    if (rm.op.mem.index.size() == 0) {
+                        if (base.size() == 0 or base.name == .rip) {
                             mod = 0b00;
                             rm_code = 0b101;
                             self.reloc.?.type = .Rel32D;
@@ -253,12 +245,12 @@ const InstrBytes = struct {
                         rm_code = 0b100;
                         self.need_sib = true;
                         self.reloc.?.type = .Abs32S;
-                        if (base.size == 0) mod = 0b00;
+                        if (base.size() == 0) mod = 0b00;
                     }
                 } else {
                     const disp_size = dispMinSize(disp);
-                    if (rm.op.mem.index.size == 0) {
-                        if (base.size > 0) {
+                    if (rm.op.mem.index.size() == 0) {
+                        if (base.size() > 0) {
                             if (base.name == .rip) {
                                 mod = 0b00;
                                 rm_code = 0b101;
@@ -269,7 +261,7 @@ const InstrBytes = struct {
                                 if (base.name.isAdditionalReg()) {
                                     self.rex.setB();
                                 }
-                                self.as = (base.size == 4);
+                                self.as = (base.size() == 4);
                                 self.disp_bytes = disp_size;
                                 self.disp = disp;
                                 if (disp_size == 0) {
@@ -301,7 +293,7 @@ const InstrBytes = struct {
                         }
                     } else {
                         self.need_sib = true;
-                        if (base.size > 0) {
+                        if (base.size() > 0) {
                             rm_code = regCode(base.name);
                             if (disp_size == 0) {
                                 mod = 0b00;
@@ -408,7 +400,7 @@ fn memSizeOrError(self: *const Codegen, size: u8) CodegenError!u8 {
 
 fn rmSize(self: *const Codegen, rm: CodeOperand) CodegenError!u8 {
     switch (rm.tag) {
-        .reg => return rm.op.reg.r.size,
+        .reg => return rm.op.reg.r.size(),
         .mem => return try self.memSizeOrError(rm.op.mem.size),
         else => unreachable,
     }
@@ -432,12 +424,23 @@ fn appendInstrBytes(self: *Codegen) std.mem.Allocator.Error!void {
     if (self.ibytes.os) {
         try self.program.code_block.buffer.append(utils.alloc, 0x66);
     }
+    if (self.ibytes.f2) {
+        try self.program.code_block.buffer.append(utils.alloc, 0xF2);
+    }
+    if (self.ibytes.f3) {
+        try self.program.code_block.buffer.append(utils.alloc, 0xF3);
+    }
     if (self.ibytes.rex.byte() > 0x00) {
         self.ibytes.rex.rex = 0b0100;
         try self.program.code_block.buffer.append(utils.alloc, self.ibytes.rex.byte());
     }
     if (self.ibytes.twobyteop) {
         try self.program.code_block.buffer.append(utils.alloc, 0x0F);
+    }
+    if (self.ibytes.threebyte38) {
+        try self.program.code_block.buffer.append(utils.alloc, 0x38);
+    } else if (self.ibytes.threebyte3a) {
+        try self.program.code_block.buffer.append(utils.alloc, 0x3A);
     }
     try self.program.code_block.buffer.append(utils.alloc, self.ibytes.opcode);
     if (self.ibytes.modrm) |modrm| {
@@ -537,9 +540,9 @@ fn jumpReloc(self: *Codegen, imm: CodeOperand, mnem: TokenType, opcode: u8) Code
 // Encodings
 
 fn regMemEncoding(self: *Codegen, reg: Register, rm: CodeOperand, opcode: u8, sizes: u4) CodegenError!void {
-    const reg_size = reg.size;
+    const reg_size = reg.size();
     const rm_size: u8 = switch (rm.tag) {
-        .reg => rm.op.reg.r.size,
+        .reg => rm.op.reg.r.size(),
         .mem => nonNullSize(rm.op.mem.size, reg_size),
         else => unreachable,
     };
@@ -603,7 +606,7 @@ fn memImmEncoding2(self: *Codegen, rm: CodeOperand, opcode: u8, digit: u8, imm: 
 }
 
 fn opImmEncoding(self: *Codegen, reg: Register, opcode: u8, imm: CodeOperand) CodegenError!void {
-    const reg_size = reg.size;
+    const reg_size = reg.size();
     var imm_size: u8 = undefined;
     var is_label = false;
     switch (imm.tag) {
@@ -654,7 +657,7 @@ fn opImmEncoding(self: *Codegen, reg: Register, opcode: u8, imm: CodeOperand) Co
 }
 
 fn accImmEncoding(self: *Codegen, acc: Register, opcode: u8, imm: Immediate) CodegenError!void {
-    const acc_size = acc.size;
+    const acc_size = acc.size();
     const imm_size = imm.fitsInBytes();
     if (acc_size >= imm_size and imm_size <= 4) {
         self.ibytes.reset();
@@ -670,7 +673,7 @@ fn accImmEncoding(self: *Codegen, acc: Register, opcode: u8, imm: Immediate) Cod
 }
 
 fn opEncoding(self: *Codegen, reg: Register, opcode: u8, sizes: u4) CodegenError!void {
-    const reg_size = reg.size;
+    const reg_size = reg.size();
     if (reg_size & sizes == reg_size) {
         self.ibytes.reset();
         try self.ibytes.init(reg, .{ .op = .{ .reg = .{ .r = reg } }, .tag = .reg }, opcode, self);
@@ -736,6 +739,35 @@ fn immEncoding(self: *Codegen, imm: CodeOperand, opcode: u8, sizes: u4) CodegenE
     }
 }
 
+fn regMem128Encoding(self: *Codegen, mnem: TokenType, opcode: u8, reg: Register, rm: CodeOperand, mem_size: u8, set_rexw: bool) CodegenError!void {
+    // Cnange alt_size to 16 to strict pointer size match instruction
+    const rm_size = if (rm.tag == .mem) nonNullSize(rm.op.mem.size, mem_size) else mem_size;
+    if (rm_size == mem_size) {
+        self.ibytes.reset();
+        const pref_bits = @intFromEnum(mnem) & 0x1800;
+        switch (pref_bits) {
+            0x0 => {},
+            0x800 => self.ibytes.os = true,
+            0x1000 => self.ibytes.f3 = true,
+            0x1800 => self.ibytes.f2 = true,
+            else => unreachable,
+        }
+        const opcode_len_bits = @intFromEnum(mnem) & 0x6000;
+        if (opcode_len_bits > 0) self.ibytes.twobyteop = true;
+        if (opcode_len_bits == 0x4000) self.ibytes.threebyte38 = true else if (opcode_len_bits == 0x6000) self.ibytes.threebyte3a = true;
+
+        try self.ibytes.init(reg, rm, opcode, self);
+        if (set_rexw) self.ibytes.rex.setW();
+        try self.appendInstrBytes();
+        if (self.ibytes.reloc) |*reloc| {
+            try self.program.relocations.append(utils.alloc, reloc.*);
+        }
+    } else if (rm.tag == .mem) {
+        utils.printSrcLineError("wrong pointer size", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
 // Instructions
 
 fn syscall(self: *Codegen) CodegenError!void {
@@ -747,15 +779,15 @@ fn mov(self: *Codegen, operands: []CodeOperand) CodegenError!void {
     const second = operands[1];
     if (first.tag == .reg) {
         if (second.tag == .reg or second.tag == .mem) {
-            const opcode: u8 = if (first.op.reg.r.size == 1) 0x8A else 0x8B;
+            const opcode: u8 = if (first.op.reg.r.size() == 1) 0x8A else 0x8B;
             try self.regMemEncoding(first.op.reg.r, second, opcode, 0b1111);
         } else if (second.tag == .imm or second.tag == .lbl) {
-            const opcode: u8 = if (first.op.reg.r.size == 1) 0xB0 else 0xB8;
+            const opcode: u8 = if (first.op.reg.r.size() == 1) 0xB0 else 0xB8;
             try self.opImmEncoding(first.op.reg.r, opcode, second);
         }
     } else if (first.tag == .mem) {
         if (second.tag == .reg) {
-            const opcode: u8 = if (second.op.reg.r.size == 1) 0x88 else 0x89;
+            const opcode: u8 = if (second.op.reg.r.size() == 1) 0x88 else 0x89;
             try self.memRegEncoding(first, second.op.reg.r, opcode, 0b1111);
         } else if (second.tag == .imm) {
             const ptr_size = try self.memSizeOrError(first.op.mem.size);
@@ -771,59 +803,12 @@ fn mov(self: *Codegen, operands: []CodeOperand) CodegenError!void {
     }
 }
 
-fn movdqa(self: *Codegen, operands: []CodeOperand) CodegenError!void {
-    const first = operands[0];
-    const second = operands[1];
-    if (first.tag == .reg) {
-        if (second.tag == .reg or second.tag == .mem) {
-            if (first.op.reg.r.size == 16) {
-                self.ibytes.reset();
-                self.ibytes.os = true;
-                self.ibytes.setTwoByteOp();
-                try self.ibytes.init(first.op.reg.r, second, 0x6F, self);
-                try self.appendInstrBytes();
-                if (self.ibytes.reloc) |*reloc| {
-                    try self.program.relocations.append(utils.alloc, reloc.*);
-                }
-            } else {
-                utils.printSrcLineError("first operand must be xmm register", self.program, self.line);
-                return CodegenError.CodeGenFailed;
-            }
-        } else {
-            utils.printSrcLineError("second operand must be xmm register or memory", self.program, self.line);
-            return CodegenError.CodeGenFailed;
-        }
-    } else if (first.tag == .mem) {
-        if (second.tag == .reg) {
-            if (second.op.reg.r.size == 16) {
-                self.ibytes.reset();
-                self.ibytes.os = true;
-                self.ibytes.setTwoByteOp();
-                try self.ibytes.init(second.op.reg.r, first, 0x7F, self);
-                try self.appendInstrBytes();
-                if (self.ibytes.reloc) |*reloc| {
-                    try self.program.relocations.append(utils.alloc, reloc.*);
-                }
-            } else {
-                utils.printSrcLineError("second operand must be xmm register", self.program, self.line);
-                return CodegenError.CodeGenFailed;
-            }
-        } else {
-            utils.printSrcLineError("second operand must be xmm register", self.program, self.line);
-            return CodegenError.CodeGenFailed;
-        }
-    } else {
-        utils.printSrcLineError("first operand must be xmm register or memory", self.program, self.line);
-        return CodegenError.CodeGenFailed;
-    }
-}
-
 fn movzx(self: *Codegen, operands: []CodeOperand) CodegenError!void {
     const first = operands[0];
     const second = operands[1];
     if (first.tag == .reg) {
         if (second.tag == .reg or second.tag == .mem) {
-            const reg_size = first.op.reg.r.size;
+            const reg_size = first.op.reg.r.size();
             const rm_size = try self.rmSize(second);
             if (rm_size > 2) {
                 utils.printSrcLineError("only 8- and 16-bit sizes allowed for second operand", self.program, self.line);
@@ -836,7 +821,7 @@ fn movzx(self: *Codegen, operands: []CodeOperand) CodegenError!void {
             const opcode: u8 = if (rm_size == 1) 0xB6 else 0xB7;
             self.ibytes.reset();
             try self.ibytes.init(first.op.reg.r, second, opcode, self);
-            self.ibytes.setTwoByteOp();
+            self.ibytes.twobyteop = true;
             try self.appendInstrBytes();
             if (self.ibytes.reloc) |*reloc| {
                 try self.program.relocations.append(utils.alloc, reloc.*);
@@ -988,7 +973,7 @@ fn @"test"(self: *Codegen, operands: []CodeOperand) CodegenError!void {
                 const opcode: u8 = if (first.op.reg.r.name == .al) 0xA8 else 0xA9;
                 try self.accImmEncoding(first.op.reg.r, opcode, second.op.imm.i);
             } else {
-                const opcode: u8 = if (first.op.reg.r.size == 1) 0xF6 else 0xF7;
+                const opcode: u8 = if (first.op.reg.r.size() == 1) 0xF6 else 0xF7;
                 try self.memImmEncoding1(first, opcode, 0, second.op.imm.i);
             }
         } else if (first.tag == .mem) {
@@ -1001,7 +986,7 @@ fn @"test"(self: *Codegen, operands: []CodeOperand) CodegenError!void {
         }
     } else if (second.tag == .reg) {
         if (first.tag == .reg or first.tag == .mem) {
-            const opcode: u8 = if (second.op.reg.r.size == 1) 0x84 else 0x85;
+            const opcode: u8 = if (second.op.reg.r.size() == 1) 0x84 else 0x85;
             try self.memRegEncoding(first, second.op.reg.r, opcode, 0b1111);
         } else {
             utils.printSrcLineError("first operand must be register or memory", self.program, self.line);
@@ -1029,7 +1014,7 @@ fn group1(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError
                 .xor => 0x31,
                 else => unreachable,
             };
-            if (first.op.reg.r.size == 1) {
+            if (first.op.reg.r.size() == 1) {
                 opcode -= 1;
             }
             try self.memRegEncoding(first, second.op.reg.r, opcode, 0b1111);
@@ -1045,7 +1030,7 @@ fn group1(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError
                 .xor => 0x33,
                 else => unreachable,
             };
-            if (first.op.reg.r.size == 1) {
+            if (first.op.reg.r.size() == 1) {
                 opcode -= 1;
             }
             try self.regMemEncoding(first.op.reg.r, second, opcode, 0b1111);
@@ -1062,12 +1047,12 @@ fn group1(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError
                     .xor => 0x35,
                     else => unreachable,
                 };
-                if (first.op.reg.r.size == 1) {
+                if (first.op.reg.r.size() == 1) {
                     opcode -= 1;
                 }
                 try self.accImmEncoding(first.op.reg.r, opcode, second.op.imm.i);
             } else {
-                const reg_size = first.op.reg.r.size;
+                const reg_size = first.op.reg.r.size();
                 const imm_size = second.op.imm.i.fitsInBytes();
                 const digit: u8 = switch (mnem) {
                     .adc => 2,
@@ -1105,7 +1090,7 @@ fn group1(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError
                 .xor => 0x31,
                 else => unreachable,
             };
-            if (second.op.reg.r.size == 1) {
+            if (second.op.reg.r.size() == 1) {
                 opcode -= 1;
             }
             try self.memRegEncoding(first, second.op.reg.r, opcode, 0b1111);
@@ -1157,7 +1142,7 @@ fn group2(self: *Codegen, mnem: TokenType, operand: CodeOperand) CodegenError!vo
         else => unreachable,
     };
     if (operand.tag == .reg) {
-        if (operand.op.reg.r.size == 1) opcode -= 1;
+        if (operand.op.reg.r.size() == 1) opcode -= 1;
     } else if (operand.tag == .mem) {
         if (operand.op.mem.size == 1) opcode -= 1;
     } else {
@@ -1171,7 +1156,7 @@ fn group3(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError
     const first = operands[0];
     const second = operands[1];
     const opsize = switch (first.tag) {
-        .reg => first.op.reg.r.size,
+        .reg => first.op.reg.r.size(),
         .mem => try self.memSizeOrError(first.op.mem.size),
         else => {
             utils.printSrcLineError("first operand must be register or memory", self.program, self.line);
@@ -1229,6 +1214,420 @@ fn group3(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError
     }
 }
 
+const SseGroup = enum {
+    r128rm128,
+    r128r128m64,
+    r128r128m32,
+    r128r128m16,
+
+    r128rm128i8,
+    r128r128m64i8,
+    r128r128m32i8,
+
+    r128r128,
+    r3264r128,
+
+    r128m128,
+    r128m64,
+
+    mr,
+    shift,
+    extrinsr,
+    converts,
+    movdq,
+
+    skip,
+};
+
+fn sseR128Rm(self: *Codegen, mnem: TokenType, operands: []CodeOperand, group: SseGroup) CodegenError!void {
+    const first = operands[0];
+    const second = operands[1];
+    const mr: bool = switch (group) {
+        .r128rm128 => switch (mnem) {
+            .movapd, .movaps, .movdqa, .movdqu, .movupd, .movups => true,
+            else => false,
+        },
+        .r128r128m64 => mnem == .movsd,
+        .r128r128m32 => mnem == .movss,
+        else => false,
+    };
+    const mem_sz: u8 = switch (group) {
+        .r128rm128, .r128rm128i8 => 16,
+        .r128r128m64, .r128r128m64i8 => 8,
+        .r128r128m32, .r128r128m32i8 => 4,
+        .r128r128m16 => 2,
+        else => unreachable,
+    };
+
+    if (first.tag == .reg and first.op.reg.r.size() == 16) {
+        if (second.tag == .reg and second.op.reg.r.size() == 16 or second.tag == .mem) {
+            const opcode: u8 = @truncate(@intFromEnum(mnem));
+            try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, mem_sz, false);
+            if (operands.len == 3) {
+                if (operands[2].tag == .imm and operands[2].op.imm.i.fitsInBytes() == 1) {
+                    try self.program.code_block.buffer.append(utils.alloc, @truncate(operands[2].op.imm.i.bits));
+                } else {
+                    utils.printSrcLineError("third operand must be imm8 value", self.program, self.line);
+                    return CodegenError.CodeGenFailed;
+                }
+            }
+        } else {
+            utils.printSrcLineError("second operand must be xmm register or memory", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    } else if (first.tag == .mem and mr) {
+        if (second.tag == .reg and second.op.reg.r.size() == 16) {
+            const opcode: u8 = switch (mnem) {
+                .movapd, .movaps => 0x29,
+                .movdqa, .movdqu => 0x7F,
+                .movupd, .movups, .movsd, .movss => 0x11,
+                else => unreachable,
+            };
+            try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, mem_sz, false);
+            if (operands.len == 3) {
+                if (operands[2].tag == .imm and operands[2].op.imm.i.fitsInBytes() == 1) {
+                    try self.program.code_block.buffer.append(utils.alloc, @truncate(operands[2].op.imm.i.bits));
+                } else {
+                    utils.printSrcLineError("third operand must be imm8 value", self.program, self.line);
+                    return CodegenError.CodeGenFailed;
+                }
+            }
+        } else {
+            utils.printSrcLineError("second operand must be xmm register", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    } else if (mr) {
+        utils.printSrcLineError("first operand must be xmm register or memory", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    } else {
+        utils.printSrcLineError("first operand must be xmm register", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
+fn sseRegR128(self: *Codegen, mnem: TokenType, operands: []CodeOperand, group: SseGroup) CodegenError!void {
+    const first = operands[0];
+    const second = operands[1];
+    if (first.tag == .reg) {
+        const reg_size = first.op.reg.r.size();
+        if (reg_size == 16 and group != .r128r128 or (reg_size == 4 or reg_size == 8) and group != .r3264r128 or reg_size < 4) {
+            utils.printSrcLineError("invalid register size", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+        if (second.tag == .reg and second.op.reg.r.size() == 16) {
+            self.ibytes.reset();
+            const pref_bits = @intFromEnum(mnem) & 0x1800;
+            switch (pref_bits) {
+                0x0 => {},
+                0x800 => self.ibytes.os = true,
+                0x1000 => self.ibytes.f3 = true,
+                0x1800 => self.ibytes.f2 = true,
+                else => unreachable,
+            }
+            const opcode_len_bits = @intFromEnum(mnem) & 0x6000;
+            if (opcode_len_bits > 0) self.ibytes.twobyteop = true;
+            if (opcode_len_bits == 0x4000) self.ibytes.threebyte38 = true else if (opcode_len_bits == 0x6000) self.ibytes.threebyte3a = true;
+            const opcode: u8 = @truncate(@intFromEnum(mnem));
+            try self.ibytes.init(first.op.reg.r, second, opcode, self);
+            try self.appendInstrBytes();
+            if (self.ibytes.reloc) |*reloc| {
+                try self.program.relocations.append(utils.alloc, reloc.*);
+            }
+        } else {
+            utils.printSrcLineError("second operand must be xmm register", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    } else {
+        utils.printSrcLineError("first operand must be register", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
+fn sseR128M(self: *Codegen, mnem: TokenType, operands: []CodeOperand, group: SseGroup) CodegenError!void {
+    const first = operands[0];
+    const second = operands[1];
+    const mr: bool = switch (mnem) {
+        .movhpd, .movhps, .movlpd, .movlps => true,
+        else => false,
+    };
+    const mem_sz: u8 = switch (group) {
+        .r128m128 => 16,
+        .r128m64 => 8,
+        else => unreachable,
+    };
+
+    if (first.tag == .reg and first.op.reg.r.size() == 16) {
+        if (second.tag == .mem) {
+            const opcode: u8 = switch (mnem) {
+                .movlps => 0x12,
+                .movhps => 0x16,
+                else => @truncate(@intFromEnum(mnem)),
+            };
+            try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, mem_sz, false);
+        } else {
+            utils.printSrcLineError("second operand must be memory", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    } else if (first.tag == .mem and mr) {
+        if (second.tag == .reg and second.op.reg.r.size() == 16) {
+            const opcode: u8 = switch (mnem) {
+                .movhpd, .movhps => 0x17,
+                .movlpd, .movlps => 0x13,
+                else => unreachable,
+            };
+            try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, mem_sz, false);
+        } else {
+            utils.printSrcLineError("second operand must be xmm register", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    } else if (mr) {
+        utils.printSrcLineError("first operand must be xmm register or memory", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    } else {
+        utils.printSrcLineError("first operand must be xmm register", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
+fn sseMR(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError!void {
+    const first = operands[0];
+    const second = operands[1];
+    const mem_sz: u8 = switch (mnem) {
+        .movntdq, .movntpd, .movntps => 16,
+        .movnti => 8,
+        else => unreachable,
+    };
+
+    if (first.tag == .mem) {
+        if (second.tag == .reg) {
+            const opcode: u8 = @truncate(@intFromEnum(mnem));
+            if (mem_sz == 16 or mnem == .movnti and second.op.reg.r.size() == 8) {
+                try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, mem_sz, false);
+            } else if (mnem == .movnti and second.op.reg.r.size() == 4) {
+                try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, 4, false);
+            } else {
+                try self.invalOpSizesError();
+            }
+        } else {
+            utils.printSrcLineError("second operand must be register", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    } else {
+        utils.printSrcLineError("first operand must be memory", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
+fn sseShift(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError!void {
+    const first = operands[0];
+    const second = operands[1];
+    const reg_imm_only = mnem == .psrldq or mnem == .pslldq;
+    if (first.tag == .reg and first.op.reg.r.size() == 16) {
+        if (second.tag == .imm and second.op.imm.i.fitsInBytes() == 1) {
+            const opcode: u8 = switch (mnem) {
+                .psrlw, .psraw, .psllw => 0x71,
+                .psrld, .psrad, .pslld => 0x72,
+                .psrlq, .psrldq, .psllq, .pslldq => 0x73,
+                else => unreachable,
+            };
+            const reg: Register = switch (mnem) {
+                .psrlw, .psrld, .psrlq => InstrBytes.digitToReg(2),
+                .psraw, .psrad => InstrBytes.digitToReg(4),
+                .psllw, .pslld, .psllq => InstrBytes.digitToReg(6),
+                .psrldq => InstrBytes.digitToReg(3),
+                .pslldq => InstrBytes.digitToReg(7),
+                else => unreachable,
+            };
+            try self.regMem128Encoding(mnem, opcode, reg, first, 16, false);
+            try self.program.code_block.buffer.append(utils.alloc, @truncate(second.op.imm.i.bits));
+        } else if (!reg_imm_only and (second.tag == .reg and second.op.reg.r.size() == 16 or second.tag == .mem)) {
+            const opcode: u8 = switch (mnem) {
+                .psrlw => 0xD1,
+                .psraw => 0xE1,
+                .psllw => 0xF1,
+                .psrld => 0xD2,
+                .psrad => 0xE2,
+                .pslld => 0xF2,
+                .psrlq => 0xD3,
+                .psllq => 0xF3,
+                else => unreachable,
+            };
+            try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, 16, false);
+        } else if (!reg_imm_only) {
+            utils.printSrcLineError("second operand must be xmm register, memory or imm8 value", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        } else {
+            utils.printSrcLineError("second operand must be xmm register or imm8 value", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    } else {
+        utils.printSrcLineError("first operand must be xmm register", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
+fn sseExtrInsr(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError!void {
+    const first = operands[0];
+    const second = operands[1];
+    const third = operands[2];
+    const rm = switch (mnem) {
+        .pinsrb, .pinsrw, .pinsrd, .pinsrq => true,
+        else => false,
+    };
+    if (third.tag == .imm and third.op.imm.i.fitsInBytes() == 1) {
+        if (rm and first.tag == .reg and first.op.reg.r.size() == 16) {
+            if (second.tag == .reg or second.tag == .mem) {
+                const mem_sz: u8 = switch (mnem) {
+                    .pinsrb => 1,
+                    .pinsrw => 2,
+                    .pinsrd => 4,
+                    .pinsrq => 8,
+                    else => unreachable,
+                };
+                if (second.tag == .mem and second.op.mem.size > 0 and second.op.mem.size != mem_sz or
+                    second.tag == .reg and (second.op.reg.r.size() != 4 and second.op.reg.r.size() != 8 or (mem_sz == 8 and second.op.reg.r.size() != 8 or mem_sz == 4 and second.op.reg.r.size() != 4)))
+                {
+                    try self.invalOpSizesError();
+                }
+                const opcode: u8 = switch (mnem) {
+                    .pinsrq => 0x22,
+                    else => @truncate(@intFromEnum(mnem)),
+                };
+                try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, mem_sz, mem_sz == 8);
+                try self.program.code_block.buffer.append(utils.alloc, @truncate(third.op.imm.i.bits));
+            } else {
+                utils.printSrcLineError("second operand must be register or memory", self.program, self.line);
+                return CodegenError.CodeGenFailed;
+            }
+        } else if (!rm and first.tag == .reg and first.op.reg.r.size() < 16 or first.tag == .mem) {
+            if (second.tag == .reg and second.op.reg.r.size() == 16) {
+                const mem_sz: u8 = switch (mnem) {
+                    .pextrb => 1,
+                    .pextrw => 2,
+                    .pextrd, .extractps => 4,
+                    .pextrq => 8,
+                    else => unreachable,
+                };
+                if (first.tag == .mem and first.op.mem.size > 0 and first.op.mem.size != mem_sz or
+                    first.tag == .reg and (first.op.reg.r.size() != 4 and first.op.reg.r.size() != 8 or (mem_sz == 8 and first.op.reg.r.size() != 8 or mnem == .pextrd and first.op.reg.r.size() != 4)))
+                {
+                    try self.invalOpSizesError();
+                }
+                const opcode: u8 = switch (mnem) {
+                    .pextrq => 0x16,
+                    else => @truncate(@intFromEnum(mnem)),
+                };
+                try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, mem_sz, mem_sz == 8);
+                try self.program.code_block.buffer.append(utils.alloc, @truncate(third.op.imm.i.bits));
+            } else {
+                utils.printSrcLineError("second operand must be xmm register", self.program, self.line);
+                return CodegenError.CodeGenFailed;
+            }
+        } else if (rm) {
+            utils.printSrcLineError("first operand must be xmm register", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        } else {
+            utils.printSrcLineError("first operand must be register or memory", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    } else {
+        utils.printSrcLineError("third operand must be imm8 value", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
+fn sseConverts(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError!void {
+    const first = operands[0];
+    const second = operands[1];
+    if (first.tag == .reg) {
+        if (second.tag == .reg or second.tag == .mem) {
+            const reg_size = first.op.reg.r.size();
+            switch (mnem) {
+                .cvtsi2sd, .cvtsi2ss => {
+                    if (reg_size != 16) {
+                        try self.invalOpSizesError();
+                    }
+                    const opcode: u8 = 0x2A;
+                    const rm_size = try self.rmSize(second);
+                    if (rm_size == 4 or rm_size == 8) {
+                        try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, rm_size, rm_size == 8);
+                    } else {
+                        try self.invalOpSizesError();
+                    }
+                },
+                .cvtsd2si, .cvtss2si, .cvttsd2si, .cvttss2si => {
+                    if (reg_size != 4 and reg_size != 8 or (second.tag == .reg and second.op.reg.r.size() != 16)) {
+                        try self.invalOpSizesError();
+                    }
+                    const opcode: u8 = @truncate(@intFromEnum(mnem));
+                    const mem_size: u8 = switch (mnem) {
+                        .cvtsd2si, .cvttsd2si => 8,
+                        else => 4,
+                    };
+                    try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, mem_size, reg_size == 8);
+                },
+                else => unreachable,
+            }
+        } else {
+            utils.printSrcLineError("second operand must be register or memory", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    } else {
+        utils.printSrcLineError("first operand must be register", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
+fn sseMovdQ(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError!void {
+    const first = operands[0];
+    const second = operands[1];
+    const mem_size: u8 = if (mnem == .movd) 4 else 8;
+    if (first.tag == .reg) {
+        const reg_size = first.op.reg.r.size();
+        if (reg_size == 16) {
+            if (second.tag == .reg) {
+                const reg2_size = second.op.reg.r.size();
+                if (reg2_size == 16 and mnem == .movq) {
+                    const opcode: u8 = @truncate(@intFromEnum(mnem));
+                    try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, 16, false);
+                } else if (reg2_size == 8 and mnem == .movq or reg2_size == 4 and mnem == .movd) {
+                    const opcode: u8 = 0x6E;
+                    try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, 16, mnem == .movq);
+                } else {
+                    try self.invalOpSizesError();
+                }
+            } else if (second.tag == .mem) {
+                const opcode: u8 = 0x6E;
+                try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, mem_size, mnem == .movq);
+            } else {
+                utils.printSrcLineError("second operand must be register or memory", self.program, self.line);
+                return CodegenError.CodeGenFailed;
+            }
+        } else if (reg_size == 4 and mnem == .movd or reg_size == 8 and mnem == .movq) {
+            if (second.tag == .reg and second.op.reg.r.size() == 16) {
+                const opcode: u8 = 0x7E;
+                try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, mem_size, mnem == .movq);
+            } else {
+                utils.printSrcLineError("second operand must be xmm register", self.program, self.line);
+                return CodegenError.CodeGenFailed;
+            }
+        } else {
+            try self.invalOpSizesError();
+        }
+    } else if (first.tag == .mem) {
+        if (second.tag == .reg and second.op.reg.r.size() == 16) {
+            const opcode: u8 = 0x7E;
+            try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, mem_size, mnem == .movq);
+        } else {
+            utils.printSrcLineError("second operand must be xmm register", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    } else {
+        utils.printSrcLineError("first operand must be register or memory", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
 fn genInstruction(self: *Codegen, instr: Program.CodeInstruction) CodegenError!void {
     switch (instr) {
         .label => {
@@ -1263,7 +1662,6 @@ fn genInstruction(self: *Codegen, instr: Program.CodeInstruction) CodegenError!v
             const start = self.program.code_block.buffer.items.len;
             switch (cpuinstr.mnem) {
                 .mov => try self.mov(operands),
-                .movdqa => try self.movdqa(operands),
                 .movzx => try self.movzx(operands),
                 .lea => try self.lea(operands),
                 .push => try self.push(operands[0]),
@@ -1278,8 +1676,28 @@ fn genInstruction(self: *Codegen, instr: Program.CodeInstruction) CodegenError!v
                 .sal, .sar, .shl, .shr, .rcl, .rcr, .rol, .ror => try self.group3(cpuinstr.mnem, operands),
                 .@"test" => try self.@"test"(operands),
                 else => {
-                    utils.printSrcLineErrorFmt("unsupported instruction: {t}", .{cpuinstr.mnem}, self.program, self.line);
-                    return CodegenError.CodeGenFailed;
+                    const sse = sseMnemGroup(cpuinstr.mnem);
+                    switch (sse) {
+                        .r128rm128,
+                        .r128r128m64,
+                        .r128r128m32,
+                        .r128r128m16,
+                        .r128rm128i8,
+                        .r128r128m64i8,
+                        .r128r128m32i8,
+                        => try self.sseR128Rm(cpuinstr.mnem, operands, sse),
+                        .r128r128, .r3264r128 => try self.sseRegR128(cpuinstr.mnem, operands, sse),
+                        .r128m128, .r128m64 => try self.sseR128M(cpuinstr.mnem, operands, sse),
+                        .mr => try self.sseMR(cpuinstr.mnem, operands),
+                        .shift => try self.sseShift(cpuinstr.mnem, operands),
+                        .extrinsr => try self.sseExtrInsr(cpuinstr.mnem, operands),
+                        .converts => try self.sseConverts(cpuinstr.mnem, operands),
+                        .movdq => try self.sseMovdQ(cpuinstr.mnem, operands),
+                        .skip => {
+                            utils.printSrcLineErrorFmt("unsupported instruction: {t}", .{cpuinstr.mnem}, self.program, self.line);
+                            return CodegenError.CodeGenFailed;
+                        },
+                    }
                 },
             }
             const end = self.program.code_block.buffer.items.len;
@@ -1325,4 +1743,70 @@ fn patchTempRelocs(self: *Codegen) CodegenError!void {
         std.mem.writeInt(u32, @ptrCast(self.program.code_block.buffer.items[reloc.offset .. reloc.offset + 4]), @bitCast(disp), .little);
     }
     self.temp_relocs.clearRetainingCapacity();
+}
+
+fn sseMnemGroup(mnem: TokenType) SseGroup {
+    return switch (mnem) {
+        // zig fmt: off
+        .addpd, .addps, .addsubpd, .addsubps, .andnpd, .andnps, .andpd,
+        .andps, .blendvpd, .blendvps, .cvtdq2ps, .cvtpd2dq, .cvtpd2ps, 
+        .cvtps2dq, .cvttpd2dq, .cvttps2dq, .divpd, .divps, .haddpd, 
+        .haddps, .hsubpd, .hsubps, .maxpd, .maxps, .minpd, .minps, .movapd, 
+        .movaps, .movdqa, .movdqu, .movshdup, .movsldup, .movupd, .movups, 
+        .mulpd, .mulps, .orpd, .orps, .pabsb, .pabsw, .pabsd, .packsswb, 
+        .packssdw, .packusdw, .packuswb, .paddb, .paddw, .paddd, .paddq, 
+        .paddsb, .paddsw, .paddusb, .paddusw, .pand, .pandn, .pavgb, .pavgw, 
+        .pblendvb, .pcmpeqb, .pcmpeqw, .pcmpeqd, .pcmpeqq, .pcmpgtb, .pcmpgtw, 
+        .pcmpgtd, .pcmpgtq, .phaddsw, .phaddw, .phaddd, .phminposuw, .phsubsw, 
+        .phsubw, .phsubd, .pmaddubsw, .pmaddwd, .pmaxsb, .pmaxsw, .pmaxsd, 
+        .pmaxub, .pmaxuw, .pmaxud, .pminsb, .pminsw, .pminsd, .pminub, .pminuw, 
+        .pminud, .pmuldq, .pmulhrsw, .pmulhuw, .pmulhw, .pmulld, .pmullw, 
+        .pmuludq, .por, .psadbw, .pshufb, .psignb, .psignw, .psignd, .psubb, 
+        .psubw, .psubd, .psubq, .psubsb, .psubsw, .psubusb, .psubusw, .ptest, 
+        .punpckhbw, .punpckhwd, .punpckhdq, .punpckhqdq, .punpcklbw, .punpcklwd, 
+        .punpckldq, .punpcklqdq, .pxor, .rcpps, .rsqrtps, .sqrtpd, .sqrtps, 
+        .subpd, .subps, .unpckhpd, .unpckhps, .unpcklpd, .unpcklps, .xorpd, 
+        .xorps 
+        => .r128rm128,
+        .addsd, .comisd, .cvtdq2pd, .cvtps2pd, .cvtsd2ss, .divsd, .maxsd,
+        .minsd, .movddup, .movsd, .mulsd, .pmovsxbw, .pmovsxwd, .pmovsxdq,
+        .pmovzxbw, .pmovzxwd, .pmovzxdq, .sqrtsd, .subsd, .ucomisd 
+        => .r128r128m64,
+        .addss, .comiss, .cvtss2sd, .divss, .maxss, .minss, .movss, .mulss,
+        .pmovsxbd, .pmovsxwq, .pmovzxbd, .pmovzxwq, .rcpss, .rsqrtss, .sqrtss,
+        .subss, .ucomiss 
+        => .r128r128m32,
+        .pmovsxbq, .pmovzxbq 
+        => .r128r128m16,
+        .blendpd, .blendps, .cmppd, .cmpps, .dppd, .dpps, .mpsadbw, .palignr,
+        .pblendw, .pclmulqdq, .pcmpestri, .pcmpestrm, .pcmpistri, .pcmpistrm, 
+        .pshufd, .pshufhw, .pshuflw, .roundpd, .roundps, .shufpd, .shufps
+        => .r128rm128i8,
+        .cmpsd, .roundsd
+        => .r128r128m64i8,
+        .cmpss, .insertps, .roundss
+        => .r128r128m32i8,
+        .maskmovdqu, .movhlps, .movlhps
+        => .r128r128,
+        .movmskpd, .movmskps, .pmovmskb
+        => .r3264r128,
+        .movntdqa, .lddqu
+        => .r128m128,
+        .movhpd, .movhps, .movlpd, .movlps, .cvtpi2pd, .cvtpi2ps
+        => .r128m64,
+        .movntdq, .movntpd, .movntps, .movnti
+        => .mr,
+        .psrlw, .psraw, .psllw, .psrld, .psrad, .pslld, .psrlq, .psrldq, .psllq, 
+        .pslldq
+        => .shift,
+        .pextrb, .pextrw, .pextrd, .pextrq, .extractps, .pinsrb, .pinsrw, .pinsrd, 
+        .pinsrq
+        => .extrinsr,
+        .cvtsd2si, .cvttsd2si, .cvtss2si, .cvttss2si, .cvtsi2sd, .cvtsi2ss
+        => .converts,
+        .movd, .movq
+        => .movdq,
+        else => .skip,
+        // zig fmt: on
+    };
 }

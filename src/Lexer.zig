@@ -2,6 +2,7 @@ const std = @import("std");
 const utils = @import("utils");
 const Program = @import("Program");
 const Lexer = @This();
+pub const TokenType = @import("TokenType").TokenType;
 
 const String = struct {
     slice: []u8,
@@ -13,176 +14,6 @@ const String = struct {
 
     pub fn addByte(self: *String) void {
         self.slice.len += 1;
-    }
-};
-
-pub const TokenType = enum(u8) {
-    // zig fmt: off
-    //Keywords
-    entry, data, code, import, bss,
-    repeat,
-    d8, d16, d32, d64,
-    p8, p16, p32, p64,
-
-    //Instruction mnemonics
-    adc, add, @"and", call, cmp, dec, div, 
-    idiv, imul, inc,
-    ja,  jae, jb,   jbe,  jc,   je,   jg,  jge, 
-    jl,  jle, jna,  jnae, jnb,  jnbe, jnc, 
-    jne, jng, jnge, jnl,  jnle, jno,  jnp, jns, 
-    jnz, jo,  jp,   jpe,  jpo,  js,   jz,  jmp,
-    lea, mov, movdqa, movdqu, movzx, mul, neg, 
-    not, @"or", pop, push, rcl, rcr, ret, rol, ror,
-    sal, sar, sbb, shl, shr, sub, syscall, @"test", xor,
-
-    //Registers
-    //128-bit
-    xmm0, xmm1,  xmm2,  xmm3,  xmm4,  xmm5,  xmm6,  xmm7,
-    xmm8, xmm9, xmm10, xmm11, xmm12, xmm13, xmm14, xmm15,
-    //64-bit
-    rax, rbx, rcx, rdx, rdi, rsi, rsp, rbp, rip,
-    r8,  r9,  r10, r11, r12, r13, r14, r15,
-    //32-bit
-    eax, ebx, ecx,  edx,  edi,  esi,  esp,  ebp,
-    r8d, r9d, r10d, r11d, r12d, r13d, r14d, r15d,
-    //16-bit
-    ax,  bx,  cx,   dx,   di,   si,   sp,   bp,
-    r8w, r9w, r10w, r11w, r12w, r13w, r14w, r15w,
-    //8-bit
-    ah,  al,  bh,   bl,   ch,   cl,   dh,   dl,   sil, dil, bpl, spl,
-    r8b, r9b, r10b, r11b, r12b, r13b, r14b, r15b,
-
-    //Literals
-    Ident, HashIdent, DotIdent,
-    StringLiteral,
-    NumberLiteral,
-    HexNumLiteral,
-    BinNumLiteral,
-
-    //Punctuation
-    Colon, Comma,
-    Plus, Minus, Asteriks,
-    OpenBracket, CloseBracket,
-    OpenParenthes, CloseParenthes,
-    NewLine,
-    Eof,
-
-    // zig fmt: on
-
-    pub fn isReg(self: TokenType) bool {
-        const lower = @intFromEnum(TokenType.xmm0);
-        const upper = @intFromEnum(TokenType.r15b);
-        const r = @intFromEnum(self);
-        if (r >= lower and r <= upper) {
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-    pub fn isMnemonic(self: TokenType) bool {
-        const lower = @intFromEnum(TokenType.adc);
-        const upper = @intFromEnum(TokenType.xor);
-        const m = @intFromEnum(self);
-        if (m >= lower and m <= upper) {
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-    pub fn isPointerSize(self: TokenType) bool {
-        const lower = @intFromEnum(TokenType.p8);
-        const upper = @intFromEnum(TokenType.p64);
-        const p = @intFromEnum(self);
-        if (p >= lower and p <= upper) {
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-    pub fn isAdditionalReg(self: TokenType) bool {
-        const r = @intFromEnum(self);
-        const is = (r >= @intFromEnum(TokenType.r8) and r <= @intFromEnum(TokenType.r15)) or
-            (r >= @intFromEnum(TokenType.r8d) and r <= @intFromEnum(TokenType.r15d)) or
-            (r >= @intFromEnum(TokenType.r8w) and r <= @intFromEnum(TokenType.r15w)) or
-            (r >= @intFromEnum(TokenType.r8b) and r <= @intFromEnum(TokenType.r15b)) or
-            (r >= @intFromEnum(TokenType.xmm8) and r <= @intFromEnum(TokenType.xmm15));
-        return is;
-    }
-
-    pub fn isByteRegAdditional(self: TokenType) bool {
-        switch (self) {
-            TokenType.spl, TokenType.bpl, TokenType.sil, TokenType.dil => {
-                return true;
-            },
-            else => {
-                return false;
-            },
-        }
-    }
-
-    pub fn isByteRegHigh(self: TokenType) bool {
-        switch (self) {
-            TokenType.ah, TokenType.dh, TokenType.ch, TokenType.bh => {
-                return true;
-            },
-            else => {
-                return false;
-            },
-        }
-    }
-
-    pub fn isDataDirective(self: TokenType) bool {
-        const lower = @intFromEnum(TokenType.d8);
-        const upper = @intFromEnum(TokenType.d64);
-        const d = @intFromEnum(self);
-        if (d >= lower and d <= upper) {
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-    pub fn isAccumulator(self: TokenType) bool {
-        switch (self) {
-            TokenType.al, TokenType.ax, TokenType.eax, TokenType.rax => {
-                return true;
-            },
-            else => {
-                return false;
-            },
-        }
-    }
-
-    pub fn isBlockDecl(self: TokenType) bool {
-        switch (self) {
-            TokenType.entry, TokenType.import, TokenType.data, TokenType.code, TokenType.bss => {
-                return true;
-            },
-            else => {
-                return false;
-            },
-        }
-    }
-
-    pub fn isAnyIdent(self: TokenType) bool {
-        switch (self) {
-            TokenType.Ident, TokenType.HashIdent, TokenType.DotIdent => {
-                return true;
-            },
-            else => {
-                return false;
-            },
-        }
-    }
-
-    pub fn isSign(self: TokenType) bool {
-        if (self == TokenType.Minus or self == TokenType.Plus) {
-            return true;
-        }
-        return false;
     }
 };
 
@@ -219,61 +50,59 @@ const keywords: std.StaticStringMap(TokenType) = .initComptime(&.{
     .{ "p16", TokenType.p16 },
     .{ "p32", TokenType.p32 },
     .{ "p64", TokenType.p64 },
-    .{ "adc", TokenType.adc },
-    .{ "add", TokenType.add },
-    .{ "and", TokenType.@"and" },
-    .{ "call", TokenType.call },
-    .{ "cmp", TokenType.cmp },
+    .{ "p128", TokenType.p128 },
+    .{ "syscall", TokenType.syscall },
     .{ "dec", TokenType.dec },
     .{ "div", TokenType.div },
     .{ "idiv", TokenType.idiv },
-    .{ "imul", TokenType.imul },
     .{ "inc", TokenType.inc },
-    .{ "jae", TokenType.jae },
     .{ "ja", TokenType.ja },
-    .{ "jbe", TokenType.jbe },
+    .{ "jae", TokenType.jae },
     .{ "jb", TokenType.jb },
+    .{ "jbe", TokenType.jbe },
     .{ "jc", TokenType.jc },
     .{ "je", TokenType.je },
-    .{ "jge", TokenType.jge },
     .{ "jg", TokenType.jg },
-    .{ "jle", TokenType.jle },
+    .{ "jge", TokenType.jge },
     .{ "jl", TokenType.jl },
-    .{ "jmp", TokenType.jmp },
-    .{ "jnae", TokenType.jnae },
+    .{ "jle", TokenType.jle },
     .{ "jna", TokenType.jna },
-    .{ "jnbe", TokenType.jnbe },
+    .{ "jnae", TokenType.jnae },
     .{ "jnb", TokenType.jnb },
+    .{ "jnbe", TokenType.jnbe },
     .{ "jnc", TokenType.jnc },
     .{ "jne", TokenType.jne },
-    .{ "jnge", TokenType.jnge },
     .{ "jng", TokenType.jng },
-    .{ "jnle", TokenType.jnle },
+    .{ "jnge", TokenType.jnge },
     .{ "jnl", TokenType.jnl },
+    .{ "jnle", TokenType.jnle },
     .{ "jno", TokenType.jno },
     .{ "jnp", TokenType.jnp },
     .{ "jns", TokenType.jns },
     .{ "jnz", TokenType.jnz },
     .{ "jo", TokenType.jo },
+    .{ "jp", TokenType.jp },
     .{ "jpe", TokenType.jpe },
     .{ "jpo", TokenType.jpo },
-    .{ "jp", TokenType.jp },
     .{ "js", TokenType.js },
     .{ "jz", TokenType.jz },
-    .{ "lea", TokenType.lea },
-    .{ "mov", TokenType.mov },
-    .{ "movdqa", TokenType.movdqa },
-    .{ "movdqu", TokenType.movdqu },
-    .{ "movzx", TokenType.movzx },
+    .{ "jmp", TokenType.jmp },
     .{ "mul", TokenType.mul },
     .{ "neg", TokenType.neg },
     .{ "not", TokenType.not },
-    .{ "or", TokenType.@"or" },
     .{ "pop", TokenType.pop },
     .{ "push", TokenType.push },
+    .{ "call", TokenType.call },
+    .{ "adc", TokenType.adc },
+    .{ "add", TokenType.add },
+    .{ "and", TokenType.@"and" },
+    .{ "cmp", TokenType.cmp },
+    .{ "lea", TokenType.lea },
+    .{ "mov", TokenType.mov },
+    .{ "movzx", TokenType.movzx },
+    .{ "or", TokenType.@"or" },
     .{ "rcl", TokenType.rcl },
     .{ "rcr", TokenType.rcr },
-    .{ "ret", TokenType.ret },
     .{ "rol", TokenType.rol },
     .{ "ror", TokenType.ror },
     .{ "sal", TokenType.sal },
@@ -282,9 +111,252 @@ const keywords: std.StaticStringMap(TokenType) = .initComptime(&.{
     .{ "shl", TokenType.shl },
     .{ "shr", TokenType.shr },
     .{ "sub", TokenType.sub },
-    .{ "syscall", TokenType.syscall },
     .{ "test", TokenType.@"test" },
     .{ "xor", TokenType.xor },
+    .{ "ret", TokenType.ret },
+    .{ "imul", TokenType.imul },
+    .{ "movups", TokenType.movups },
+    .{ "movhlps", TokenType.movhlps },
+    .{ "movlps", TokenType.movlps },
+    .{ "unpcklps", TokenType.unpcklps },
+    .{ "unpckhps", TokenType.unpckhps },
+    .{ "movlhps", TokenType.movlhps },
+    .{ "movhps", TokenType.movhps },
+    .{ "movaps", TokenType.movaps },
+    .{ "cvtpi2ps", TokenType.cvtpi2ps },
+    .{ "movntps", TokenType.movntps },
+    .{ "ucomiss", TokenType.ucomiss },
+    .{ "comiss", TokenType.comiss },
+    .{ "movmskps", TokenType.movmskps },
+    .{ "sqrtps", TokenType.sqrtps },
+    .{ "rsqrtps", TokenType.rsqrtps },
+    .{ "rcpps", TokenType.rcpps },
+    .{ "andps", TokenType.andps },
+    .{ "andnps", TokenType.andnps },
+    .{ "orps", TokenType.orps },
+    .{ "xorps", TokenType.xorps },
+    .{ "addps", TokenType.addps },
+    .{ "mulps", TokenType.mulps },
+    .{ "cvtps2pd", TokenType.cvtps2pd },
+    .{ "cvtdq2ps", TokenType.cvtdq2ps },
+    .{ "subps", TokenType.subps },
+    .{ "minps", TokenType.minps },
+    .{ "divps", TokenType.divps },
+    .{ "maxps", TokenType.maxps },
+    .{ "movnti", TokenType.movnti },
+    .{ "cmpps", TokenType.cmpps },
+    .{ "shufps", TokenType.shufps },
+    .{ "movupd", TokenType.movupd },
+    .{ "movlpd", TokenType.movlpd },
+    .{ "unpcklpd", TokenType.unpcklpd },
+    .{ "unpckhpd", TokenType.unpckhpd },
+    .{ "movhpd", TokenType.movhpd },
+    .{ "movapd", TokenType.movapd },
+    .{ "cvtpi2pd", TokenType.cvtpi2pd },
+    .{ "movntpd", TokenType.movntpd },
+    .{ "ucomisd", TokenType.ucomisd },
+    .{ "comisd", TokenType.comisd },
+    .{ "movmskpd", TokenType.movmskpd },
+    .{ "sqrtpd", TokenType.sqrtpd },
+    .{ "andpd", TokenType.andpd },
+    .{ "andnpd", TokenType.andnpd },
+    .{ "orpd", TokenType.orpd },
+    .{ "xorpd", TokenType.xorpd },
+    .{ "addpd", TokenType.addpd },
+    .{ "mulpd", TokenType.mulpd },
+    .{ "cvtpd2ps", TokenType.cvtpd2ps },
+    .{ "cvtps2dq", TokenType.cvtps2dq },
+    .{ "subpd", TokenType.subpd },
+    .{ "minpd", TokenType.minpd },
+    .{ "divpd", TokenType.divpd },
+    .{ "maxpd", TokenType.maxpd },
+    .{ "punpcklbw", TokenType.punpcklbw },
+    .{ "punpcklwd", TokenType.punpcklwd },
+    .{ "punpckldq", TokenType.punpckldq },
+    .{ "packsswb", TokenType.packsswb },
+    .{ "pcmpgtb", TokenType.pcmpgtb },
+    .{ "pcmpgtw", TokenType.pcmpgtw },
+    .{ "pcmpgtd", TokenType.pcmpgtd },
+    .{ "packuswb", TokenType.packuswb },
+    .{ "punpckhbw", TokenType.punpckhbw },
+    .{ "punpckhwd", TokenType.punpckhwd },
+    .{ "punpckhdq", TokenType.punpckhdq },
+    .{ "packssdw", TokenType.packssdw },
+    .{ "punpcklqdq", TokenType.punpcklqdq },
+    .{ "punpckhqdq", TokenType.punpckhqdq },
+    .{ "movd", TokenType.movd },
+    .{ "movdqa", TokenType.movdqa },
+    .{ "pcmpeqb", TokenType.pcmpeqb },
+    .{ "pcmpeqw", TokenType.pcmpeqw },
+    .{ "pcmpeqd", TokenType.pcmpeqd },
+    .{ "haddpd", TokenType.haddpd },
+    .{ "hsubpd", TokenType.hsubpd },
+    .{ "psrldq", TokenType.psrldq },
+    .{ "pslldq", TokenType.pslldq },
+    .{ "addsubpd", TokenType.addsubpd },
+    .{ "psrlw", TokenType.psrlw },
+    .{ "psrld", TokenType.psrld },
+    .{ "psrlq", TokenType.psrlq },
+    .{ "paddq", TokenType.paddq },
+    .{ "pmullw", TokenType.pmullw },
+    .{ "movq", TokenType.movq },
+    .{ "pmovmskb", TokenType.pmovmskb },
+    .{ "psubusb", TokenType.psubusb },
+    .{ "psubusw", TokenType.psubusw },
+    .{ "pminub", TokenType.pminub },
+    .{ "pand", TokenType.pand },
+    .{ "paddusb", TokenType.paddusb },
+    .{ "paddusw", TokenType.paddusw },
+    .{ "pmaxub", TokenType.pmaxub },
+    .{ "pandn", TokenType.pandn },
+    .{ "pavgb", TokenType.pavgb },
+    .{ "psraw", TokenType.psraw },
+    .{ "psrad", TokenType.psrad },
+    .{ "pavgw", TokenType.pavgw },
+    .{ "pmulhuw", TokenType.pmulhuw },
+    .{ "pmulhw", TokenType.pmulhw },
+    .{ "cvttpd2dq", TokenType.cvttpd2dq },
+    .{ "movntdq", TokenType.movntdq },
+    .{ "psubsb", TokenType.psubsb },
+    .{ "psubsw", TokenType.psubsw },
+    .{ "pminsw", TokenType.pminsw },
+    .{ "por", TokenType.por },
+    .{ "paddsb", TokenType.paddsb },
+    .{ "paddsw", TokenType.paddsw },
+    .{ "pmaxsw", TokenType.pmaxsw },
+    .{ "pxor", TokenType.pxor },
+    .{ "psllw", TokenType.psllw },
+    .{ "pslld", TokenType.pslld },
+    .{ "psllq", TokenType.psllq },
+    .{ "pmuludq", TokenType.pmuludq },
+    .{ "pmaddwd", TokenType.pmaddwd },
+    .{ "psadbw", TokenType.psadbw },
+    .{ "maskmovdqu", TokenType.maskmovdqu },
+    .{ "psubb", TokenType.psubb },
+    .{ "psubw", TokenType.psubw },
+    .{ "psubd", TokenType.psubd },
+    .{ "psubq", TokenType.psubq },
+    .{ "paddb", TokenType.paddb },
+    .{ "paddw", TokenType.paddw },
+    .{ "paddd", TokenType.paddd },
+    .{ "pshufd", TokenType.pshufd },
+    .{ "cmppd", TokenType.cmppd },
+    .{ "pinsrw", TokenType.pinsrw },
+    .{ "pextrw", TokenType.pextrw },
+    .{ "shufpd", TokenType.shufpd },
+    .{ "movss", TokenType.movss },
+    .{ "movsldup", TokenType.movsldup },
+    .{ "movshdup", TokenType.movshdup },
+    .{ "cvtsi2ss", TokenType.cvtsi2ss },
+    .{ "movntss", TokenType.movntss },
+    .{ "cvttss2si", TokenType.cvttss2si },
+    .{ "cvtss2si", TokenType.cvtss2si },
+    .{ "sqrtss", TokenType.sqrtss },
+    .{ "rsqrtss", TokenType.rsqrtss },
+    .{ "rcpss", TokenType.rcpss },
+    .{ "addss", TokenType.addss },
+    .{ "mulss", TokenType.mulss },
+    .{ "cvtss2sd", TokenType.cvtss2sd },
+    .{ "cvttps2dq", TokenType.cvttps2dq },
+    .{ "subss", TokenType.subss },
+    .{ "minss", TokenType.minss },
+    .{ "divss", TokenType.divss },
+    .{ "maxss", TokenType.maxss },
+    .{ "movdqu", TokenType.movdqu },
+    .{ "cvtdq2pd", TokenType.cvtdq2pd },
+    .{ "pshufhw", TokenType.pshufhw },
+    .{ "cmpss", TokenType.cmpss },
+    .{ "movsd", TokenType.movsd },
+    .{ "movddup", TokenType.movddup },
+    .{ "cvtsi2sd", TokenType.cvtsi2sd },
+    .{ "movntsd", TokenType.movntsd },
+    .{ "cvttsd2si", TokenType.cvttsd2si },
+    .{ "cvtsd2si", TokenType.cvtsd2si },
+    .{ "sqrtsd", TokenType.sqrtsd },
+    .{ "addsd", TokenType.addsd },
+    .{ "mulsd", TokenType.mulsd },
+    .{ "cvtsd2ss", TokenType.cvtsd2ss },
+    .{ "subsd", TokenType.subsd },
+    .{ "minsd", TokenType.minsd },
+    .{ "divsd", TokenType.divsd },
+    .{ "maxsd", TokenType.maxsd },
+    .{ "haddps", TokenType.haddps },
+    .{ "hsubps", TokenType.hsubps },
+    .{ "addsubps", TokenType.addsubps },
+    .{ "cvtpd2dq", TokenType.cvtpd2dq },
+    .{ "lddqu", TokenType.lddqu },
+    .{ "pshuflw", TokenType.pshuflw },
+    .{ "cmpsd", TokenType.cmpsd },
+    .{ "pshufb", TokenType.pshufb },
+    .{ "phaddw", TokenType.phaddw },
+    .{ "phaddd", TokenType.phaddd },
+    .{ "phaddsw", TokenType.phaddsw },
+    .{ "pmaddubsw", TokenType.pmaddubsw },
+    .{ "phsubw", TokenType.phsubw },
+    .{ "phsubd", TokenType.phsubd },
+    .{ "phsubsw", TokenType.phsubsw },
+    .{ "psignb", TokenType.psignb },
+    .{ "psignw", TokenType.psignw },
+    .{ "psignd", TokenType.psignd },
+    .{ "pmulhrsw", TokenType.pmulhrsw },
+    .{ "pblendvb", TokenType.pblendvb },
+    .{ "blendvps", TokenType.blendvps },
+    .{ "blendvpd", TokenType.blendvpd },
+    .{ "ptest", TokenType.ptest },
+    .{ "pabsb", TokenType.pabsb },
+    .{ "pabsw", TokenType.pabsw },
+    .{ "pabsd", TokenType.pabsd },
+    .{ "pmovsxbw", TokenType.pmovsxbw },
+    .{ "pmovsxbd", TokenType.pmovsxbd },
+    .{ "pmovsxbq", TokenType.pmovsxbq },
+    .{ "pmovsxwd", TokenType.pmovsxwd },
+    .{ "pmovsxwq", TokenType.pmovsxwq },
+    .{ "pmovsxdq", TokenType.pmovsxdq },
+    .{ "pmuldq", TokenType.pmuldq },
+    .{ "pcmpeqq", TokenType.pcmpeqq },
+    .{ "movntdqa", TokenType.movntdqa },
+    .{ "packusdw", TokenType.packusdw },
+    .{ "pmovzxbw", TokenType.pmovzxbw },
+    .{ "pmovzxbd", TokenType.pmovzxbd },
+    .{ "pmovzxbq", TokenType.pmovzxbq },
+    .{ "pmovzxwd", TokenType.pmovzxwd },
+    .{ "pmovzxwq", TokenType.pmovzxwq },
+    .{ "pmovzxdq", TokenType.pmovzxdq },
+    .{ "pcmpgtq", TokenType.pcmpgtq },
+    .{ "pminsb", TokenType.pminsb },
+    .{ "pminsd", TokenType.pminsd },
+    .{ "pminuw", TokenType.pminuw },
+    .{ "pminud", TokenType.pminud },
+    .{ "pmaxsb", TokenType.pmaxsb },
+    .{ "pmaxsd", TokenType.pmaxsd },
+    .{ "pmaxuw", TokenType.pmaxuw },
+    .{ "pmaxud", TokenType.pmaxud },
+    .{ "pmulld", TokenType.pmulld },
+    .{ "phminposuw", TokenType.phminposuw },
+    .{ "roundps", TokenType.roundps },
+    .{ "roundpd", TokenType.roundpd },
+    .{ "roundss", TokenType.roundss },
+    .{ "roundsd", TokenType.roundsd },
+    .{ "blendps", TokenType.blendps },
+    .{ "blendpd", TokenType.blendpd },
+    .{ "pblendw", TokenType.pblendw },
+    .{ "palignr", TokenType.palignr },
+    .{ "pextrb", TokenType.pextrb },
+    .{ "pextrq", TokenType.pextrq },
+    .{ "pextrd", TokenType.pextrd },
+    .{ "extractps", TokenType.extractps },
+    .{ "pinsrb", TokenType.pinsrb },
+    .{ "insertps", TokenType.insertps },
+    .{ "pinsrd", TokenType.pinsrd },
+    .{ "pinsrq", TokenType.pinsrq },
+    .{ "dpps", TokenType.dpps },
+    .{ "dppd", TokenType.dppd },
+    .{ "mpsadbw", TokenType.mpsadbw },
+    .{ "pclmulqdq", TokenType.pclmulqdq },
+    .{ "pcmpestrm", TokenType.pcmpestrm },
+    .{ "pcmpestri", TokenType.pcmpestri },
+    .{ "pcmpistrm", TokenType.pcmpistrm },
+    .{ "pcmpistri", TokenType.pcmpistri },
     .{ "xmm0", TokenType.xmm0 },
     .{ "xmm1", TokenType.xmm1 },
     .{ "xmm2", TokenType.xmm2 },

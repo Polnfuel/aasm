@@ -16,30 +16,13 @@ pub const Label = u16;
 
 pub const Register = packed struct(u16) {
     name: TokenType,
-    size: MemSize,
 
     pub fn init(reg: TokenType) Register {
-        const r = @intFromEnum(reg);
-        const r128_start = @intFromEnum(TokenType.xmm0);
-        const r128_end = @intFromEnum(TokenType.xmm15);
-        const r64_end = @intFromEnum(TokenType.r15);
-        const r32_end = @intFromEnum(TokenType.r15d);
-        const r16_end = @intFromEnum(TokenType.r15w);
-        const r8_end = @intFromEnum(TokenType.r15b);
-        if (r >= r128_start) {
-            if (r <= r128_end) {
-                return Register{ .name = reg, .size = 16 };
-            } else if (r <= r64_end) {
-                return Register{ .name = reg, .size = 8 };
-            } else if (r <= r32_end) {
-                return Register{ .name = reg, .size = 4 };
-            } else if (r <= r16_end) {
-                return Register{ .name = reg, .size = 2 };
-            } else if (r <= r8_end) {
-                return Register{ .name = reg, .size = 1 };
-            }
-        }
-        return Register{ .name = .rip, .size = 0 };
+        return Register{ .name = reg };
+    }
+
+    pub fn size(self: Register) MemSize {
+        return @truncate(@intFromEnum(self.name) & 0xFF);
     }
 };
 
@@ -371,8 +354,8 @@ pub fn printCPUInstruction(self: *Program, instr: CpuInstruction) void {
                 std.debug.print("\x1b[36m{t}\x1b[0m", .{oper.op.reg.r.name});
             },
             .mem => {
-                const base = if (oper.op.mem.base.size > 0) oper.op.mem.base.name else null;
-                const index = if (oper.op.mem.index.size > 0) oper.op.mem.index.name else null;
+                const base = if (oper.op.mem.base.size() > 0) oper.op.mem.base.name else null;
+                const index = if (oper.op.mem.index.size() > 0) oper.op.mem.index.name else null;
                 const scale = oper.op.mem.scale;
                 const disp = oper.op.mem.disp;
                 const label = oper.op.mem.label;
@@ -381,7 +364,7 @@ pub fn printCPUInstruction(self: *Program, instr: CpuInstruction) void {
                     std.debug.print("p{d} ", .{oper.op.mem.size * 8});
                 }
                 std.debug.print("[", .{});
-                if (oper.op.mem.base.size > 0) {
+                if (oper.op.mem.base.size() > 0) {
                     std.debug.print("\x1b[36m{t}\x1b[0m", .{oper.op.mem.base.name});
                 }
                 if (index != null) {

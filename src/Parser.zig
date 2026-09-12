@@ -443,54 +443,29 @@ fn parseBssInstr(self: *const Parser, tokens: []Token) ParserError!void {
 }
 
 fn maxInstrOperandCount(mnem: TokenType) usize {
-    return switch (mnem) {
-        // zig fmt: off
-        .syscall => 0,
-        .dec, .div, .idiv, .inc, .ja, .jae, .jb, .jbe, .jc,
-            .je, .jg, .jge, .jl, .jle, .jna, .jnae, .jnb, .jnbe, .jnc, .jne, .jng,
-            .jnge, .jnl, .jnle, .jno, .jnp, .jns, .jnz, .jo, .jp, .jpe, .jpo, .js,
-            .jz, .jmp, .mul, .neg, .not, .pop, .push, .ret, .call 
-            => 1,
-        .adc, .add, .@"and", .cmp, .lea, .mov, .movdqa, .movdqu, .movzx, .@"or",
-            .rcl, .rcr, .rol, .ror,
-            .sal, .sar, .sbb, .shl, .shr, .sub, .@"test", .xor
-            => 2,
-        .imul => 3,
-        // zig fmt: on
-        else => unreachable,
-    };
+    const opcount = @intFromEnum(mnem) & 0x700;
+    if (opcount == 0x200) return 2;
+    if (opcount == 0x100 or opcount == 0x400) return 1;
+    if (opcount == 0x0) return 0;
+    if (opcount == 0x300 or opcount == 0x500) return 3;
+    unreachable;
 }
 
 fn checkInstrOpLen(mnem: TokenType, oplen: usize) []const u8 {
-    const number = enum { n0, n1, n2, n01, n123 };
-    const expected: number = switch (mnem) {
-        // zig fmt: off
-        .syscall => .n0,
-        .dec, .div, .idiv, .inc, .ja, .jae, .jb, .jbe, .jc,
-            .je, .jg, .jge, .jl, .jle, .jna, .jnae, .jnb, .jnbe, .jnc, .jne, .jng,
-            .jnge, .jnl, .jnle, .jno, .jnp, .jns, .jnz, .jo, .jp, .jpe, .jpo, .js,
-            .jz, .jmp, .mul, .neg, .not, .pop, .push, .call 
-            => .n1,
-        .adc, .add, .@"and", .cmp, .lea, .mov, .movdqa, .movdqu, .movzx, .@"or",
-            .rcl, .rcr, .rol, .ror,
-            .sal, .sar, .sbb, .shl, .shr, .sub, .@"test", .xor
-            => .n2,
-        .imul => .n123,
-        .ret => .n01,
-        // zig fmt: on
-        else => unreachable,
-    };
+    const expected = @intFromEnum(mnem) & 0x700;
 
-    return if (expected == .n0 and oplen != 0)
-        "0"
-    else if (expected == .n1 and oplen != 1)
-        "1"
-    else if (expected == .n2 and oplen != 2)
+    return if (expected == 0x200 and oplen != 2)
         "2"
-    else if (expected == .n01 and oplen > 1)
+    else if (expected == 0x100 and oplen != 1)
+        "1"
+    else if (expected == 0x0 and oplen != 0)
+        "0"
+    else if (expected == 0x400 and oplen > 1)
         "0 or 1"
-    else if (expected == .n123 and (oplen < 1 or oplen > 3))
+    else if (expected == 0x500 and (oplen < 1 or oplen > 3))
         "1, 2 or 3"
+    else if (expected == 0x300 and (oplen != 3))
+        "3"
     else
         &.{};
 }
@@ -498,15 +473,15 @@ fn checkInstrOpLen(mnem: TokenType, oplen: usize) []const u8 {
 fn checkMemOperand(self: *const Parser, oper: *MemOperand, line: u16) ParserError!void {
     var b_size: ?u8 = null;
     var i_size: ?u8 = null;
-    if (oper.base.size > 0) {
-        b_size = oper.base.size;
-        if (oper.base.name == .rip and oper.index.size != 0) {
+    if (oper.base.size() > 0) {
+        b_size = oper.base.size();
+        if (oper.base.name == .rip and oper.index.size() != 0) {
             utils.printSrcLineError("rip-relative addressing with index is not allowed", self.program, line);
             return ParserError.ParsingFailed;
         }
     }
-    if (oper.index.size > 0) {
-        i_size = oper.index.size;
+    if (oper.index.size() > 0) {
+        i_size = oper.index.size();
         if (oper.index.name == .rip) {
             utils.printSrcLineError("rip register cannot be index", self.program, line);
             return ParserError.ParsingFailed;
@@ -540,11 +515,11 @@ fn checkScale(self: *const Parser, scale: i32, line: u16, col: u16) ParserError!
 
 fn parseMemAddrOperand(self: *const Parser, tokens: []Token, consumed: *usize) ParserError!MemOperand {
     var memop: MemOperand = .{
-        .base = .{ .name = undefined, .size = 0 },
         .disp = 0,
-        .index = .{ .name = undefined, .size = 0 },
-        .scale = 0,
+        .base = .{ .name = .reg0 },
+        .index = .{ .name = .reg0 },
         .label = 0,
+        .scale = 0,
         .size = 0,
     };
     const first = tokens[0];
@@ -556,6 +531,7 @@ fn parseMemAddrOperand(self: *const Parser, tokens: []Token, consumed: *usize) P
             .p16 => 2,
             .p32 => 4,
             .p64 => 8,
+            .p128 => 16,
             else => unreachable,
         };
         i += 1;
@@ -583,7 +559,7 @@ fn parseMemAddrOperand(self: *const Parser, tokens: []Token, consumed: *usize) P
     var op: OpType = .none;
     var imm: ?Displacement = null;
     var imm_col: u16 = 0;
-    var reg: Register = .{ .name = undefined, .size = 0 };
+    var reg: Register = .{ .name = .reg0 };
 
     while (i < tokens.len) : (i += 1) {
         const token = tokens[i];
@@ -631,7 +607,7 @@ fn parseMemAddrOperand(self: *const Parser, tokens: []Token, consumed: *usize) P
                 used.i = true;
                 imm = null;
             } else if (!used.b and !used.i) {
-                if (reg.size > 0) {
+                if (reg.size() > 0) {
                     memop.base = reg;
                     memop.index = new_reg;
                     reg = new_reg;
@@ -669,7 +645,7 @@ fn parseMemAddrOperand(self: *const Parser, tokens: []Token, consumed: *usize) P
                 used.s = true;
                 memop.index = reg;
                 used.i = true;
-                reg = .{ .name = undefined, .size = 0 };
+                reg = .{ .name = .reg0 };
                 if (!used.d and imm != null) {
                     memop.disp = imm.?;
                     used.d = true;
