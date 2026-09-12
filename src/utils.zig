@@ -51,6 +51,7 @@ pub fn deinit() void {
     alloc.free(stderr_buffer);
     alloc.free(comp_dir);
     unique_strings.deinit(alloc);
+    deinitStrings();
 }
 
 pub fn setFlags(cli_args: CliArgs) void {
@@ -307,10 +308,14 @@ const LabelsHashMap = struct {
     }
 
     fn deinit(self: *Self) void {
-        const bytes = @sizeOf(Entry) * self.capacity + @sizeOf(Meta) * self.capacity;
-        const mem_ptr: [*]align(@alignOf(Entry)) u8 = @ptrCast(self.entries);
-        const memory = mem_ptr[0..bytes];
-        alloc.free(memory);
+        if (self.capacity > 0) {
+            const bytes = @sizeOf(Entry) * self.capacity + @sizeOf(Meta) * self.capacity;
+            const mem_ptr: [*]align(@alignOf(Entry)) u8 = @ptrCast(self.entries);
+            const memory = mem_ptr[0..bytes];
+            alloc.free(memory);
+            self.size = 0;
+            self.capacity = 0;
+        }
     }
 
     fn hashKey(key: []const u8) u64 {

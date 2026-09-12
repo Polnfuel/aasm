@@ -68,11 +68,6 @@ fn syntaxAnalyzis(self: *Assembler) AssemblerError!void {
         if (!unit.program.flags.has_code and !unit.program.flags.has_data and !unit.program.flags.has_bss) {
             utils.printSrcFileError("source file doesn't contain any data or code block", unit.program);
             return AssemblerError.AssemblyError;
-        } else if (!unit.program.flags.has_code and utils.flags.debug) {
-            // TODO: Still generate debug info about compilation unit
-            if (utils.flags.warnings) {
-                utils.printSrcFileWarning("source file doesn't contain code block to debug (debug info will not be generated)", unit.program);
-            }
         }
 
         // unit.program.printProgram();
@@ -86,9 +81,8 @@ fn codegenPrograms(self: *Assembler) AssemblerError!void {
             var codegen = Codegen.init(unit.program);
             defer codegen.deinit();
             try codegen.generateCode();
-
-            // unit.program.printSymbolTable();
         }
+        // unit.program.printSymbolTable();
     }
 }
 

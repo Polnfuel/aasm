@@ -240,7 +240,7 @@ fn parseEntry(self: *const Parser, tokens: []Token) ParserError!void {
 fn parseDataInstr(self: *const Parser, tokens: []Token, next_col: u16) ParserError!void {
     const line = tokens[0].line;
     if (tokens[0].type != .Ident and tokens[0].type != .HashIdent) {
-        utils.printSrcLineError("expected label name", self.program, line);
+        utils.printSrcLineColError("expected label name", self.program, line, tokens[0].col);
         return ParserError.ParsingFailed;
     }
     if (tokens.len < 2 or tokens[1].type != .Colon) {
@@ -928,10 +928,10 @@ fn parseImportBlock(self: *const Parser, tokens: []Token) ParserError!usize {
                     in_import.value_ptr.* = shared_index;
                 }
                 expect_symbol = false;
-            } else if (token.type.isBlockDecl()) {
+            } else if (token.type.isBlockDecl() or token.type == .Eof) {
                 return i;
             } else {
-                utils.printSrcLineError("expected label name", self.program, token.line);
+                utils.printSrcLineColError("expected label name", self.program, token.line, token.col);
                 return ParserError.ParsingFailed;
             }
         } else {
@@ -940,7 +940,7 @@ fn parseImportBlock(self: *const Parser, tokens: []Token) ParserError!usize {
             } else if (token.type.isBlockDecl() or token.type == .Eof) {
                 return i;
             } else {
-                utils.printSrcLineError("expected ,", self.program, token.line);
+                utils.printSrcLineColError("expected ,", self.program, token.line, token.col);
                 return ParserError.ParsingFailed;
             }
         }
