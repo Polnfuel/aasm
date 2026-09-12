@@ -135,6 +135,11 @@ pub const CodeBlock = struct {
     instr: std.ArrayList(CodeInstruction) = .empty,
     operands: std.ArrayList(CodeOperand) = .empty,
     buffer: Buffer = .empty,
+
+    pub fn deinitInstructions(self: *CodeBlock) void {
+        self.instr.deinit(utils.alloc);
+        self.operands.deinit(utils.alloc);
+    }
 };
 
 pub const RelType = enum {
@@ -390,9 +395,6 @@ pub fn printCPUInstruction(self: *Program, instr: CpuInstruction) void {
 
 pub fn deinit(self: *Program) void {
     utils.alloc.free(self.content);
-    self.tokens.deinit(utils.alloc);
-    self.code_block.operands.deinit(utils.alloc);
-    self.code_block.instr.deinit(utils.alloc);
     self.data_buffer.deinit(utils.alloc);
     self.code_block.buffer.deinit(utils.alloc);
     self.shared_libs.deinit(utils.alloc);
