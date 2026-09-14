@@ -414,12 +414,12 @@ const FileSection = packed struct {
     section: Shn,
 };
 
-const HM_Context = struct {
-    pub fn hash(self: *const HM_Context, key: FileSection) u64 {
+const FS_Context = struct {
+    pub fn hash(self: *const FS_Context, key: FileSection) u64 {
         _ = self;
         return (key.file * 3 + @intFromEnum(key.section));
     }
-    pub fn eql(self: *const HM_Context, first: FileSection, second: FileSection) bool {
+    pub fn eql(self: *const FS_Context, first: FileSection, second: FileSection) bool {
         _ = self;
         return (first.file == second.file and first.section == second.section);
     }
@@ -429,6 +429,22 @@ const LinkerSymbol = packed struct {
     vaddr: u64,
     size: u30,
     shn: Shn,
+};
+
+const LocSymbol = struct {
+    name: []const u8,
+    file: u32,
+};
+
+const LS_Context = struct {
+    pub fn hash(self: *const LS_Context, key: LocSymbol) u64 {
+        _ = self;
+        return std.hash_map.hashString(key.name) + key.file;
+    }
+    pub fn eql(self: *const LS_Context, first: LocSymbol, second: LocSymbol) bool {
+        _ = self;
+        return (std.mem.eql(u8, first.name, second.name) and first.file == second.file);
+    }
 };
 
 const LibraryFile = struct {
@@ -443,8 +459,8 @@ dyn_funcs: std.StringHashMapUnmanaged(u64),
 dyn_objects: std.StringHashMapUnmanaged(Object),
 dyn_search_paths: [][]const u8,
 dyn_runpath: std.ArrayList([]const u8),
-offsets: std.HashMapUnmanaged(FileSection, usize, HM_Context, 80),
-locals: std.StringHashMapUnmanaged(LinkerSymbol),
+offsets: std.HashMapUnmanaged(FileSection, usize, FS_Context, 80),
+locals: std.HashMapUnmanaged(LocSymbol, LinkerSymbol, LS_Context, 80),
 globals: std.StringHashMapUnmanaged(LinkerSymbol),
 
 pub fn init(self: *Linker, output_name: []const u8, comp_units: []CompUnit, search_paths: [][]const u8) std.mem.Allocator.Error!void {
@@ -659,7 +675,7 @@ fn printSymbols(self: *Linker) void {
     std.debug.print(" Local symbols\n", .{});
     var l_iter = self.locals.iterator();
     while (l_iter.next()) |sym| {
-        std.debug.print("{s:<15} {x:0>16}\n", .{ sym.key_ptr.*, sym.value_ptr.vaddr });
+        std.debug.print("{s:<15} {x:0>16}\n", .{ sym.key_ptr.*.name, sym.value_ptr.vaddr });
     }
 
     std.debug.print(" Global symbols\n", .{});
@@ -842,7 +858,7 @@ fn mergeSymbols(self: *Linker) LinkerError!void {
                 };
                 const sym_address = sh_address + sh_offset + sym.value;
                 const sym_name: []const u8 = std.mem.sliceTo(unit.objfile.buffs.strtab.items[sym.name..], 0);
-                try self.locals.putNoClobber(utils.alloc, sym_name, .{
+                try self.locals.putNoClobber(utils.alloc, .{ .name = sym_name, .file = @truncate(i) }, .{
                     .vaddr = sym_address,
                     .shn = switch (sym.info.type) {
                         .FUNC => .text,
@@ -905,7 +921,7 @@ fn patchRelocations(self: *Linker) void {
         for (unit.objfile.buffs.relatext.items) |rela| {
             const sym = unit.objfile.buffs.symtab.items[rela.info.sym];
             const sym_name: []const u8 = std.mem.sliceTo(unit.objfile.buffs.strtab.items[sym.name..], 0);
-            const sym_addr: u64 = if (self.locals.get(sym_name)) |symbol|
+            const sym_addr: u64 = if (self.locals.get(.{ .name = sym_name, .file = @truncate(i) })) |symbol|
                 symbol.vaddr
             else if (self.globals.get(sym_name)) |symbol|
                 symbol.vaddr
@@ -1134,7 +1150,7 @@ fn linkDebugInfo(self: *Linker, ind: *u8) std.mem.Allocator.Error!void {
             } else if (std.mem.eql(u8, sym_name, ".text")) {
                 std.mem.writeInt(u64, @ptrCast(buffs.debug_info.items[di_offset + rela.offset ..]), text_addresses.items[i], .little);
             } else {
-                const found_sym = self.locals.get(sym_name) orelse self.globals.get(sym_name) orelse unreachable;
+                const found_sym = self.locals.get(.{ .name = sym_name, .file = @truncate(i) }) orelse self.globals.get(sym_name) orelse unreachable;
                 std.mem.writeInt(u64, @ptrCast(buffs.debug_info.items[di_offset + rela.offset ..]), found_sym.vaddr, .little);
             }
         }
@@ -1181,7 +1197,7 @@ fn shdrTable(self: *Linker, ind: *u8) LinkerError!void {
             .bss => secs.bss.ind,
         };
         try buffs.symtab.append(utils.alloc, .{
-            .name = try self.exe.appendStrtabName(sym.key_ptr.*),
+            .name = try self.exe.appendStrtabName(sym.key_ptr.*.name),
             .info = .{ .bind = .LOCAL, .type = switch (sym.value_ptr.shn) {
                 .text => .FUNC,
                 .data, .bss => .OBJECT,
