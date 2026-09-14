@@ -149,7 +149,7 @@ fn dispFromImm(self: *const Parser, imm: Immediate, line: u16, col: u16) ParserE
     return disp;
 }
 
-fn parseRepeat(self: *const Parser, tokens: []Token, data_size: u8, consumed: *usize, max_size: usize) ParserError!RepeatOperand {
+fn parseRepeat(self: *const Parser, tokens: []Token, data_size: u8, consumed: *usize) ParserError!RepeatOperand {
     var repeat_oper: RepeatOperand = undefined;
     const line = tokens[0].line;
     if (tokens[0].type != .OpenParenthes) {
@@ -170,10 +170,6 @@ fn parseRepeat(self: *const Parser, tokens: []Token, data_size: u8, consumed: *u
                     return ParserError.ParsingFailed;
                 },
             };
-            if (count_value * data_size > max_size) {
-                utils.printSrcLineColError("repeat count is too large for this data size", self.program, line, tokens[i + 1].col);
-                return ParserError.ParsingFailed;
-            }
             if (tokens[i + 2].type != .Comma) {
                 utils.printSrcLineColError("expected ,", self.program, line, tokens[i + 2].col);
                 return ParserError.ParsingFailed;
@@ -315,7 +311,11 @@ fn parseDataInstr(self: *const Parser, tokens: []Token, next_col: u16) ParserErr
                     return ParserError.ParsingFailed;
                 }
                 var consumed: usize = undefined;
-                const repeat_oper = try self.parseRepeat(tokens[i + 1 ..], data_size, &consumed, 0x4000);
+                const repeat_oper = try self.parseRepeat(tokens[i + 1 ..], data_size, &consumed);
+                if (self.program.data_buffer.items.len + @as(usize, repeat_oper.count) * data_size > 50_000_000) {
+                    utils.printSrcLineColError("size of data block exceeded memory limit of 50 MB", self.program, token.line, token.col);
+                    return ParserError.ParsingFailed;
+                }
                 for (0..repeat_oper.count) |_| {
                     try self.appendImmediateBytes(repeat_oper.num, data_size);
                 }
@@ -402,9 +402,13 @@ fn parseBssInstr(self: *const Parser, tokens: []Token) ParserError!void {
         },
         .repeat => {
             var consumed: usize = undefined;
-            const repeat_oper = try self.parseRepeat(tokens[i + 1 ..], data_size, &consumed, 0x10000);
-            i += consumed;
+            const repeat_oper = try self.parseRepeat(tokens[i + 1 ..], data_size, &consumed);
+            if (@as(usize, self.program.bss_len) + @as(usize, repeat_oper.count) * data_size > @as(usize, 1) << 30) {
+                utils.printSrcLineColError("size of bss block exceeded memory limit of 1 GiB", self.program, token.line, token.col);
+                return ParserError.ParsingFailed;
+            }
             count = repeat_oper.count;
+            i += consumed;
         },
         else => {
             utils.printSrcLineColError("expected number or 'repeat' statement", self.program, line, token.col);
