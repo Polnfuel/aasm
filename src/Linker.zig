@@ -229,8 +229,8 @@ const DynLibElf = struct {
         gnu_hash: *elf.gnu_hash.Header,
     };
 
-    pub fn open(file: std.Io.File, io: std.Io) LinkerError!DynLibElf {
-        const stat = try file.stat(io);
+    pub fn open(file: std.Io.File) LinkerError!DynLibElf {
+        const stat = try file.stat(utils.io);
         const page = std.heap.pageSize();
 
         const file_bytes = try std.posix.mmap(
@@ -450,6 +450,22 @@ const LS_Context = struct {
 const LibraryFile = struct {
     file: std.Io.File,
     name: []const u8,
+
+    pub fn deinit(self: *LibraryFile) void {
+        utils.alloc.free(self.name);
+        self.file.close(utils.io);
+    }
+};
+
+const LF_Context = struct {
+    pub fn hash(self: *const LF_Context, key: LibraryFile) u64 {
+        _ = self;
+        return std.hash_map.hashString(key.name);
+    }
+    pub fn eql(self: *const LF_Context, first: LibraryFile, second: LibraryFile) bool {
+        _ = self;
+        return std.mem.eql(u8, first.name, second.name);
+    }
 };
 
 exe: ExeElf,
@@ -458,7 +474,7 @@ dyn_libs: std.ArrayList([]const u8),
 dyn_funcs: std.StringHashMapUnmanaged(u64),
 dyn_objects: std.StringHashMapUnmanaged(Object),
 dyn_search_paths: [][]const u8,
-dyn_runpath: std.ArrayList([]const u8),
+dyn_runpath: std.StringHashMapUnmanaged(void),
 offsets: std.HashMapUnmanaged(FileSection, usize, FS_Context, 80),
 locals: std.HashMapUnmanaged(LocSymbol, LinkerSymbol, LS_Context, 80),
 globals: std.StringHashMapUnmanaged(LinkerSymbol),
@@ -493,7 +509,9 @@ fn checkIfValidLibrary(file_handle: std.Io.File.Handle) std.posix.MMapError!bool
     return true;
 }
 
-fn searchInPath(self: *Linker, cwd_path: []const u8, search_dir_path: []const u8, lib_fullname: []const u8, save_path: bool) LinkerError!?LibraryFile {
+/// Searches for lib_fullname in search_dir_path. If found, returns opened file and actual library name.
+/// Caller needs to close file and free library name.
+fn searchInPathAlloc(self: *Linker, cwd_path: []const u8, search_dir_path: []const u8, lib_fullname: []const u8, save_path: bool) LinkerError!?LibraryFile {
     const abs_file_path = try std.fs.path.resolve(utils.alloc, &.{ cwd_path, search_dir_path, lib_fullname });
     defer utils.alloc.free(abs_file_path);
 
@@ -513,7 +531,10 @@ fn searchInPath(self: *Linker, cwd_path: []const u8, search_dir_path: []const u8
                 if (try checkIfValidLibrary(dir_file.handle)) {
                     // std.debug.print("Found valid file {s} in {s}\n", .{ entry.name, abs_dir_path });
                     if (save_path) {
-                        try self.dyn_runpath.append(utils.alloc, try utils.alloc.dupe(u8, abs_dir_path));
+                        const res = try self.dyn_runpath.getOrPut(utils.alloc, abs_dir_path);
+                        if (!res.found_existing) {
+                            res.key_ptr.* = try utils.alloc.dupe(u8, abs_dir_path);
+                        }
                     }
                     return LibraryFile{ .file = dir_file, .name = try utils.alloc.dupe(u8, entry.name) };
                 }
@@ -523,13 +544,18 @@ fn searchInPath(self: *Linker, cwd_path: []const u8, search_dir_path: []const u8
         return null;
     } else {
         if (save_path) {
-            try self.dyn_runpath.append(utils.alloc, try utils.alloc.dupe(u8, abs_dir_path));
+            const res = try self.dyn_runpath.getOrPut(utils.alloc, abs_dir_path);
+            if (!res.found_existing) {
+                res.key_ptr.* = try utils.alloc.dupe(u8, abs_dir_path);
+            }
         }
         return LibraryFile{ .file = file, .name = try utils.alloc.dupe(u8, lib_fullname) };
     }
 }
 
-fn resolveLibFileName(libname: []const u8) std.mem.Allocator.Error![]const u8 {
+/// Simple library name resolving by adding 'lib' prefix and '.so' suffix. E.g "c" -> "libc.so".
+/// Caller needs to free returned name
+fn resolveLibFileNameAlloc(libname: []const u8) std.mem.Allocator.Error![]const u8 {
     var buffer = try utils.alloc.alloc(u8, libname.len + 6);
     defer utils.alloc.free(buffer);
 
@@ -549,39 +575,24 @@ fn resolveLibFileName(libname: []const u8) std.mem.Allocator.Error![]const u8 {
     return copy;
 }
 
-fn findLib(self: *Linker, lib_fullname: []const u8) LinkerError!DynLibElf {
+/// Searches lib_fullname in self.dyn_search_paths and system /usr/lib64/ directory.
+/// If found, returns opened file and actual name. Caller needs to close file and free library name
+fn findLibNameAlloc(self: *Linker, lib_fullname: []const u8) LinkerError!LibraryFile {
     const cwd_path_sent = try std.process.currentPathAlloc(utils.io, utils.alloc);
     defer utils.alloc.free(cwd_path_sent);
     const cwd_path: []const u8 = @ptrCast(cwd_path_sent);
 
     for (self.dyn_search_paths) |search_path| {
-        const found_file = try self.searchInPath(cwd_path, search_path, lib_fullname, true) orelse continue;
-        defer {
-            found_file.file.close(utils.io);
-            utils.alloc.free(found_file.name);
-        }
-
-        var dynlib = DynLibElf.open(found_file.file, utils.io) catch continue;
-        dynlib.resolved_name = try utils.alloc.dupe(u8, found_file.name);
-        return dynlib;
+        const found_lib = try self.searchInPathAlloc(cwd_path, search_path, lib_fullname, true) orelse continue;
+        return found_lib;
     }
 
     const syslib_prefix = "/usr/lib64/";
-    const found_file = try self.searchInPath(cwd_path, syslib_prefix, lib_fullname, false) orelse {
+    const found_lib = try self.searchInPathAlloc(cwd_path, syslib_prefix, lib_fullname, false) orelse {
         utils.printErrorFmt("Could not find '{s}' library\n", .{lib_fullname});
         return LinkerError.LinkingFailed;
     };
-    defer {
-        found_file.file.close(utils.io);
-        utils.alloc.free(found_file.name);
-    }
-
-    var dynlib = DynLibElf.open(found_file.file, utils.io) catch {
-        utils.printErrorFmt("Could not find '{s}' library\n", .{lib_fullname});
-        return LinkerError.LinkingFailed;
-    };
-    dynlib.resolved_name = try utils.alloc.dupe(u8, found_file.name);
-    return dynlib;
+    return found_lib;
 }
 
 fn printDynstr(self: *Linker) void {
@@ -1015,8 +1026,9 @@ fn linkDynamic(self: *Linker) void {
     }
 
     const runpath_name = self.exe.buffs.dynstr.items.len;
-    for (self.dyn_runpath.items) |path| {
-        self.exe.buffs.dynstr.appendSliceAssumeCapacity(path);
+    var dyn_runpath_iter = self.dyn_runpath.keyIterator();
+    while (dyn_runpath_iter.next()) |path| {
+        self.exe.buffs.dynstr.appendSliceAssumeCapacity(path.*);
         self.exe.buffs.dynstr.appendAssumeCapacity(':');
     }
     self.exe.buffs.dynstr.items[self.exe.buffs.dynstr.items.len - 1] = 0;
@@ -1038,7 +1050,7 @@ fn linkDynamic(self: *Linker) void {
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_RELASZ, .d_val = self.exe.sections.reladyn.size });
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_RELAENT, .d_val = @sizeOf(elf.Elf64.Rela) });
     }
-    if (self.dyn_runpath.items.len > 0) {
+    if (self.dyn_runpath.size > 0) {
         dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_RUNPATH, .d_val = runpath_name });
     }
     dynamic.appendAssumeCapacity(.{ .d_tag = elf.DT_NULL, .d_val = 0 });
@@ -1425,8 +1437,9 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
         for (self.dyn_libs.items) |lib| {
             dynstr_size += lib.len + 1;
         }
-        for (self.dyn_runpath.items) |path| {
-            dynstr_size += path.len + 1;
+        var dyn_runpath_iter = self.dyn_runpath.keyIterator();
+        while (dyn_runpath_iter.next()) |path| {
+            dynstr_size += path.*.len + 1;
         }
 
         secs.dynstr.ind = incInd(&ind);
@@ -1469,7 +1482,7 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
         if (self.exe.has_copyobj) {
             secs.dynamic.size += 3 * @sizeOf(elf.Elf64_Dyn);
         }
-        if (self.dyn_runpath.items.len > 0) {
+        if (self.dyn_runpath.size > 0) {
             secs.dynamic.size += @sizeOf(elf.Elf64_Dyn);
         }
         secs.dynamic.vaddr = vaddress + secs.dynamic.offset;
@@ -1601,9 +1614,16 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
 
 fn linkExe(self: *Linker) LinkerError!void {
     if (self.exe.has_dynamic) {
-        // lib -> hash map of import symbols
-        var dyn_libs: std.AutoHashMapUnmanaged(Label, std.AutoHashMapUnmanaged(Label, void)) = .empty;
-        defer dyn_libs.deinit(utils.alloc);
+        // lib found name -> hash map of import symbols
+        var dyn_libs: std.HashMapUnmanaged(LibraryFile, std.AutoHashMapUnmanaged(Label, void), LF_Context, 80) = .empty;
+        defer {
+            var dyn_libs_iter = dyn_libs.iterator();
+            while (dyn_libs_iter.next()) |entry| {
+                utils.alloc.free(entry.key_ptr.name);
+                entry.value_ptr.deinit(utils.alloc);
+            }
+            dyn_libs.deinit(utils.alloc);
+        }
 
         for (self.comp_units) |unit| {
             if (unit.program.flags.has_shared) {
@@ -1611,10 +1631,19 @@ fn linkExe(self: *Linker) LinkerError!void {
                 while (imp_iter.next()) |import| {
                     const ind = import.value_ptr.*;
                     if (ind > 0) {
-                        const lib_name = unit.program.shared_libs.items[ind];
-                        const res = try dyn_libs.getOrPut(utils.alloc, lib_name);
+                        const lib_name = utils.stringValue(unit.program.shared_libs.items[ind]);
+                        // std.debug.print("Try to find '{s}'\n", .{lib_name});
+                        const lib_fullname = try resolveLibFileNameAlloc(lib_name);
+                        defer utils.alloc.free(lib_fullname);
+                        // std.debug.print("Resolved to '{s}'\n", .{lib_fullname});
+                        var found_lib = try self.findLibNameAlloc(lib_fullname);
+                        errdefer found_lib.deinit();
+
+                        const res = try dyn_libs.getOrPut(utils.alloc, found_lib);
                         if (!res.found_existing) {
                             res.value_ptr.* = .empty;
+                        } else {
+                            found_lib.deinit();
                         }
                         _ = try res.value_ptr.getOrPut(utils.alloc, import.key_ptr.*);
                     }
@@ -1624,17 +1653,13 @@ fn linkExe(self: *Linker) LinkerError!void {
 
         var lib_iter = dyn_libs.iterator();
         while (lib_iter.next()) |lib| {
-            defer lib.value_ptr.deinit(utils.alloc);
-
-            const lib_name = utils.stringValue(lib.key_ptr.*);
-            const lib_fullname = try resolveLibFileName(lib_name);
-            defer utils.alloc.free(lib_fullname);
-            // std.debug.print("Try to find library: '{s}' -> '{s}'\n", .{ lib_name, lib_fullname });
-            var dyn_lib = try self.findLib(lib_fullname);
+            const lib_found_name = lib.key_ptr.name;
+            // std.debug.print("Try to open library: '{s}'\n", .{lib_found_name});
+            var dyn_lib = try DynLibElf.open(lib.key_ptr.file);
             defer dyn_lib.close();
 
-            try self.dyn_libs.append(utils.alloc, dyn_lib.resolved_name);
-            // std.debug.print("Found library '{s}'\n", .{dyn_lib.resolved_name});
+            try self.dyn_libs.append(utils.alloc, try utils.alloc.dupe(u8, lib_found_name));
+            // std.debug.print("Found library '{s}'\n", .{lib.key_ptr.name});
 
             var sym_iter = lib.value_ptr.iterator();
             while (sym_iter.next()) |sym| {
@@ -1655,7 +1680,7 @@ fn linkExe(self: *Linker) LinkerError!void {
                         },
                     }
                 } else {
-                    utils.printErrorFmt("imported symbol '{s}' is not found in '{s}' library", .{ sym_name, lib_name });
+                    utils.printErrorFmt("imported symbol '{s}' is not found in '{s}' library", .{ sym_name, lib_found_name });
                     return LinkerError.LinkingFailed;
                 }
             }
