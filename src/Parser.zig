@@ -1051,4 +1051,16 @@ pub fn parseTokens(self: *Parser) ParserError!void {
             },
         }
     }
+
+    try self.checkProperEntry();
+}
+
+fn checkProperEntry(self: *const Parser) ParserError!void {
+    if (self.program.flags.has_entry) {
+        const in_code = self.program.funcs.get(self.program.entry);
+        if (in_code == null) {
+            utils.printSrcFileErrorFmt("entry label '{s}' points to non-executable or imported symbol\n", .{utils.stringValue(self.program.entry)}, self.program);
+            return ParserError.ParsingFailed;
+        }
+    }
 }
