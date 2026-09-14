@@ -8,7 +8,7 @@ const Label = u16;
 
 const Linker = @This();
 
-pub const LinkerError = error{ LinkingFailed, LoadingFailed } || std.mem.Allocator.Error || std.Io.File.OpenError || std.Io.File.StatError || std.process.CurrentPathAllocError || std.Io.Writer.Error || std.Io.File.SetPermissionsError || std.posix.MMapError;
+pub const LinkerError = error{LinkingFailed} || std.mem.Allocator.Error || std.Io.File.OpenError || std.Io.File.StatError || std.process.CurrentPathAllocError || std.Io.Writer.Error || std.Io.File.SetPermissionsError || std.posix.MMapError;
 
 /// Elf64 executable file representation
 const ExeElf = struct {
@@ -218,7 +218,6 @@ const Object = struct {
 };
 
 const DynLibElf = struct {
-    resolved_name: []const u8 = &.{},
     mem: []align(std.heap.page_size_min) u8,
     strings: [*:0]u8,
     syms: [*]elf.Elf64.Sym,
@@ -229,7 +228,7 @@ const DynLibElf = struct {
         gnu_hash: *elf.gnu_hash.Header,
     };
 
-    pub fn open(file: std.Io.File) LinkerError!DynLibElf {
+    pub fn open(file: std.Io.File, libname: []const u8) LinkerError!DynLibElf {
         const stat = try file.stat(utils.io);
         const page = std.heap.pageSize();
 
@@ -272,7 +271,8 @@ const DynLibElf = struct {
             }
         }
         const dynv = opt_dynv orelse {
-            return LinkerError.LoadingFailed;
+            utils.printErrorFmt("library '{s}' has no PT_DYNAMIC program header", .{libname});
+            return LinkerError.LinkingFailed;
         };
 
         const mem = try std.posix.mmap(null, addr_end, .{}, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
@@ -324,13 +324,21 @@ const DynLibElf = struct {
             .{ .gnu_hash = gnu }
         else if (opt_hashtab) |hash|
             .{ .hash = hash }
-        else
-            return LinkerError.LoadingFailed;
+        else {
+            utils.printErrorFmt("library '{s}' has neither DT_HASH nor DT_GNU_HASH section", .{libname});
+            return LinkerError.LinkingFailed;
+        };
 
         return DynLibElf{
             .mem = mem,
-            .strings = opt_strs orelse return LinkerError.LoadingFailed,
-            .syms = opt_syms orelse return LinkerError.LoadingFailed,
+            .strings = opt_strs orelse {
+                utils.printErrorFmt("library '{s}' has no DT_STRTAB section", .{libname});
+                return LinkerError.LinkingFailed;
+            },
+            .syms = opt_syms orelse {
+                utils.printErrorFmt("library '{s}' has no DT_SYMTAB section", .{libname});
+                return LinkerError.LinkingFailed;
+            },
             .hash_table = hash_table,
         };
     }
@@ -341,7 +349,9 @@ const DynLibElf = struct {
 
     pub fn lookup(self: *DynLibElf, sym_name: []const u8) ?union(enum) { func: elf.STT, obj: ObjInfo } {
         switch (self.hash_table) {
-            .hash => {},
+            .hash => {
+                // TODO: implement for System V standard .hash section
+            },
             .gnu_hash => |header| {
                 const nbuckets = header.nbuckets;
                 const symndx = header.symoffset;
@@ -1655,7 +1665,7 @@ fn linkExe(self: *Linker) LinkerError!void {
         while (lib_iter.next()) |lib| {
             const lib_found_name = lib.key_ptr.name;
             // std.debug.print("Try to open library: '{s}'\n", .{lib_found_name});
-            var dyn_lib = try DynLibElf.open(lib.key_ptr.file);
+            var dyn_lib = try DynLibElf.open(lib.key_ptr.file, lib_found_name);
             defer dyn_lib.close();
 
             try self.dyn_libs.append(utils.alloc, try utils.alloc.dupe(u8, lib_found_name));
@@ -2156,6 +2166,10 @@ pub fn deinit(self: *Linker) void {
     self.dyn_libs.deinit(utils.alloc);
     self.dyn_funcs.deinit(utils.alloc);
     self.dyn_objects.deinit(utils.alloc);
+    var dyn_runpath_iter = self.dyn_runpath.keyIterator();
+    while (dyn_runpath_iter.next()) |path| {
+        utils.alloc.free(path.*);
+    }
     self.dyn_runpath.deinit(utils.alloc);
     self.offsets.deinit(utils.alloc);
     self.locals.deinit(utils.alloc);
