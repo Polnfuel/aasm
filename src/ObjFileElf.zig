@@ -182,6 +182,9 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
                 .shndx = secs.text.ind,
             };
 
+            if (utils.flags.debug) {
+                try self.addFunctionDebugInfo(sym.key_ptr.*, @truncate(buffs.symtab.items.len), sym.value_ptr.size);
+            }
             try symbols_map.put(utils.alloc, sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             try buffs.symtab.append(utils.alloc, symbol);
         }
@@ -224,6 +227,9 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
                 .shndx = secs.text.ind,
             };
 
+            if (utils.flags.debug) {
+                try self.addFunctionDebugInfo(sym.key_ptr.*, @truncate(buffs.symtab.items.len), sym.value_ptr.size);
+            }
             try symbols_map.put(utils.alloc, sym.key_ptr.*, @truncate(buffs.symtab.items.len));
             try buffs.symtab.append(utils.alloc, symbol);
         }
@@ -342,6 +348,31 @@ fn addVariableDebugInfo(self: *ObjFileElf, name: Label, sym_ind: u32) std.mem.Al
         .offset = die_offset + 7,
         .info = .{ .sym = sym_ind, .type = @intFromEnum(elf.R_X86_64.@"64") },
         .addend = 0,
+    });
+}
+
+fn addFunctionDebugInfo(self: *ObjFileElf, name: Label, sym_ind: u32, sym_size: u32) std.mem.Allocator.Error!void {
+    const name_offset: u32 = @truncate(self.buffs.debug_str.items.len);
+    try self.buffs.debug_str.appendSlice(utils.alloc, utils.stringValue(name));
+    try self.buffs.debug_str.append(utils.alloc, 0);
+
+    const die_offset: u32 = @truncate(self.buffs.debug_info.items.len);
+    try self.buffs.debug_info.appendSlice(utils.alloc, &.{
+        0x03, 0, 0, 0, 0,
+        0,    0, 0, 0, 0,
+        0,    0, 0,
+    });
+    try writeUleb128(&self.buffs.debug_info, utils.alloc, sym_size);
+
+    try self.buffs.reladebug_info.append(utils.alloc, .{
+        .offset = die_offset + 1,
+        .info = .{ .sym = self.dbg_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+        .addend = name_offset,
+    });
+    try self.buffs.reladebug_info.append(utils.alloc, .{
+        .offset = die_offset + 5,
+        .info = .{ .sym = sym_ind, .type = @intFromEnum(elf.R_X86_64.@"64") },
+        .addend = name_offset,
     });
 }
 
@@ -480,11 +511,19 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, rel_path: []co
         dwarf.FORM.strp,    0x00,                   0x00,
     });
 
-    // DW_TAG_variable
+    // DW_TAG_variable abbrev
     try buffs.debug_abbrev.appendSlice(utils.alloc, &.{
         0x2,                dwarf.TAG.variable, dwarf.CHILDREN.no,
         dwarf.AT.name,      dwarf.FORM.strp,    dwarf.AT.location,
         dwarf.FORM.exprloc, 0x00,               0x00,
+    });
+
+    // DW_TAG_subprogram abbrev
+    try buffs.debug_abbrev.appendSlice(utils.alloc, &.{
+        0x3,             dwarf.TAG.subprogram, dwarf.CHILDREN.no,
+        dwarf.AT.name,   dwarf.FORM.strp,      dwarf.AT.low_pc,
+        dwarf.FORM.addr, dwarf.AT.high_pc,     dwarf.FORM.udata,
+        0x00,            0x00,
     });
 
     try buffs.debug_abbrev.append(utils.alloc, 0);
