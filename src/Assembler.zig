@@ -63,8 +63,6 @@ fn lexicalAnalyzis(self: *Assembler) AssemblerError!void {
 fn syntaxAnalyzis(self: *Assembler) AssemblerError!void {
     for (self.comp_units.items) |unit| {
         var parser = Parser.init(unit.program);
-        defer unit.program.tokens.deinit(utils.alloc);
-
         try parser.parseTokens();
 
         if (!unit.program.flags.has_code and !unit.program.flags.has_data and !unit.program.flags.has_bss) {
@@ -82,8 +80,6 @@ fn codegenPrograms(self: *Assembler) AssemblerError!void {
         if (unit.program.flags.has_code) {
             var codegen = Codegen.init(unit.program);
             defer codegen.deinit();
-            defer unit.program.code_block.deinitInstructions();
-
             try codegen.generateCode();
         }
         // unit.program.printSymbolTable();
