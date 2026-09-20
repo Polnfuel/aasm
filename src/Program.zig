@@ -187,6 +187,7 @@ content: []const u8,
 flags: ProgramFlags,
 tokens: std.ArrayList(Token),
 entry: Label,
+constants: std.AutoHashMapUnmanaged(Label, Immediate),
 data_buffer: std.ArrayList(u8),
 bss_len: u32,
 code_block: CodeBlock,
@@ -204,6 +205,7 @@ pub fn init(self: *Program, content: []const u8, file_name: []const u8) void {
     self.flags = ProgramFlags{};
     self.tokens = .empty;
     self.entry = 0;
+    self.constants = .empty;
     self.data_buffer = .empty;
     self.bss_len = 0;
     self.code_block = CodeBlock{};
@@ -225,6 +227,18 @@ pub fn printBuffer(buf: []const u8) void {
 pub fn printProgram(self: *Program) void {
     if (self.flags.has_entry) {
         std.debug.print("entry: {s}\n", .{utils.stringValue(self.entry)});
+    }
+
+    if (self.constants.count() > 0) {
+        std.debug.print("constants\n", .{});
+        var const_iter = self.constants.iterator();
+        while (const_iter.next()) |constant| {
+            std.debug.print("{s}: ", .{utils.stringValue(constant.key_ptr.*)});
+            switch (constant.value_ptr.*.sign) {
+                .i => std.debug.print("{d}\n", .{constant.value_ptr.*.negative()}),
+                .u => std.debug.print("{d}\n", .{constant.value_ptr.*.bits}),
+            }
+        }
     }
 
     if (self.flags.has_code) {
@@ -391,6 +405,7 @@ pub fn printCPUInstruction(self: *Program, instr: CpuInstruction) void {
 pub fn deinit(self: *Program) void {
     utils.alloc.free(self.content);
     self.tokens.deinit(utils.alloc);
+    self.constants.deinit(utils.alloc);
     self.code_block.operands.deinit(utils.alloc);
     self.code_block.instr.deinit(utils.alloc);
     self.data_buffer.deinit(utils.alloc);

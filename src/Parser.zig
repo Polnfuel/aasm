@@ -159,9 +159,12 @@ fn parseRepeat(self: *const Parser, tokens: []Token, data_size: u8, consumed: *u
     var i: usize = 0;
     const count_token = tokens[1];
     switch (count_token.type) {
-        .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus => {
+        .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus, .Ident => {
             var parsed: usize = 0;
-            const count = try self.parseNumber(tokens[1..], &parsed);
+            const count = if (count_token.type == .Ident) self.program.constants.get(count_token.val_ind) orelse {
+                utils.printSrcLineColError("expected non-negative number as repeat count", self.program, line, count_token.col);
+                return ParserError.ParsingFailed;
+            } else try self.parseNumber(tokens[1..], &parsed);
             i += parsed;
             const count_value: u32 = switch (count.sign) {
                 .u => @truncate(count.bits),
@@ -176,9 +179,12 @@ fn parseRepeat(self: *const Parser, tokens: []Token, data_size: u8, consumed: *u
             }
             const value_token = tokens[i + 3];
             switch (value_token.type) {
-                .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus => {
+                .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus, .Ident => {
                     parsed = 0;
-                    const value = try self.parseNumber(tokens[i + 3 ..], &parsed);
+                    const value = if (value_token.type == .Ident) self.program.constants.get(value_token.val_ind) orelse {
+                        utils.printSrcLineColError("expected number or string literal", self.program, line, value_token.col);
+                        return ParserError.ParsingFailed;
+                    } else try self.parseNumber(tokens[i + 3 ..], &parsed);
                     i += parsed;
                     const value_size = value.fitsInBytes();
                     if (value_size <= data_size) {
@@ -234,6 +240,7 @@ fn parseEntry(self: *const Parser, tokens: []Token) ParserError!void {
 }
 
 fn parseDataInstr(self: *const Parser, tokens: []Token, next_col: u16) ParserError!void {
+    //std.debug.print("{any}\n", .{tokens});
     const line = tokens[0].line;
     if (tokens[0].type != .Ident and tokens[0].type != .HashIdent) {
         utils.printSrcLineColError("expected label name", self.program, line, tokens[0].col);
@@ -285,7 +292,7 @@ fn parseDataInstr(self: *const Parser, tokens: []Token, next_col: u16) ParserErr
                     return ParserError.ParsingFailed;
                 }
             },
-            .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus => {
+            .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus, .Ident => {
                 if (expect_value) {
                     expect_value = false;
                 } else {
@@ -293,7 +300,10 @@ fn parseDataInstr(self: *const Parser, tokens: []Token, next_col: u16) ParserErr
                     return ParserError.ParsingFailed;
                 }
                 var parsed: usize = 0;
-                const num = try self.parseNumber(tokens[i..], &parsed);
+                const num = if (token.type == .Ident) self.program.constants.get(token.val_ind) orelse {
+                    utils.printSrcLineColError("expected string, number or 'repeat' statement", self.program, token.line, token.col);
+                    return ParserError.ParsingFailed;
+                } else try self.parseNumber(tokens[i..], &parsed);
                 const num_size = num.fitsInBytes();
                 if (num_size <= data_size) {
                     try self.appendImmediateBytes(num, data_size);
@@ -350,13 +360,16 @@ fn parseDataInstr(self: *const Parser, tokens: []Token, next_col: u16) ParserErr
 
     const in_data = try self.program.data_vars.getOrPut(utils.alloc, tokens[0].val_ind);
     if (in_data.found_existing) {
-        utils.printSrcLineColErrorFmt("label '{s}' already defined in this block", .{label}, self.program, line, tokens[0].col);
+        utils.printSrcLineColErrorFmt("label '{s}' already defined in data or bss block", .{label}, self.program, line, tokens[0].col);
         return ParserError.ParsingFailed;
     } else if (self.program.funcs.contains(tokens[0].val_ind)) {
         utils.printSrcLineColErrorFmt("label '{s}' already defined in code block", .{label}, self.program, line, tokens[0].col);
         return ParserError.ParsingFailed;
     } else if (self.program.imports.contains(tokens[0].val_ind)) {
         utils.printSrcLineColErrorFmt("label '{s}' already defined in import block", .{label}, self.program, line, tokens[0].col);
+        return ParserError.ParsingFailed;
+    } else if (self.program.constants.contains(tokens[0].val_ind)) {
+        utils.printSrcLineColErrorFmt("label '{s}' already defined in constants block", .{label}, self.program, line, tokens[0].col);
         return ParserError.ParsingFailed;
     } else {
         in_data.value_ptr.visib = if (tokens[0].type == .HashIdent) .Export else .Local;
@@ -394,9 +407,11 @@ fn parseBssInstr(self: *const Parser, tokens: []Token) ParserError!void {
     var i: usize = 3;
     const token = tokens[i];
     switch (token.type) {
-        .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus => {
+        .NumberLiteral, .HexNumLiteral, .BinNumLiteral, .Minus, .Plus, .Ident => {
             var parsed: usize = 0;
-            _ = try self.parseNumber(tokens[i..], &parsed);
+            if (token.type != .Ident) {
+                _ = try self.parseNumber(tokens[i..], &parsed);
+            }
             i += parsed;
             count = 1;
         },
@@ -430,6 +445,9 @@ fn parseBssInstr(self: *const Parser, tokens: []Token) ParserError!void {
         return ParserError.ParsingFailed;
     } else if (self.program.imports.contains(tokens[0].val_ind)) {
         utils.printSrcLineColErrorFmt("label '{s}' already defined in import block", .{label}, self.program, line, col);
+        return ParserError.ParsingFailed;
+    } else if (self.program.constants.contains(tokens[0].val_ind)) {
+        utils.printSrcLineColErrorFmt("label '{s}' already defined in constants block", .{label}, self.program, line, tokens[0].col);
         return ParserError.ParsingFailed;
     } else {
         const next_aligned = std.mem.alignForward(u32, self.program.bss_len, data_size);
@@ -629,7 +647,7 @@ fn parseMemAddrOperand(self: *const Parser, tokens: []Token, consumed: *usize) P
             }
             op = .reg;
             signs = 0;
-        } else if (t == .NumberLiteral or t == .HexNumLiteral or t == .BinNumLiteral) {
+        } else if (t == .NumberLiteral or t == .HexNumLiteral or t == .BinNumLiteral or (t == .Ident and self.program.constants.contains(token.val_ind))) {
             if (op == .numaster) {
                 utils.printSrcLineColError("invalid scaled index", self.program, line, token.col);
                 return ParserError.ParsingFailed;
@@ -641,7 +659,7 @@ fn parseMemAddrOperand(self: *const Parser, tokens: []Token, consumed: *usize) P
                 return ParserError.ParsingFailed;
             }
             var parsed: usize = 0;
-            const value = try self.parseNumber(tokens[i - signs ..], &parsed);
+            const value = if (t == .Ident) self.program.constants.get(token.val_ind).? else try self.parseNumber(tokens[i - signs ..], &parsed);
             const imm1 = try self.dispFromImm(value, line, token.col);
 
             if (op == .regaster) {
@@ -730,6 +748,20 @@ fn parseCodeOperand(self: *const Parser, tokens: []Token) ParserError!CodeOperan
             op = .reg;
         } else if (t == .Plus or t == .Minus) {
             signs += 1;
+        } else if (t == .NumberLiteral or t == .HexNumLiteral or t == .BinNumLiteral or (t == .Ident and self.program.constants.contains(token.val_ind))) {
+            var parsed: usize = 0;
+            const value = if (t == .Ident) self.program.constants.get(token.val_ind).? else try self.parseNumber(tokens[i - signs ..], &parsed);
+            if (op == .lbl) {
+                oper.op.label.d = value;
+                op = .lblimm;
+            } else if (op == .none) {
+                oper = .initImm(value);
+                op = .imm;
+            } else {
+                utils.printSrcLineColError("unexpected number", self.program, token.line, token.col);
+                return ParserError.ParsingFailed;
+            }
+            signs = 0;
         } else if (t == .Ident or t == .DotIdent) {
             const label = try self.parseLabel(tokens[i - signs ..]);
             if (op == .none) {
@@ -740,20 +772,6 @@ fn parseCodeOperand(self: *const Parser, tokens: []Token) ParserError!CodeOperan
                 op = .lblimm;
             } else {
                 utils.printSrcLineColError("unexpected label", self.program, token.line, token.col);
-                return ParserError.ParsingFailed;
-            }
-            signs = 0;
-        } else if (t == .NumberLiteral or t == .HexNumLiteral or t == .BinNumLiteral) {
-            var parsed: usize = 0;
-            const value = try self.parseNumber(tokens[i - signs ..], &parsed);
-            if (op == .lbl) {
-                oper.op.label.d = value;
-                op = .lblimm;
-            } else if (op == .none) {
-                oper = .initImm(value);
-                op = .imm;
-            } else {
-                utils.printSrcLineColError("unexpected number", self.program, token.line, token.col);
                 return ParserError.ParsingFailed;
             }
             signs = 0;
@@ -814,21 +832,24 @@ fn parseCodeInstr(self: *Parser, tokens: []Token) ParserError!void {
 
         if (is_func) {
             const in_code = try self.program.funcs.getOrPut(utils.alloc, tokens[0].val_ind);
+            in_code.value_ptr.local_labels = .empty;
             if (in_code.found_existing) {
                 utils.printSrcLineColErrorFmt("label '{s}' already defined in this block", .{label}, self.program, line, tokens[0].col);
                 return ParserError.ParsingFailed;
             } else if (self.program.data_vars.contains(tokens[0].val_ind)) {
-                utils.printSrcLineColErrorFmt("label '{s}' already defined in data block", .{label}, self.program, line, tokens[0].col);
+                utils.printSrcLineColErrorFmt("label '{s}' already defined in data or bss block", .{label}, self.program, line, tokens[0].col);
                 return ParserError.ParsingFailed;
             } else if (self.program.imports.contains(tokens[0].val_ind)) {
                 utils.printSrcLineColErrorFmt("label '{s}' already defined in import block", .{label}, self.program, line, tokens[0].col);
+                return ParserError.ParsingFailed;
+            } else if (self.program.constants.contains(tokens[0].val_ind)) {
+                utils.printSrcLineColErrorFmt("label '{s}' already defined in constants block", .{label}, self.program, line, tokens[0].col);
                 return ParserError.ParsingFailed;
             } else {
                 self.cur_func = tokens[0].val_ind;
                 in_code.value_ptr.visib = if (tokens[0].type == .HashIdent) .Export else .Local;
                 in_code.value_ptr.size = 0;
                 in_code.value_ptr.offset = 0;
-                in_code.value_ptr.local_labels = .empty;
             }
         } else {
             const function = self.program.funcs.getPtr(self.cur_func);
@@ -893,6 +914,47 @@ fn parseCodeInstr(self: *Parser, tokens: []Token) ParserError!void {
     }
 }
 
+fn parseConstBlock(self: *Parser, tokens: []Token) ParserError!usize {
+    if (tokens[0].type != .NewLine) {
+        utils.printSrcLineColError("expected end of line after block keyword", self.program, tokens[0].line, tokens[0].col);
+        return ParserError.ParsingFailed;
+    }
+    var i: usize = 1;
+    while (i < tokens.len) {
+        const token = tokens[i];
+        if (token.type.isBlockDecl() or token.type == .Eof) {
+            return i;
+        } else if (token.type != .Ident) {
+            utils.printSrcLineColError("expected constant name", self.program, token.line, token.col);
+            return ParserError.ParsingFailed;
+        }
+        if (tokens[i + 1].type != .Colon) {
+            utils.printSrcLineColError("expected :", self.program, tokens[i + 1].line, tokens[i + 1].col);
+            return ParserError.ParsingFailed;
+        }
+        const value = tokens[i + 2];
+        if (value.type != .NumberLiteral and value.type != .HexNumLiteral and value.type != .BinNumLiteral) {
+            utils.printSrcLineColError("expected number", self.program, value.line, value.col);
+            return ParserError.ParsingFailed;
+        }
+        if (tokens[i + 3].type != .NewLine) {
+            utils.printSrcLineColError("expected end of line", self.program, tokens[i + 3].line, tokens[i + 3].col);
+            return ParserError.ParsingFailed;
+        }
+        const res = try self.program.constants.getOrPut(utils.alloc, token.val_ind);
+        if (res.found_existing) {
+            utils.printSrcLineColErrorFmt("label '{s}' already defined in this block", .{utils.stringValue(token.val_ind)}, self.program, token.line, token.col);
+            return ParserError.ParsingFailed;
+        } else {
+            var consumed: usize = 0;
+            res.value_ptr.* = try self.parseNumber(tokens[i + 2 .. i + 3], &consumed);
+        }
+        i += 4;
+    }
+
+    return tokens.len;
+}
+
 fn parseImportBlock(self: *const Parser, tokens: []Token) ParserError!usize {
     var import_name: ?Label = null;
     var start: usize = 1;
@@ -928,6 +990,9 @@ fn parseImportBlock(self: *const Parser, tokens: []Token) ParserError!usize {
                 } else if (self.program.funcs.contains(token.val_ind)) {
                     utils.printSrcLineErrorFmt("label '{s}' already defined in code block", .{label}, self.program, token.line);
                     return ParserError.ParsingFailed;
+                } else if (self.program.constants.contains(token.val_ind)) {
+                    utils.printSrcLineErrorFmt("label '{s}' already defined in constants block", .{label}, self.program, token.line);
+                    return ParserError.ParsingFailed;
                 } else {
                     in_import.value_ptr.* = shared_index;
                 }
@@ -962,17 +1027,24 @@ fn parseBlock(self: *Parser, tokens: []Token, block_type: BlockType) ParserError
     var i: usize = 1;
     while (i < tokens.len) : (i += 1) {
         const token = tokens[i];
-        const is_block_decl = token.type.isBlockDecl() or token.type == .Eof;
-        const data_instr_end = block_type == .data and (token.type == .Ident or token.type == .HashIdent or is_block_decl);
+        const end_of_block = token.type.isBlockDecl() or token.type == .Eof;
+        const is_constant = self.program.constants.contains(token.val_ind);
+        const data_instr_end = block_type == .data and ((token.type == .Ident and !is_constant) or token.type == .HashIdent or end_of_block);
+        //std.debug.print("al: {}, de: {}, {any}\n", .{ already_started, data_instr_end, token });
         if (data_instr_end) {
             if (!already_started) {
+                if (cur_instr.len > 0 and self.program.constants.contains(cur_instr[0].val_ind)) {
+                    const first = cur_instr[0];
+                    utils.printSrcLineColErrorFmt("label '{s}' already defined in constants block", .{utils.stringValue(first.val_ind)}, self.program, first.line, first.col);
+                    return ParserError.ParsingFailed;
+                }
                 already_started = true;
                 cur_instr.len += 1;
                 continue;
             }
             try self.parseDataInstr(cur_instr, token.col);
             cur_instr = tokens[i .. i + 1];
-            if (is_block_decl) {
+            if (end_of_block) {
                 return i;
             }
         } else if (token.type == .NewLine) {
@@ -983,7 +1055,7 @@ fn parseBlock(self: *Parser, tokens: []Token, block_type: BlockType) ParserError
                 else => continue,
             }
             cur_instr = tokens[i + 1 .. i + 1];
-        } else if (token.type.isBlockDecl() or token.type == .Eof) {
+        } else if (end_of_block) {
             return i;
         } else {
             cur_instr.len += 1;
@@ -1048,6 +1120,10 @@ pub fn parseTokens(self: *Parser) ParserError!void {
                 const len = try self.parseImportBlock(self.program.tokens.items[i + 1 ..]);
                 i += len;
             },
+            .@"const" => {
+                const len = try self.parseConstBlock(self.program.tokens.items[i + 1 ..]);
+                i += len;
+            },
             .NewLine, .Eof => {},
             else => {
                 utils.printSrcLineColError("expected block declaration", self.program, token.line, token.col);
@@ -1061,9 +1137,8 @@ pub fn parseTokens(self: *Parser) ParserError!void {
 
 fn checkProperEntry(self: *const Parser) ParserError!void {
     if (self.program.flags.has_entry) {
-        const in_code = self.program.funcs.get(self.program.entry);
-        if (in_code == null) {
-            utils.printSrcFileErrorFmt("entry label '{s}' points to non-executable or imported symbol\n", .{utils.stringValue(self.program.entry)}, self.program);
+        if (!self.program.funcs.contains(self.program.entry)) {
+            utils.printSrcFileErrorFmt("entry label '{s}' must point to defined code block label", .{utils.stringValue(self.program.entry)}, self.program);
             return ParserError.ParsingFailed;
         }
     }

@@ -426,6 +426,7 @@ pub const TokenType = enum(u16) {
 
     //Keywords
     entry = 0b1100000000000000,
+    @"const",
     data,
     code,
     import,
@@ -511,7 +512,7 @@ pub const TokenType = enum(u16) {
 
     pub fn isBlockDecl(self: TokenType) bool {
         switch (self) {
-            TokenType.entry, TokenType.import, TokenType.data, TokenType.code, TokenType.bss => {
+            TokenType.entry, TokenType.import, TokenType.@"const", TokenType.data, TokenType.code, TokenType.bss => {
                 return true;
             },
             else => {

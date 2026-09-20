@@ -265,6 +265,7 @@ const keywords: SortedKeywords = .init(&.{
     .{ "xmm15", TokenType.xmm15 },
     .{ "xorpd", TokenType.xorpd },
     .{ "xorps", TokenType.xorps },
+    .{ "@const", TokenType.@"const" },
     .{ "@entry", TokenType.entry },
     .{ "andnpd", TokenType.andnpd },
     .{ "andnps", TokenType.andnps },
