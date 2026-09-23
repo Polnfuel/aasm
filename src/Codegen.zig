@@ -15,6 +15,7 @@ const CpuInstruction = Program.CpuInstruction;
 const CodeInstruction = Program.CodeInstruction;
 const RelType = Program.RelType;
 const Relocation = Program.Relocation;
+const LineProgramEntry = Program.LineProgramEntry;
 
 const Codegen = @This();
 
@@ -347,11 +348,320 @@ const InstrBytes = struct {
     }
 };
 
+const BranchRelaxation = struct {
+    const FunctionsMap = struct {
+        const Entry = struct {
+            key: FuncLabel,
+            value: FuncInfo,
+        };
+        const Self = @This();
+        const empty = Self{ .entries = .empty };
+
+        entries: std.ArrayList(Entry),
+
+        pub fn get(self: *Self, key: FuncLabel) ?FuncInfo {
+            for (self.entries.items) |entry| {
+                if (entry.key.name == key.name and entry.key.parent == key.parent) {
+                    return entry.value;
+                }
+            }
+            return null;
+        }
+
+        pub fn put(self: *Self, key: FuncLabel, value: FuncInfo) std.mem.Allocator.Error!void {
+            try self.entries.append(utils.alloc, .{ .key = key, .value = value });
+        }
+
+        pub fn nextFunc(self: *Self, cur_ind: usize) ?FuncInfo {
+            for (self.entries.items[cur_ind + 1 ..]) |entry| {
+                if (entry.key.parent == 0 and entry.key.name > 0) {
+                    return entry.value;
+                } else if (entry.key.parent == 0 and entry.key.name == std.math.maxInt(Label)) {
+                    return null;
+                }
+            }
+            return null;
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.entries.deinit(utils.alloc);
+        }
+    };
+
+    const FuncLabel = struct {
+        parent: Label, // 0 means no parent so it is Function
+        name: Label,
+    };
+
+    const FuncInfo = struct {
+        frag_ind: u32,
+        offset: u32,
+    };
+
+    const Fixed = struct {
+        line_program: std.ArrayList(LineProgramEntry) = .empty, // .offset is relative to start of fragment
+        relocs: std.ArrayList(Relocation) = .empty, // .offset is relative to start of fragment
+        stb0: u32, // Offset in static_bytes to first byte of fragment
+        len: u32 = 0, // Len of fragment buffer
+    };
+
+    const Jump = struct {
+        line_program: LineProgramEntry = undefined, // Just one entry because this fragment consist of one jump instruction
+        reloc: ?Relocation = null, // For jumps to undefined labels (imports)
+        rel: i32 = 0,
+        target: FuncLabel,
+        targ_addend: i64 = 0,
+        conditional: bool, // False means JMP, true means Jcc
+        relaxed: bool = false, // False means rel8, true means rel32
+        opcode: u8,
+
+        pub fn len(self: *const Jump) u32 {
+            if (!self.relaxed) {
+                return 2;
+            } else if (self.conditional and self.relaxed) {
+                return 6;
+            } else return 5;
+        }
+    };
+
+    const Fragment = struct {
+        offset: u32, // Relative to code block buffer start
+        f: union {
+            fixed: Fixed,
+            jump: Jump,
+        },
+        tag: enum(u1) { fixed, jump },
+    };
+
+    static_bytes: std.ArrayList(u8) = .empty,
+    frags: std.ArrayList(Fragment) = .empty,
+    labels: FunctionsMap = .empty, // Maps label definition to fragment index where it defined
+    codegen: *const Codegen = undefined,
+    cur_fixed: ?*Fragment = null,
+
+    fn newFixed(self: *BranchRelaxation) std.mem.Allocator.Error!void {
+        const stb: u32 = @truncate(self.static_bytes.items.len);
+        try self.frags.append(utils.alloc, .{ .f = .{ .fixed = .{ .stb0 = stb } }, .offset = self.newOffset(), .tag = .fixed });
+    }
+
+    fn ensureFixed(self: *BranchRelaxation) !void {
+        if (self.cur_fixed == null) {
+            try self.newFixed();
+            self.cur_fixed = &self.frags.items[self.frags.items.len - 1];
+        }
+    }
+
+    pub fn shiftFixed(self: *BranchRelaxation, fixed: *Fragment, shift: u32) void {
+        _ = self;
+        fixed.offset += shift;
+    }
+
+    pub fn newJump(self: *BranchRelaxation, opcode: u8, conditional: bool, target: FuncLabel, targ_addend: i64) CodegenError!void {
+        var new = Fragment{
+            .f = .{ .jump = .{
+                .opcode = opcode,
+                .conditional = conditional,
+                .target = target,
+                .targ_addend = targ_addend,
+            } },
+            .offset = self.newOffset(),
+            .tag = .jump,
+        };
+        if (self.labels.get(target) != null) {
+            // Backward jump can be already checked in first pass
+            var _r: bool = undefined;
+            _ = try self.recalcJump(&new, &_r);
+        }
+        try self.frags.append(utils.alloc, new);
+        self.cur_fixed = null;
+    }
+
+    /// Returns possible shift for subsequent fragments
+    pub fn shiftJumpAndRecalc(self: *BranchRelaxation, jump: *Fragment, shift: u32, was_relaxed: *bool) CodegenError!u32 {
+        jump.offset += shift;
+        return try self.recalcJump(jump, was_relaxed);
+    }
+
+    /// Returns possible shift for subsequent fragments
+    pub fn recalcJump(self: *BranchRelaxation, jump: *Fragment, was_relaxed: *bool) CodegenError!u32 {
+        if (self.labels.get(jump.f.jump.target)) |target| {
+            const fixed = self.frags.items[target.frag_ind];
+            const label_glob_offset = fixed.offset + target.offset;
+            var instr_offset = jump.offset + jump.f.jump.len();
+            var diff: i64 = @as(i64, label_glob_offset) + jump.f.jump.targ_addend - @as(i64, instr_offset);
+            if (std.math.cast(i8, diff)) |rel8| {
+                std.debug.assert(jump.f.jump.relaxed == false);
+                jump.f.jump.relaxed = false;
+                jump.f.jump.rel = rel8;
+                return 0;
+            } else {
+                const is_relaxed = jump.f.jump.relaxed;
+                if (is_relaxed == false) was_relaxed.* = true;
+                jump.f.jump.relaxed = true;
+                var growth = instr_offset;
+                instr_offset = jump.offset + jump.f.jump.len();
+                growth = instr_offset - growth;
+                diff = @as(i64, label_glob_offset) + jump.f.jump.targ_addend - @as(i64, instr_offset);
+                if (std.math.cast(i32, diff)) |rel32| {
+                    jump.f.jump.rel = rel32;
+                    if (jump.f.jump.conditional) {
+                        if (!is_relaxed) jump.f.jump.opcode += 0x10;
+                    } else {
+                        jump.f.jump.opcode = 0xE9;
+                    }
+                    return growth;
+                } else {
+                    utils.printSrcLineError("target is not reachable with 32-bit displacement", self.codegen.program, self.codegen.line);
+                    return CodegenError.CodeGenFailed;
+                }
+            }
+        }
+        return 0;
+    }
+
+    pub fn newJumpReloc(self: *BranchRelaxation, opcode: u8, conditional: bool, imp_name: Label, add: i64) std.mem.Allocator.Error!void {
+        try self.frags.append(utils.alloc, .{
+            .f = .{ .jump = .{
+                .opcode = if (conditional) opcode + 0x10 else 0xE9,
+                .conditional = conditional,
+                .relaxed = true,
+                .target = undefined,
+                .reloc = Relocation{
+                    .name = imp_name,
+                    .offset = @as(u32, if (conditional) 2 else 1),
+                    .addend = add,
+                    .type = .Rel32C,
+                },
+            } },
+            .offset = self.newOffset(),
+            .tag = .jump,
+        });
+        self.cur_fixed = null;
+    }
+
+    fn newOffset(self: *BranchRelaxation) u32 {
+        const last_offset = if (self.frags.getLastOrNull()) |frag| frag.offset else 0;
+        const last_len: u32 = blk: {
+            if (self.frags.getLastOrNull()) |frag| {
+                if (frag.tag == .fixed)
+                    break :blk frag.f.fixed.len
+                else if (frag.tag == .jump)
+                    break :blk frag.f.jump.len();
+            }
+            break :blk 0;
+        };
+        return last_offset + last_len;
+    }
+
+    pub fn appendByte(self: *BranchRelaxation, byte: u8) std.mem.Allocator.Error!void {
+        try self.ensureFixed();
+        try self.static_bytes.append(utils.alloc, byte);
+        self.cur_fixed.?.f.fixed.len += 1;
+    }
+
+    pub fn appendSlice(self: *BranchRelaxation, slice: []const u8) std.mem.Allocator.Error!void {
+        try self.ensureFixed();
+        try self.static_bytes.appendSlice(utils.alloc, slice);
+        self.cur_fixed.?.f.fixed.len += @truncate(slice.len);
+    }
+
+    pub fn bufferLen(self: *BranchRelaxation) u32 {
+        return if (self.cur_fixed) |fixed| fixed.f.fixed.len else 0;
+    }
+
+    pub fn addReloc(self: *BranchRelaxation, reloc: Relocation) std.mem.Allocator.Error!void {
+        try self.ensureFixed();
+        try self.cur_fixed.?.f.fixed.relocs.append(utils.alloc, reloc);
+    }
+
+    fn lastFragPtr(self: *BranchRelaxation) *Fragment {
+        return &self.frags.items[self.frags.items.len - 1];
+    }
+
+    pub fn addLineProgram(self: *BranchRelaxation, offset: u32, line: u16) std.mem.Allocator.Error!void {
+        const last = self.lastFragPtr();
+        if (last.tag == .fixed) {
+            try last.f.fixed.line_program.append(utils.alloc, .{ .offset = offset, .line = line });
+        } else {
+            last.f.jump.line_program = .{ .offset = 0, .line = line };
+        }
+    }
+
+    pub fn addLastLineProgram(self: *BranchRelaxation) std.mem.Allocator.Error!void {
+        const last = self.lastFragPtr();
+        try self.ensureFixed();
+        const last_line = if (self.cur_fixed.?.f.fixed.line_program.items.len > 0)
+            self.cur_fixed.?.f.fixed.line_program.items[self.cur_fixed.?.f.fixed.line_program.items.len - 1].line
+        else if (last.tag == .fixed)
+            last.f.fixed.line_program.items[last.f.fixed.line_program.items.len - 1].line
+        else
+            last.f.jump.line_program.line;
+
+        try self.cur_fixed.?.f.fixed.line_program.append(utils.alloc, .{
+            .offset = self.bufferLen(),
+            .line = last_line + 1,
+        });
+    }
+
+    pub fn addLabel(self: *BranchRelaxation, label: FuncLabel) std.mem.Allocator.Error!void {
+        try self.ensureFixed();
+        try self.labels.put(label, .{
+            .frag_ind = @truncate(self.frags.items.len - 1),
+            .offset = self.bufferLen(),
+        });
+    }
+
+    pub fn staticBytes(self: *BranchRelaxation, frag: *const Fragment) []const u8 {
+        std.debug.assert(frag.tag == .fixed);
+        return self.static_bytes.items[frag.f.fixed.stb0 .. frag.f.fixed.stb0 + frag.f.fixed.len];
+    }
+
+    pub fn print(self: *BranchRelaxation) void {
+        for (self.frags.items) |frag| {
+            std.debug.print(" {s}:\noff: 0x{x} - ", .{ if (frag.tag == .fixed) "Fixed" else "Jump", frag.offset });
+            if (frag.tag == .fixed) {
+                const bytes = self.staticBytes(&frag);
+                for (bytes) |byte| {
+                    std.debug.print("{x:02} ", .{byte});
+                } else {
+                    std.debug.print("\n", .{});
+                }
+                std.debug.print("len: 0x{x}\n", .{frag.f.fixed.len});
+            } else if (frag.tag == .jump) {
+                std.debug.print("{s}, rel{d} = {d}\n", .{ if (frag.f.jump.conditional) "jcc" else "jmp", @as(u8, if (frag.f.jump.relaxed) 32 else 8), frag.f.jump.rel });
+                std.debug.print("len: 0x{x}\n", .{frag.f.jump.len()});
+            }
+        }
+
+        std.debug.print(" Labels\n", .{});
+        for (self.labels.entries.items) |entry| {
+            std.debug.print("{s}{s}, frag: {d}, off: 0x{x}\n", .{
+                if (entry.key.parent > 0) utils.stringValue(entry.key.parent) else utils.stringValue(entry.key.name),
+                if (entry.key.parent > 0) utils.stringValue(entry.key.name) else "",
+                entry.value.frag_ind,
+                entry.value.offset,
+            });
+        }
+    }
+
+    pub fn deinit(self: *BranchRelaxation) void {
+        for (self.frags.items) |*frag| {
+            if (frag.tag == .fixed) {
+                frag.f.fixed.line_program.deinit(utils.alloc);
+                frag.f.fixed.relocs.deinit(utils.alloc);
+            }
+        }
+        self.frags.deinit(utils.alloc);
+        self.static_bytes.deinit(utils.alloc);
+        self.labels.deinit();
+    }
+};
+
 program: *Program,
 ibytes: InstrBytes,
 line: u16,
 cur_func: Label,
-temp_relocs: std.ArrayList(Relocation),
+relaxation: BranchRelaxation,
 
 pub fn init(program: *Program) Codegen {
     return Codegen{
@@ -359,12 +669,12 @@ pub fn init(program: *Program) Codegen {
         .ibytes = InstrBytes{},
         .line = 0,
         .cur_func = 0,
-        .temp_relocs = .empty,
+        .relaxation = BranchRelaxation{},
     };
 }
 
 pub fn deinit(self: *Codegen) void {
-    self.temp_relocs.deinit(utils.alloc);
+    self.relaxation.deinit();
 }
 
 fn checkLabelDefined(self: *const Codegen, label: Label) CodegenError!void {
@@ -414,45 +724,45 @@ fn invalOpSizesError(self: *const Codegen) CodegenError!void {
 fn appendDisplacement(self: *Codegen, disp: Displacement, bytes: u8) std.mem.Allocator.Error!void {
     const value: u32 = @bitCast(disp);
     const array = std.mem.toBytes(value);
-    try self.program.code_block.buffer.appendSlice(utils.alloc, array[0..bytes]);
+    try self.relaxation.appendSlice(array[0..bytes]);
 }
 
 fn appendInstrBytes(self: *Codegen) std.mem.Allocator.Error!void {
     if (self.ibytes.as) {
-        try self.program.code_block.buffer.append(utils.alloc, 0x67);
+        try self.relaxation.appendByte(0x67);
     }
     if (self.ibytes.os) {
-        try self.program.code_block.buffer.append(utils.alloc, 0x66);
+        try self.relaxation.appendByte(0x66);
     }
     if (self.ibytes.f2) {
-        try self.program.code_block.buffer.append(utils.alloc, 0xF2);
+        try self.relaxation.appendByte(0xF2);
     }
     if (self.ibytes.f3) {
-        try self.program.code_block.buffer.append(utils.alloc, 0xF3);
+        try self.relaxation.appendByte(0xF3);
     }
     if (self.ibytes.rex.byte() > 0x00) {
         self.ibytes.rex.rex = 0b0100;
-        try self.program.code_block.buffer.append(utils.alloc, self.ibytes.rex.byte());
+        try self.relaxation.appendByte(self.ibytes.rex.byte());
     }
     if (self.ibytes.twobyteop) {
-        try self.program.code_block.buffer.append(utils.alloc, 0x0F);
+        try self.relaxation.appendByte(0x0F);
     }
     if (self.ibytes.threebyte38) {
-        try self.program.code_block.buffer.append(utils.alloc, 0x38);
+        try self.relaxation.appendByte(0x38);
     } else if (self.ibytes.threebyte3a) {
-        try self.program.code_block.buffer.append(utils.alloc, 0x3A);
+        try self.relaxation.appendByte(0x3A);
     }
-    try self.program.code_block.buffer.append(utils.alloc, self.ibytes.opcode);
+    try self.relaxation.appendByte(self.ibytes.opcode);
     if (self.ibytes.modrm) |modrm| {
-        try self.program.code_block.buffer.append(utils.alloc, modrm.byte());
+        try self.relaxation.appendByte(modrm.byte());
     }
     if (self.ibytes.sib) |sib| {
-        try self.program.code_block.buffer.append(utils.alloc, sib.byte());
+        try self.relaxation.appendByte(sib.byte());
     }
     if (self.ibytes.disp) |disp| {
         if (self.ibytes.reloc) |*reloc| {
             reloc.addend = disp - 4;
-            reloc.offset = @truncate(self.program.code_block.buffer.items.len);
+            reloc.offset = self.relaxation.bufferLen();
             try self.appendDisplacement(0, 4);
         } else {
             try self.appendDisplacement(disp, self.ibytes.disp_bytes);
@@ -463,7 +773,7 @@ fn appendInstrBytes(self: *Codegen) std.mem.Allocator.Error!void {
 fn appendImmRelocation(self: *Codegen, imm: CodeOperand, rel_type: RelType) CodegenError!void {
     try self.checkLabelDefined(imm.op.label.l);
     var reloc = Relocation{
-        .offset = @truncate(self.program.code_block.buffer.items.len),
+        .offset = self.relaxation.bufferLen(),
         .name = imm.op.label.l,
         .type = rel_type,
         .addend = @bitCast(imm.op.label.d.bits),
@@ -471,7 +781,7 @@ fn appendImmRelocation(self: *Codegen, imm: CodeOperand, rel_type: RelType) Code
     if (rel_type == .Rel32C or rel_type == .Rel32D) {
         reloc.addend -= 4;
     }
-    try self.program.relocations.append(utils.alloc, reloc);
+    try self.relaxation.addReloc(reloc);
     const reloc_size: u8 = switch (rel_type) {
         .Abs32, .Abs32S, .Rel32C, .Rel32D => 4,
         .Abs64 => 8,
@@ -485,56 +795,7 @@ fn appendImmediateBytes(self: *Codegen, imm: Immediate, bytes: u8) std.mem.Alloc
         .u => imm.bits,
     };
     const array = std.mem.toBytes(value);
-    try self.program.code_block.buffer.appendSlice(utils.alloc, array[0..bytes]);
-}
-
-fn nearJump(self: *Codegen, imm: CodeOperand, mnem: TokenType, opcode: u8) CodegenError!void {
-    if (mnem == .jmp) {
-        try self.program.code_block.buffer.append(utils.alloc, 0xE9);
-    } else {
-        try self.program.code_block.buffer.appendSlice(utils.alloc, &.{ 0x0F, opcode });
-    }
-    try self.temp_relocs.append(utils.alloc, .{
-        .name = imm.op.label.l,
-        .offset = @truncate(self.program.code_block.buffer.items.len),
-        .type = .Rel32C,
-        .addend = @as(i64, @bitCast(imm.op.label.d.bits)) - 4,
-    });
-    try self.appendImmediateBytes(.{ .bits = 0, .sign = .u }, 4);
-}
-
-fn jumpReloc(self: *Codegen, imm: CodeOperand, mnem: TokenType, opcode: u8) CodegenError!void {
-    if (self.program.funcs.getPtr(self.cur_func)) |func_ptr| {
-        const local_lbl = func_ptr.local_labels.get(imm.op.label.l);
-        if (local_lbl) |local| {
-            if (local == std.math.maxInt(u32)) {
-                try self.nearJump(imm, mnem, opcode);
-            } else {
-                const disp = imm.op.label.d;
-                const diff = @as(isize, @intCast(self.program.code_block.buffer.items.len)) - @as(isize, @intCast(local)) - switch (disp.sign) {
-                    .u => @as(isize, @intCast(disp.bits)),
-                    .i => @as(isize, @bitCast(disp.bits)),
-                };
-                if (diff < 0x7F) {
-                    const disp_byte: i8 = @truncate(-(diff + 2));
-                    if (mnem == .jmp) {
-                        try self.program.code_block.buffer.appendSlice(utils.alloc, &.{ 0xEB, @bitCast(disp_byte) });
-                    } else {
-                        try self.program.code_block.buffer.appendSlice(utils.alloc, &.{ opcode - 0x10, @bitCast(disp_byte) });
-                    }
-                } else {
-                    try self.nearJump(imm, mnem, opcode);
-                }
-            }
-            return;
-        }
-    }
-    if (mnem == .jmp) {
-        try self.program.code_block.buffer.append(utils.alloc, 0xE9);
-    } else {
-        try self.program.code_block.buffer.appendSlice(utils.alloc, &.{ 0x0F, opcode });
-    }
-    try self.appendImmRelocation(imm, .Rel32C);
+    try self.relaxation.appendSlice(array[0..bytes]);
 }
 
 // Encodings
@@ -552,7 +813,7 @@ fn regMemEncoding(self: *Codegen, reg: Register, rm: CodeOperand, opcode: u8, si
             try self.ibytes.init(reg, rm, opcode, self);
             try self.appendInstrBytes();
             if (self.ibytes.reloc) |*reloc| {
-                try self.program.relocations.append(utils.alloc, reloc.*);
+                try self.relaxation.addReloc(reloc.*);
             }
         } else {
             try self.invalOpSizesError();
@@ -584,7 +845,7 @@ fn memImmEncoding1(self: *Codegen, rm: CodeOperand, opcode: u8, digit: u8, imm: 
         try self.appendImmediateBytes(imm, imm_bytes);
         if (self.ibytes.reloc) |*reloc| {
             reloc.addend -= imm_bytes;
-            try self.program.relocations.append(utils.alloc, reloc.*);
+            try self.relaxation.addReloc(reloc.*);
         }
     } else {
         utils.printSrcLineError("immediate value doesn't fit in memory", self.program, self.line);
@@ -700,7 +961,7 @@ fn memEncoding(self: *Codegen, rm: CodeOperand, digit: u8, opcode: u8, sizes: u4
         }
         try self.appendInstrBytes();
         if (self.ibytes.reloc) |*reloc| {
-            try self.program.relocations.append(utils.alloc, reloc.*);
+            try self.relaxation.addReloc(reloc.*);
         }
     } else {
         try self.invalOpSizesError();
@@ -720,9 +981,9 @@ fn immEncoding(self: *Codegen, imm: CodeOperand, opcode: u8, sizes: u4) CodegenE
     }
     if (imm_size & sizes == imm_size) {
         if (imm_size == 2) {
-            try self.program.code_block.buffer.append(utils.alloc, 0x66);
+            try self.relaxation.appendByte(0x66);
         }
-        try self.program.code_block.buffer.append(utils.alloc, opcode);
+        try self.relaxation.appendByte(opcode);
         if (is_label) {
             if (utils.flags.pic) {
                 utils.printSrcLineError("absolute 32-bit address cannot be used with -pic flag", self.program, self.line);
@@ -760,7 +1021,7 @@ fn regMem128Encoding(self: *Codegen, mnem: TokenType, opcode: u8, reg: Register,
         if (set_rexw) self.ibytes.rex.setW();
         try self.appendInstrBytes();
         if (self.ibytes.reloc) |*reloc| {
-            try self.program.relocations.append(utils.alloc, reloc.*);
+            try self.relaxation.addReloc(reloc.*);
         }
     } else if (rm.tag == .mem) {
         utils.printSrcLineError("wrong pointer size", self.program, self.line);
@@ -771,7 +1032,7 @@ fn regMem128Encoding(self: *Codegen, mnem: TokenType, opcode: u8, reg: Register,
 // Instructions
 
 fn syscall(self: *Codegen) CodegenError!void {
-    try self.program.code_block.buffer.appendSlice(utils.alloc, &.{ 0x0F, 0x05 });
+    try self.relaxation.appendSlice(&.{ 0x0F, 0x05 });
 }
 
 fn mov(self: *Codegen, operands: []CodeOperand) CodegenError!void {
@@ -824,7 +1085,7 @@ fn movzx(self: *Codegen, operands: []CodeOperand) CodegenError!void {
             self.ibytes.twobyteop = true;
             try self.appendInstrBytes();
             if (self.ibytes.reloc) |*reloc| {
-                try self.program.relocations.append(utils.alloc, reloc.*);
+                try self.relaxation.addReloc(reloc.*);
             }
         } else {
             utils.printSrcLineError("second operand must be register or memory", self.program, self.line);
@@ -887,25 +1148,39 @@ fn pop(self: *Codegen, operand: CodeOperand) CodegenError!void {
 fn jcc(self: *Codegen, mnem: TokenType, operand: CodeOperand) CodegenError!void {
     if (operand.tag == .lbl) {
         const opcode: u8 = switch (mnem) {
-            .jo => 0x80,
-            .jno => 0x81,
-            .jb, .jc, .jnae => 0x82,
-            .jae, .jnb, .jnc => 0x83,
-            .je, .jz => 0x84,
-            .jne, .jnz => 0x85,
-            .jbe, .jna => 0x86,
-            .ja, .jnbe => 0x87,
-            .js => 0x88,
-            .jns => 0x89,
-            .jp, .jpe => 0x8A,
-            .jnp, .jpo => 0x8B,
-            .jl, .jnge => 0x8C,
-            .jge, .jnl => 0x8D,
-            .jle, .jng => 0x8E,
-            .jg, .jnle => 0x8F,
+            .jo => 0x70,
+            .jno => 0x71,
+            .jb, .jc, .jnae => 0x72,
+            .jae, .jnb, .jnc => 0x73,
+            .je, .jz => 0x74,
+            .jne, .jnz => 0x75,
+            .jbe, .jna => 0x76,
+            .ja, .jnbe => 0x77,
+            .js => 0x78,
+            .jns => 0x79,
+            .jp, .jpe => 0x7A,
+            .jnp, .jpo => 0x7B,
+            .jl, .jnge => 0x7C,
+            .jge, .jnl => 0x7D,
+            .jle, .jng => 0x7E,
+            .jg, .jnle => 0x7F,
             else => unreachable,
         };
-        try self.jumpReloc(operand, mnem, opcode);
+        const label = operand.op.label.l;
+        const addend = operand.op.label.d.negative();
+        const is_func = self.program.funcs.get(label);
+        if (is_func) |_| {
+            try self.relaxation.newJump(opcode, true, .{ .name = label, .parent = 0 }, addend);
+        } else if (self.program.funcs.get(self.cur_func)) |cur| {
+            if (cur.local_labels.contains(label)) {
+                try self.relaxation.newJump(opcode, true, .{ .name = label, .parent = self.cur_func }, addend);
+            } else if (self.program.imports.contains(label) or self.program.data_vars.contains(label)) {
+                try self.relaxation.newJumpReloc(opcode, true, label, addend);
+            } else {
+                utils.printSrcLineErrorFmt("reference to undefined label '{s}'", .{utils.stringValue(label)}, self.program, self.line);
+                return CodegenError.CodeGenFailed;
+            }
+        }
     } else {
         utils.printSrcLineErrorFmt("{t} instruction can jump only to label", .{mnem}, self.program, self.line);
         return CodegenError.CodeGenFailed;
@@ -917,8 +1192,22 @@ fn jmp(self: *Codegen, operand: CodeOperand) CodegenError!void {
         const opcode: u8 = 0xFF;
         try self.memEncoding(operand, 4, opcode, 0b1000, true);
     } else if (operand.tag == .lbl) {
-        const opcode: u8 = 0xE9;
-        try self.jumpReloc(operand, .jmp, opcode);
+        const opcode: u8 = 0xEB;
+        const label = operand.op.label.l;
+        const addend = operand.op.label.d.negative();
+        const is_func = self.program.funcs.get(label);
+        if (is_func) |_| {
+            try self.relaxation.newJump(opcode, false, .{ .name = label, .parent = 0 }, addend);
+        } else if (self.program.funcs.get(self.cur_func)) |cur| {
+            if (cur.local_labels.contains(label)) {
+                try self.relaxation.newJump(opcode, false, .{ .name = label, .parent = self.cur_func }, addend);
+            } else if (self.program.imports.contains(label) or self.program.data_vars.contains(label)) {
+                try self.relaxation.newJumpReloc(opcode, false, label, addend);
+            } else {
+                utils.printSrcLineErrorFmt("reference to undefined label '{s}'", .{utils.stringValue(label)}, self.program, self.line);
+                return CodegenError.CodeGenFailed;
+            }
+        }
     } else {
         utils.printSrcLineError("cannot jump to immediate value", self.program, self.line);
         return CodegenError.CodeGenFailed;
@@ -935,7 +1224,7 @@ fn call(self: *Codegen, operand: CodeOperand) CodegenError!void {
             return CodegenError.CodeGenFailed;
         }
         const opcode: u8 = 0xE8;
-        try self.program.code_block.buffer.append(utils.alloc, opcode);
+        try self.relaxation.appendByte(opcode);
         try self.appendImmRelocation(operand, .Rel32C);
     } else {
         utils.printSrcLineError("cannot call to immediate value", self.program, self.line);
@@ -945,13 +1234,13 @@ fn call(self: *Codegen, operand: CodeOperand) CodegenError!void {
 
 fn ret(self: *Codegen, operands: []CodeOperand) CodegenError!void {
     if (operands.len == 0) {
-        try self.program.code_block.buffer.append(utils.alloc, 0xC3);
+        try self.relaxation.appendByte(0xC3);
     } else if (operands.len == 1) {
         const oper = operands[0];
         if (oper.tag == .imm) {
             const imm_size = oper.op.imm.i.fitsInBytes();
             if (imm_size <= 2) {
-                try self.program.code_block.buffer.append(utils.alloc, 0xC2);
+                try self.relaxation.appendByte(0xC2);
                 try self.appendImmediateBytes(oper.op.imm.i, 2);
             } else {
                 utils.printSrcLineError("immediate value doesn't fit in 2 bytes", self.program, self.line);
@@ -1210,7 +1499,7 @@ fn group3(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError
     }
     if (self.ibytes.reloc) |*reloc| {
         if (opt_imm != null) reloc.addend -= 1;
-        try self.program.relocations.append(utils.alloc, reloc.*);
+        try self.relaxation.addReloc(reloc.*);
     }
 }
 
@@ -1265,7 +1554,7 @@ fn sseR128Rm(self: *Codegen, mnem: TokenType, operands: []CodeOperand, group: Ss
             try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, mem_sz, false);
             if (operands.len == 3) {
                 if (operands[2].tag == .imm and operands[2].op.imm.i.fitsInBytes() == 1) {
-                    try self.program.code_block.buffer.append(utils.alloc, @truncate(operands[2].op.imm.i.bits));
+                    try self.relaxation.appendByte(@truncate(operands[2].op.imm.i.bits));
                 } else {
                     utils.printSrcLineError("third operand must be imm8 value", self.program, self.line);
                     return CodegenError.CodeGenFailed;
@@ -1286,7 +1575,7 @@ fn sseR128Rm(self: *Codegen, mnem: TokenType, operands: []CodeOperand, group: Ss
             try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, mem_sz, false);
             if (operands.len == 3) {
                 if (operands[2].tag == .imm and operands[2].op.imm.i.fitsInBytes() == 1) {
-                    try self.program.code_block.buffer.append(utils.alloc, @truncate(operands[2].op.imm.i.bits));
+                    try self.relaxation.appendByte(@truncate(operands[2].op.imm.i.bits));
                 } else {
                     utils.printSrcLineError("third operand must be imm8 value", self.program, self.line);
                     return CodegenError.CodeGenFailed;
@@ -1331,7 +1620,7 @@ fn sseRegR128(self: *Codegen, mnem: TokenType, operands: []CodeOperand, group: S
             try self.ibytes.init(first.op.reg.r, second, opcode, self);
             try self.appendInstrBytes();
             if (self.ibytes.reloc) |*reloc| {
-                try self.program.relocations.append(utils.alloc, reloc.*);
+                try self.relaxation.addReloc(reloc.*);
             }
         } else {
             utils.printSrcLineError("second operand must be xmm register", self.program, self.line);
@@ -1439,7 +1728,7 @@ fn sseShift(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenErr
                 else => unreachable,
             };
             try self.regMem128Encoding(mnem, opcode, reg, first, 16, false);
-            try self.program.code_block.buffer.append(utils.alloc, @truncate(second.op.imm.i.bits));
+            try self.relaxation.appendByte(@truncate(second.op.imm.i.bits));
         } else if (!reg_imm_only and (second.tag == .reg and second.op.reg.r.size() == 16 or second.tag == .mem)) {
             const opcode: u8 = switch (mnem) {
                 .psrlw => 0xD1,
@@ -1494,7 +1783,7 @@ fn sseExtrInsr(self: *Codegen, mnem: TokenType, operands: []CodeOperand) Codegen
                     else => @truncate(@intFromEnum(mnem)),
                 };
                 try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, mem_sz, mem_sz == 8);
-                try self.program.code_block.buffer.append(utils.alloc, @truncate(third.op.imm.i.bits));
+                try self.relaxation.appendByte(@truncate(third.op.imm.i.bits));
             } else {
                 utils.printSrcLineError("second operand must be register or memory", self.program, self.line);
                 return CodegenError.CodeGenFailed;
@@ -1518,7 +1807,7 @@ fn sseExtrInsr(self: *Codegen, mnem: TokenType, operands: []CodeOperand) Codegen
                     else => @truncate(@intFromEnum(mnem)),
                 };
                 try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, mem_sz, mem_sz == 8);
-                try self.program.code_block.buffer.append(utils.alloc, @truncate(third.op.imm.i.bits));
+                try self.relaxation.appendByte(@truncate(third.op.imm.i.bits));
             } else {
                 utils.printSrcLineError("second operand must be xmm register", self.program, self.line);
                 return CodegenError.CodeGenFailed;
@@ -1628,121 +1917,184 @@ fn sseMovdQ(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenErr
     }
 }
 
-fn genInstruction(self: *Codegen, instr: Program.CodeInstruction) CodegenError!void {
-    switch (instr) {
-        .label => {
-            const label = instr.label.name;
-            const is_func = self.program.funcs.getPtr(label);
-            if (is_func) |func| {
-                try self.patchTempRelocs();
-                const prev_func = self.program.funcs.getPtr(self.cur_func);
-                if (prev_func) |prev| {
-                    prev.size = @truncate(self.program.code_block.buffer.items.len - prev.offset);
-                }
-                func.offset = @truncate(self.program.code_block.buffer.items.len);
-                if (self.program.flags.has_entry and self.program.entry == label) {
-                    func.visib = .Export;
-                }
-                self.cur_func = label;
-            } else {
-                const function = self.program.funcs.getPtr(self.cur_func);
-                if (function) |func| {
-                    const lbl_ptr = func.local_labels.getPtr(label);
-                    if (lbl_ptr) |ptr| {
-                        ptr.* = @truncate(self.program.code_block.buffer.items.len);
-                    }
-                }
+fn mergeAllFragments(self: *Codegen) std.mem.Allocator.Error!void {
+    for (self.relaxation.frags.items) |frag| {
+        const offset = frag.offset;
+        if (frag.tag == .fixed) {
+            try self.program.code_block.buffer.appendSlice(utils.alloc, self.relaxation.staticBytes(&frag));
+            for (frag.f.fixed.relocs.items) |reloc| {
+                try self.program.relocations.append(utils.alloc, .{
+                    .name = reloc.name,
+                    .addend = reloc.addend,
+                    .offset = offset + reloc.offset,
+                    .type = reloc.type,
+                });
             }
-        },
-        .cpu => |cpuinstr| {
             if (utils.flags.debug) {
-                try self.program.line_program.append(utils.alloc, .{ .offset = @truncate(self.program.code_block.buffer.items.len), .line = self.line });
-            }
-            const operands = self.program.code_block.operands.items[cpuinstr.operands.index .. cpuinstr.operands.index + cpuinstr.operands.len];
-            const start = self.program.code_block.buffer.items.len;
-            switch (cpuinstr.mnem) {
-                .mov => try self.mov(operands),
-                .movzx => try self.movzx(operands),
-                .lea => try self.lea(operands),
-                .push => try self.push(operands[0]),
-                .pop => try self.pop(operands[0]),
-                .call => try self.call(operands[0]),
-                .ret => try self.ret(operands),
-                .syscall => try self.syscall(),
-                .jmp => try self.jmp(operands[0]),
-                .ja, .jae, .jb, .jbe, .jc, .je, .jg, .jge, .jl, .jle, .jna, .jnae, .jnb, .jnbe, .jnc, .jne, .jng, .jnge, .jnl, .jnle, .jno, .jnp, .jns, .jnz, .jo, .jp, .jpe, .jpo, .js, .jz => try self.jcc(cpuinstr.mnem, operands[0]),
-                .adc, .add, .@"and", .cmp, .@"or", .sbb, .sub, .xor => try self.group1(cpuinstr.mnem, operands),
-                .dec, .div, .idiv, .inc, .mul, .neg, .not => try self.group2(cpuinstr.mnem, operands[0]),
-                .sal, .sar, .shl, .shr, .rcl, .rcr, .rol, .ror => try self.group3(cpuinstr.mnem, operands),
-                .@"test" => try self.@"test"(operands),
-                else => {
-                    const sse = sseMnemGroup(cpuinstr.mnem);
-                    switch (sse) {
-                        .r128rm128,
-                        .r128r128m64,
-                        .r128r128m32,
-                        .r128r128m16,
-                        .r128rm128i8,
-                        .r128r128m64i8,
-                        .r128r128m32i8,
-                        => try self.sseR128Rm(cpuinstr.mnem, operands, sse),
-                        .r128r128, .r3264r128 => try self.sseRegR128(cpuinstr.mnem, operands, sse),
-                        .r128m128, .r128m64 => try self.sseR128M(cpuinstr.mnem, operands, sse),
-                        .mr => try self.sseMR(cpuinstr.mnem, operands),
-                        .shift => try self.sseShift(cpuinstr.mnem, operands),
-                        .extrinsr => try self.sseExtrInsr(cpuinstr.mnem, operands),
-                        .converts => try self.sseConverts(cpuinstr.mnem, operands),
-                        .movdq => try self.sseMovdQ(cpuinstr.mnem, operands),
-                        .skip => {
-                            utils.printSrcLineErrorFmt("unsupported instruction: {t}", .{cpuinstr.mnem}, self.program, self.line);
-                            return CodegenError.CodeGenFailed;
-                        },
-                    }
-                },
-            }
-            const end = self.program.code_block.buffer.items.len;
-            if (!utils.flags.quiet) {
-                for (self.program.code_block.buffer.items[start..end]) |byte| {
-                    std.debug.print("{x:02} ", .{byte});
+                for (frag.f.fixed.line_program.items) |entry| {
+                    try self.program.line_program.append(utils.alloc, .{ .line = entry.line, .offset = offset + entry.offset });
                 }
-                std.debug.print("\x1b[30G", .{});
-                self.program.printCPUInstruction(cpuinstr);
-                std.debug.print("\n", .{});
             }
-        },
+        } else if (frag.tag == .jump) {
+            const opcode = frag.f.jump.opcode;
+            if (!frag.f.jump.relaxed) {
+                // rel8
+                try self.program.code_block.buffer.append(utils.alloc, opcode);
+                try self.program.code_block.buffer.append(utils.alloc, @bitCast(@as(i8, @truncate(frag.f.jump.rel))));
+            } else {
+                // rel32
+                if (frag.f.jump.conditional) {
+                    try self.program.code_block.buffer.append(utils.alloc, 0x0F);
+                    try self.program.code_block.buffer.append(utils.alloc, opcode);
+                } else {
+                    try self.program.code_block.buffer.append(utils.alloc, opcode);
+                }
+                const value: u32 = @bitCast(frag.f.jump.rel);
+                const array = std.mem.toBytes(value);
+                try self.program.code_block.buffer.appendSlice(utils.alloc, array[0..4]);
+                if (frag.f.jump.reloc) |reloc| {
+                    try self.program.relocations.append(utils.alloc, .{
+                        .name = reloc.name,
+                        .addend = reloc.addend,
+                        .offset = offset + reloc.offset,
+                        .type = reloc.type,
+                    });
+                }
+            }
+            if (utils.flags.debug) {
+                try self.program.line_program.append(utils.alloc, .{ .line = frag.f.jump.line_program.line, .offset = offset + frag.f.jump.line_program.offset });
+            }
+        }
+    }
+
+    for (self.relaxation.labels.entries.items, 0..) |entry, i| {
+        if (entry.key.parent == 0) {
+            const func_ptr = self.program.funcs.getPtr(entry.key.name);
+            if (func_ptr) |func| {
+                const frag = self.relaxation.frags.items[entry.value.frag_ind];
+                std.debug.assert(frag.tag == .fixed);
+                func.offset = frag.offset + entry.value.offset;
+                if (self.relaxation.labels.nextFunc(i)) |next| {
+                    const next_offset = self.relaxation.frags.items[next.frag_ind].offset + next.offset;
+                    func.size = next_offset - func.offset;
+                }
+            }
+        }
+    }
+}
+
+fn initialPass(self: *Codegen) CodegenError!void {
+    for (self.program.code_block.instr.items) |instr| {
+        self.line = switch (instr) {
+            .cpu => instr.cpu.line,
+            .label => instr.label.line,
+        };
+        switch (instr) {
+            .label => {
+                const label = instr.label.name;
+                const is_func = self.program.funcs.getPtr(label);
+                if (is_func) |func| {
+                    if (self.program.flags.has_entry and self.program.entry == label) {
+                        func.visib = .Export;
+                    }
+                    self.cur_func = label;
+                    try self.relaxation.addLabel(.{ .name = label, .parent = 0 });
+                } else {
+                    try self.relaxation.addLabel(.{ .name = label, .parent = self.cur_func });
+                }
+            },
+            .cpu => |cpuinstr| {
+                const new_offset = if (utils.flags.debug) self.relaxation.bufferLen() else 0;
+                const operands = self.program.code_block.operands.items[cpuinstr.operands.index .. cpuinstr.operands.index + cpuinstr.operands.len];
+                switch (cpuinstr.mnem) {
+                    .mov => try self.mov(operands),
+                    .movzx => try self.movzx(operands),
+                    .lea => try self.lea(operands),
+                    .push => try self.push(operands[0]),
+                    .pop => try self.pop(operands[0]),
+                    .call => try self.call(operands[0]),
+                    .ret => try self.ret(operands),
+                    .syscall => try self.syscall(),
+                    .jmp => try self.jmp(operands[0]),
+                    .ja, .jae, .jb, .jbe, .jc, .je, .jg, .jge, .jl, .jle, .jna, .jnae, .jnb, .jnbe, .jnc, .jne, .jng, .jnge, .jnl, .jnle, .jno, .jnp, .jns, .jnz, .jo, .jp, .jpe, .jpo, .js, .jz => try self.jcc(cpuinstr.mnem, operands[0]),
+                    .adc, .add, .@"and", .cmp, .@"or", .sbb, .sub, .xor => try self.group1(cpuinstr.mnem, operands),
+                    .dec, .div, .idiv, .inc, .mul, .neg, .not => try self.group2(cpuinstr.mnem, operands[0]),
+                    .sal, .sar, .shl, .shr, .rcl, .rcr, .rol, .ror => try self.group3(cpuinstr.mnem, operands),
+                    .@"test" => try self.@"test"(operands),
+                    else => {
+                        const sse = sseMnemGroup(cpuinstr.mnem);
+                        switch (sse) {
+                            .r128rm128,
+                            .r128r128m64,
+                            .r128r128m32,
+                            .r128r128m16,
+                            .r128rm128i8,
+                            .r128r128m64i8,
+                            .r128r128m32i8,
+                            => try self.sseR128Rm(cpuinstr.mnem, operands, sse),
+                            .r128r128, .r3264r128 => try self.sseRegR128(cpuinstr.mnem, operands, sse),
+                            .r128m128, .r128m64 => try self.sseR128M(cpuinstr.mnem, operands, sse),
+                            .mr => try self.sseMR(cpuinstr.mnem, operands),
+                            .shift => try self.sseShift(cpuinstr.mnem, operands),
+                            .extrinsr => try self.sseExtrInsr(cpuinstr.mnem, operands),
+                            .converts => try self.sseConverts(cpuinstr.mnem, operands),
+                            .movdq => try self.sseMovdQ(cpuinstr.mnem, operands),
+                            .skip => {
+                                utils.printSrcLineErrorFmt("unsupported instruction: {t}", .{cpuinstr.mnem}, self.program, self.line);
+                                return CodegenError.CodeGenFailed;
+                            },
+                        }
+                    },
+                }
+                if (utils.flags.debug) {
+                    try self.relaxation.addLineProgram(new_offset, self.line);
+                }
+            },
+        }
+    }
+}
+
+fn relaxBranches(self: *Codegen) CodegenError!void {
+    while (true) {
+        var again = false;
+        for (self.relaxation.frags.items, 0..) |*frag, i| {
+            if (frag.tag == .jump) {
+                var any_relaxed: bool = false;
+                var shift = try self.relaxation.recalcJump(frag, &any_relaxed);
+                if (shift > 0) {
+                    for (self.relaxation.frags.items[i + 1 ..]) |*frag2| {
+                        if (frag2.tag == .jump) {
+                            shift += try self.relaxation.shiftJumpAndRecalc(frag2, shift, &any_relaxed);
+                        } else if (frag2.tag == .fixed) {
+                            self.relaxation.shiftFixed(frag2, shift);
+                        }
+                    }
+                    again = any_relaxed;
+                    break;
+                }
+            }
+        }
+        if (again == false) break;
     }
 }
 
 pub fn generateCode(self: *Codegen) CodegenError!void {
-    for (self.program.code_block.instr.items) |instr| {
-        const line = switch (instr) {
-            .cpu => instr.cpu.line,
-            .label => instr.label.line,
-        };
-        self.line = line;
-        try self.genInstruction(instr);
-    }
-    const cur_func = self.program.funcs.getPtr(self.cur_func);
-    if (cur_func) |cur| {
-        cur.size = @truncate(self.program.code_block.buffer.items.len - cur.offset);
-        try self.patchTempRelocs();
-    }
-    if (utils.flags.debug) {
-        try self.program.line_program.append(utils.alloc, .{
-            .offset = @truncate(self.program.code_block.buffer.items.len),
-            .line = self.program.line_program.items[self.program.line_program.items.len - 1].line + 1,
-        });
-    }
-}
+    self.relaxation.codegen = self;
+    try self.initialPass();
+    try self.relaxBranches();
 
-fn patchTempRelocs(self: *Codegen) CodegenError!void {
-    for (self.temp_relocs.items) |reloc| {
-        const func_ptr = self.program.funcs.getPtr(self.cur_func).?;
-        const target_offset = func_ptr.local_labels.getPtr(reloc.name).?.*;
-        const disp: i32 = @truncate(@as(i64, target_offset -% reloc.offset) + reloc.addend);
-        std.mem.writeInt(u32, @ptrCast(self.program.code_block.buffer.items[reloc.offset .. reloc.offset + 4]), @bitCast(disp), .little);
+    if (utils.flags.debug) {
+        try self.relaxation.addLastLineProgram();
     }
-    self.temp_relocs.clearRetainingCapacity();
+
+    if (!utils.flags.quiet) {
+        self.relaxation.print();
+    }
+
+    // Special fantom last label needed for proper len calculation of last actual label
+    try self.relaxation.addLabel(.{ .name = std.math.maxInt(Label), .parent = 0 });
+
+    try self.mergeAllFragments();
 }
 
 fn sseMnemGroup(mnem: TokenType) SseGroup {

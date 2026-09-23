@@ -171,7 +171,7 @@ const Function = struct {
     visib: LabelType,
     offset: u32,
     size: u32,
-    local_labels: std.AutoHashMapUnmanaged(Label, u32),
+    local_labels: std.AutoHashMapUnmanaged(Label, void),
 };
 
 const ProgramFlags = struct {
@@ -287,12 +287,9 @@ pub fn printSymbolTable(self: *Program) void {
             func.value_ptr.offset,
             func.value_ptr.size,
         });
-        var locals_iter = func.value_ptr.local_labels.iterator();
+        var locals_iter = func.value_ptr.local_labels.keyIterator();
         while (locals_iter.next()) |local| {
-            std.debug.print("          {s:<20} {d:4}\n", .{
-                utils.stringValue(local.key_ptr.*),
-                local.value_ptr.*,
-            });
+            std.debug.print("          {s:<20}\n", .{utils.stringValue(local.*)});
         }
     }
     var import_iter = self.imports.iterator();

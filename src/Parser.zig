@@ -858,8 +858,6 @@ fn parseCodeInstr(self: *Parser, tokens: []Token) ParserError!void {
                 if (in_func.found_existing) {
                     utils.printSrcLineColErrorFmt("local label '{s}' already defined in function '{s}'", .{ label, utils.stringValue(self.cur_func) }, self.program, line, tokens[0].col);
                     return ParserError.ParsingFailed;
-                } else {
-                    in_func.value_ptr.* = std.math.maxInt(u32);
                 }
             } else {
                 utils.printSrcLineColErrorFmt("local label '{s}' does not belong to any function", .{label}, self.program, line, tokens[0].col);
