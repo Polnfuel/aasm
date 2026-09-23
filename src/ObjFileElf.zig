@@ -372,7 +372,7 @@ fn addFunctionDebugInfo(self: *ObjFileElf, name: Label, sym_ind: u32, sym_size: 
     try self.buffs.reladebug_info.append(utils.alloc, .{
         .offset = die_offset + 5,
         .info = .{ .sym = sym_ind, .type = @intFromEnum(elf.R_X86_64.@"64") },
-        .addend = name_offset,
+        .addend = 0,
     });
 }
 
