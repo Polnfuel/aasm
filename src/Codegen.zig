@@ -881,11 +881,12 @@ fn opImmEncoding(self: *Codegen, reg: Register, opcode: u8, imm: CodeOperand) Co
     }
     if (reg_size >= imm_size) {
         if (reg_size == 8 and imm_size <= 4) {
-            try self.memImmEncoding1(.{ .op = .{ .reg = .{ .r = reg } }, .tag = .reg }, 0xC7, 0, imm.op.imm.i);
+            try self.memImmEncoding1(.initReg(reg), 0xC7, 0, imm.op.imm.i);
         } else {
             imm_size = reg_size;
             self.ibytes.reset();
-            try self.ibytes.init(reg, .{ .op = .{ .reg = .{ .r = .init(.eax) } }, .tag = .reg }, opcode, self);
+            try self.ibytes.init(.init(.eax), .initReg(reg), opcode, self);
+            self.ibytes.setOsRexW(reg_size);
             self.ibytes.plusR(reg.name);
             self.ibytes.modrm = null;
             try self.appendInstrBytes();
