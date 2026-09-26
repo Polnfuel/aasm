@@ -204,7 +204,7 @@ const InstrBytes = struct {
                 rm_code = regCode(rm.op.reg.r.name);
                 if (rm.op.reg.r.name.isAdditionalReg()) {
                     self.rex.setB();
-                } else if (reg.name.isByteRegAdditional()) {
+                } else if (rm.op.reg.r.name.isByteRegAdditional()) {
                     self.rex.rex = 0b0100;
                 }
             },
