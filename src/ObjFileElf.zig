@@ -87,6 +87,7 @@ txt_sym: u32,
 dbg_ln_sym: u32,
 dbg_ln_str_sym: u32,
 dbg_str_sym: u32,
+dbg_abbr_sym: u32,
 
 symtab_info: u32,
 
@@ -105,6 +106,7 @@ pub fn init(self: *ObjFileElf, output_path: []const u8) std.mem.Allocator.Error!
     self.dbg_ln_sym = 0;
     self.dbg_ln_str_sym = 0;
     self.dbg_str_sym = 0;
+    self.dbg_abbr_sym = 0;
     self.symtab_info = undefined;
 }
 
@@ -546,6 +548,11 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, rel_path: []co
     });
 
     // debug_info compile_unit relocations
+    try buffs.reladebug_info.append(utils.alloc, .{
+        .offset = 8,
+        .info = .{ .sym = self.dbg_abbr_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+        .addend = 0,
+    });
     if (program.flags.has_code) {
         try buffs.reladebug_info.append(utils.alloc, .{
             .offset = 13,
@@ -638,6 +645,8 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
         secs.debug_info.name = try self.appendSectionName(".debug_info");
         try self.appendSectionSymbol(".debug_info", secs.debug_info.ind);
         secs.debug_abbrev.name = try self.appendSectionName(".debug_abbrev");
+        self.dbg_abbr_sym = @truncate(buffs.symtab.items.len);
+        try self.appendSectionSymbol(".debug_abbrev", secs.debug_abbrev.ind);
         secs.debug_str.name = try self.appendSectionName(".debug_str");
         self.dbg_str_sym = @truncate(buffs.symtab.items.len);
         try self.appendSectionSymbol(".debug_str", secs.debug_str.ind);

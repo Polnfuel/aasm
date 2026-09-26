@@ -1171,6 +1171,8 @@ fn linkDebugInfo(self: *Linker, ind: *u8) std.mem.Allocator.Error!void {
                 std.mem.writeInt(u32, @ptrCast(buffs.debug_info.items[di_offset + rela.offset ..]), @truncate(dl_offset), .little);
             } else if (std.mem.eql(u8, sym_name, ".text")) {
                 std.mem.writeInt(u64, @ptrCast(buffs.debug_info.items[di_offset + rela.offset ..]), text_addresses.items[i], .little);
+            } else if (std.mem.eql(u8, sym_name, ".debug_abbrev")) {
+                std.mem.writeInt(u32, @ptrCast(buffs.debug_info.items[di_offset + rela.offset ..]), 0, .little);
             } else {
                 const found_sym = self.locals.get(.{ .name = sym_name, .file = @truncate(i) }) orelse self.globals.get(sym_name) orelse unreachable;
                 std.mem.writeInt(u64, @ptrCast(buffs.debug_info.items[di_offset + rela.offset ..]), found_sym.vaddr, .little);
