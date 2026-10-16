@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const with_llvm = b.option(bool, "llvm", "Use LLVM backend") orelse false;
     const exe_name = b.option([]const u8, "name", "Specify output name") orelse "aasm";
+    const test_filter = b.option([]const []const u8, "test-filter", "Filter strings for tests") orelse &.{};
 
     const utils = b.addModule("utils", .{
         .root_source_file = b.path("src/utils.zig"),
@@ -153,7 +154,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "Codegen", .module = codegen },
             },
         }),
-        .filters = b.args orelse &.{},
+        .filters = test_filter,
     });
 
     const run_codgen_test = b.addRunArtifact(codegen_test);

@@ -67,13 +67,13 @@ const Sections = struct {
     shstrtab: Section = Section{},
 
     pub fn print(self: *Sections) void {
-        const info = @typeInfo(Sections).@"struct";
-        inline for (info.fields) |field| {
+        const info: std.lang.Type.Struct = @typeInfo(Sections).@"struct";
+        inline for (info.field_names) |field| {
             std.debug.print("{d:2} - {x:6} - {s} - {x}\n", .{
-                @field(self, field.name).ind,
-                @field(self, field.name).offset,
-                field.name,
-                @field(self, field.name).size,
+                @field(self, field).ind,
+                @field(self, field).offset,
+                field,
+                @field(self, field).size,
             });
         }
     }
@@ -735,14 +735,14 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
     const writer = &file_writer.interface;
 
     try writer.writeStruct(elf.Elf64.Ehdr{
-        .ident = [_]u8{ elf.MAGIC[0], elf.MAGIC[1], elf.MAGIC[2], elf.MAGIC[3], elf.ELFCLASS64, elf.ELFDATA2LSB, 1, @intFromEnum(elf.OSABI.GNU), 0, 0, 0, 0, 0, 0, 0, 0 },
+        .ident = elf.Ident{ .class = .@"64", .data = .@"2LSB", .version = 1, .osabi = .NONE, .abiversion = 0 },
         .type = elf.ET.REL,
         .machine = elf.EM.X86_64,
         .version = 1,
         .entry = 0,
         .phoff = 0,
         .shoff = shtable,
-        .flags = 0,
+        .flags = .{ .int = 0 },
         .ehsize = @sizeOf(elf.Elf64.Ehdr),
         .phentsize = 0,
         .phnum = 0,

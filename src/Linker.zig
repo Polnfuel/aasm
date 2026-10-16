@@ -21,9 +21,9 @@ const ExeElf = struct {
         dynamic: elf.Elf64.Phdr,
 
         pub fn print(self: *ExePhdrs) void {
-            const info = @typeInfo(ExePhdrs).@"struct";
-            inline for (info.fields) |field| {
-                std.debug.print("{x:10} - {s} - {x}\n", .{ @field(self, field.name).vaddr, field.name, @field(self, field.name).filesz });
+            const info: std.lang.Type.Struct = @typeInfo(ExePhdrs).@"struct";
+            inline for (info.field_names) |field| {
+                std.debug.print("{x:10} - {s} - {x}\n", .{ @field(self, field).vaddr, field, @field(self, field).filesz });
             }
         }
     };
@@ -60,14 +60,14 @@ const ExeElf = struct {
         shstrtab: Section = Section{},
 
         pub fn print(self: *ExeSections) void {
-            const info = @typeInfo(ExeSections).@"struct";
-            inline for (info.fields) |field| {
+            const info: std.lang.Type.Struct = @typeInfo(ExeSections).@"struct";
+            inline for (info.field_names) |field| {
                 std.debug.print("{d:2} {x:10} - {x:6} - {s} - {x}\n", .{
-                    @field(self, field.name).ind,
-                    @field(self, field.name).vaddr,
-                    @field(self, field.name).offset,
-                    field.name,
-                    @field(self, field.name).size,
+                    @field(self, field).ind,
+                    @field(self, field).vaddr,
+                    @field(self, field).offset,
+                    field,
+                    @field(self, field).size,
                 });
             }
         }
@@ -512,7 +512,7 @@ fn checkIfValidLibrary(file_handle: std.Io.File.Handle) std.posix.MMapError!bool
     if (first_page.len < @sizeOf(elf.Elf64.Ehdr)) return false;
 
     const eh = @as(*elf.Elf64.Ehdr, @ptrCast(first_page.ptr));
-    if (!std.mem.eql(u8, eh.ident[0..4], elf.MAGIC) or eh.type != elf.ET.DYN) {
+    if (!std.mem.eql(u8, &eh.ident.magic, elf.MAGIC) or eh.type != elf.ET.DYN) {
         return false;
     }
 
@@ -1762,14 +1762,14 @@ pub fn writeExe(self: *Linker) LinkerError!void {
     const writer = &file_writer.interface;
 
     try writer.writeStruct(elf.Elf64.Ehdr{
-        .ident = [_]u8{ elf.MAGIC[0], elf.MAGIC[1], elf.MAGIC[2], elf.MAGIC[3], elf.ELFCLASS64, elf.ELFDATA2LSB, 1, @intFromEnum(elf.OSABI.GNU), 0, 0, 0, 0, 0, 0, 0, 0 },
+        .ident = elf.Ident{ .class = .@"64", .data = .@"2LSB", .version = 1, .osabi = .NONE, .abiversion = 0 },
         .type = elf.ET.EXEC,
         .machine = elf.EM.X86_64,
         .version = 1,
         .entry = self.exe.entry.?.vaddr,
         .phoff = @sizeOf(elf.Elf64.Ehdr),
         .shoff = if (self.exe.has_shtable) shtable else 0,
-        .flags = 0,
+        .flags = .{ .int = 0 },
         .ehsize = @sizeOf(elf.Elf64.Ehdr),
         .phentsize = @sizeOf(elf.Elf64.Phdr),
         .phnum = @as(u16, if (self.exe.has_dynamic) 6 else if (self.exe.has_data) 3 else 2),
