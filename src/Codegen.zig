@@ -1366,6 +1366,44 @@ fn imul(self: *Codegen, operands: []CodeOperand) CodegenError!void {
     }
 }
 
+fn in(self: *Codegen, operands: []CodeOperand) CodegenError!void {
+    const first = operands[0];
+    const second = operands[1];
+    if (first.tag != .reg or (first.op.reg.r.name != .al and first.op.reg.r.name != .ax and first.op.reg.r.name != .eax)) {
+        utils.printSrcLineError("first operand must be al, ax or eax register", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+    const reg_size = first.op.reg.r.size();
+    if (second.tag == .imm and second.op.imm.i.fitsInBytes() == 1) {
+        const port: u8 = @truncate(second.op.imm.i.bits);
+        if (reg_size == 1) try self.relaxation.appendSlice(&.{ 0xE4, port }) else if (reg_size == 2) try self.relaxation.appendSlice(&.{ 0x66, 0xE5, port }) else try self.relaxation.appendSlice(&.{ 0xE5, port });
+    } else if (first.tag == .reg and first.op.reg.r.name == .dx) {
+        if (reg_size == 1) try self.relaxation.appendByte(0xEC) else if (reg_size == 2) try self.relaxation.appendSlice(&.{ 0x66, 0xED }) else try self.relaxation.appendByte(0xED);
+    } else {
+        utils.printSrcLineError("second operand must be imm8 or dx register", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
+fn out(self: *Codegen, operands: []CodeOperand) CodegenError!void {
+    const first = operands[0];
+    const second = operands[1];
+    if (second.tag != .reg or (second.op.reg.r.name != .al and second.op.reg.r.name != .ax and second.op.reg.r.name != .eax)) {
+        utils.printSrcLineError("second operand must be al, ax or eax register", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+    const reg_size = second.op.reg.r.size();
+    if (first.tag == .imm and first.op.imm.i.fitsInBytes() == 1) {
+        const port: u8 = @truncate(first.op.imm.i.bits);
+        if (reg_size == 1) try self.relaxation.appendSlice(&.{ 0xE6, port }) else if (reg_size == 2) try self.relaxation.appendSlice(&.{ 0x66, 0xE7, port }) else try self.relaxation.appendSlice(&.{ 0xE7, port });
+    } else if (first.tag == .reg and first.op.reg.r.name == .dx) {
+        if (reg_size == 1) try self.relaxation.appendByte(0xEE) else if (reg_size == 2) try self.relaxation.appendSlice(&.{ 0x66, 0xEF }) else try self.relaxation.appendByte(0xEF);
+    } else {
+        utils.printSrcLineError("first operand must be imm8 or dx register", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
 fn group1(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError!void {
     const first = operands[0];
     const second = operands[1];
@@ -2152,10 +2190,13 @@ fn initialPass(self: *Codegen) CodegenError!void {
                     .imul => try self.imul(operands),
                     .clc => try self.relaxation.appendByte(0xF8),
                     .cli => try self.relaxation.appendByte(0xFA),
+                    .sti => try self.relaxation.appendByte(0xFB),
                     .hlt => try self.relaxation.appendByte(0xF4),
                     .invlpg, .lgdt, .lidt => try self.group4(cpuinstr.mnem, operands[0]),
                     .ltr => try self.group5(cpuinstr.mnem, operands[0]),
                     .iretq => try self.relaxation.appendSlice(&.{ 0x48, 0xCF }),
+                    .in => try self.in(operands),
+                    .out => try self.out(operands),
                     else => {
                         const sse = sseMnemGroup(cpuinstr.mnem);
                         switch (sse) {

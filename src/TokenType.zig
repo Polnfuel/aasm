@@ -5,8 +5,9 @@ pub const TokenType = enum(u16) {
     syscall = initInstr(0, 0, 0, 0),
     clc,
     cli,
-    hlt,
+    sti,
     // Priveleged
+    hlt,
     iretq,
     dec = initInstr(0, 0, 1, 0),
     div,
@@ -75,6 +76,8 @@ pub const TokenType = enum(u16) {
     sub,
     @"test",
     xor,
+    in,
+    out,
     ret = initInstr(0, 0, 4, 0),
     imul = initInstr(0, 0, 5, 0),
 

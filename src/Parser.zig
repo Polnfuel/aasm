@@ -656,6 +656,7 @@ fn parseArrayWithDatagen(self: *Parser, len: u32, backed_type: TypeName, pos: u3
             }
             cur_len += 1;
         }
+        self.consumeNewline();
         token = self.consume();
         if (token.type == .CloseBrace) {
             self.revert();
