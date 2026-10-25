@@ -327,3 +327,30 @@ test "branching" {
 
     try std.testing.expectEqualSlices(u8, expected, actual);
 }
+
+test "imul" {
+    const content: []const u8 =
+        \\@code
+        \\imul rdx
+        \\imul rdx, rcx, 2
+        \\imul p8 [rip]
+        \\imul esp
+        \\imul sil
+        \\imul r9
+        \\imul r10, rax, 84834
+        \\imul ebp, edx, 1
+        \\imul rsi, r10
+        \\imul r11, rdi
+        \\
+    ;
+
+    const actual = codegenContent(content) catch |err| {
+        utils.handleError(err);
+        return;
+    };
+    defer utils.alloc.free(actual);
+
+    const expected: []const u8 = &.{ 0x48, 0xF7, 0xEA, 0x48, 0x6B, 0xD1, 0x02, 0xF6, 0x2D, 0x00, 0x00, 0x00, 0x00, 0xF7, 0xEC, 0x40, 0xF6, 0xEE, 0x49, 0xF7, 0xE9, 0x4C, 0x69, 0xD0, 0x62, 0x4B, 0x01, 0x00, 0x6B, 0xEA, 0x01, 0x49, 0x0F, 0xAF, 0xF2, 0x4C, 0x0F, 0xAF, 0xDF };
+
+    try std.testing.expectEqualSlices(u8, expected, actual);
+}

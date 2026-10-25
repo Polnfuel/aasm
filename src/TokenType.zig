@@ -3,6 +3,9 @@ pub const TokenType = enum(u16) {
 
     // x86-64 original and other
     syscall = initInstr(0, 0, 0, 0),
+    clc,
+    // Priveleged
+    iretq,
     dec = initInstr(0, 0, 1, 0),
     div,
     idiv,
@@ -44,6 +47,12 @@ pub const TokenType = enum(u16) {
     pop,
     push,
     call,
+    // Priveleged
+    invlpg,
+    lgdt,
+    lidt,
+    ltr,
+
     adc = initInstr(0, 0, 2, 0),
     add,
     @"and",

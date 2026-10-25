@@ -1032,10 +1032,6 @@ fn regMem128Encoding(self: *Codegen, mnem: TokenType, opcode: u8, reg: Register,
 
 // Instructions
 
-fn syscall(self: *Codegen) CodegenError!void {
-    try self.relaxation.appendSlice(&.{ 0x0F, 0x05 });
-}
-
 fn mov(self: *Codegen, operands: []CodeOperand) CodegenError!void {
     const first = operands[0];
     const second = operands[1];
@@ -1288,6 +1284,87 @@ fn @"test"(self: *Codegen, operands: []CodeOperand) CodegenError!void {
     }
 }
 
+fn imul(self: *Codegen, operands: []CodeOperand) CodegenError!void {
+    if (operands.len == 1) {
+        const operand = operands[0];
+        if (operand.tag == .reg or operand.tag == .mem) {
+            var opcode: u8 = 0xF7;
+            if (operand.tag == .reg and operand.op.reg.r.size() == 1 or
+                operand.tag == .mem and operand.op.mem.size == 1)
+                opcode -= 1;
+            try self.memEncoding(operand, 5, opcode, 0b1111, false);
+        } else {
+            utils.printSrcLineError("operand must be register or memory", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    } else {
+        const first = operands[0];
+        const second = operands[1];
+        if (first.tag == .reg) {
+            if (second.tag == .reg or second.tag == .mem) {
+                const reg_size = first.op.reg.r.size();
+                const rm_size: u8 = switch (second.tag) {
+                    .reg => second.op.reg.r.size(),
+                    .mem => nonNullSize(second.op.mem.size, reg_size),
+                    else => unreachable,
+                };
+                if (rm_size == reg_size) {
+                    if (rm_size & 0b1110 == rm_size) {
+                        var opcode: u8 = 0xAF;
+                        var imm: Immediate = undefined;
+                        var imm_size: u8 = undefined;
+                        if (operands.len == 3) {
+                            const third = operands[2];
+                            if (third.tag == .imm) {
+                                imm_size = third.op.imm.i.fitsInBytes();
+                                imm = third.op.imm.i;
+                                if (imm_size == 1) {
+                                    opcode = 0x6B;
+                                } else if (imm_size <= reg_size and imm_size <= 4) {
+                                    opcode = 0x69;
+                                } else {
+                                    utils.printSrcLineError("incorrect immediate value size", self.program, self.line);
+                                    return CodegenError.CodeGenFailed;
+                                }
+                            } else {
+                                utils.printSrcLineError("third operand must be immediate value", self.program, self.line);
+                                return CodegenError.CodeGenFailed;
+                            }
+                        }
+                        self.ibytes.reset();
+                        try self.ibytes.init(first.op.reg.r, second, opcode, self);
+                        self.ibytes.twobyteop = operands.len == 2;
+                        try self.appendInstrBytes();
+                        if (self.ibytes.reloc) |*reloc| {
+                            try self.relaxation.addReloc(reloc.*);
+                        }
+                        if (opcode == 0x6B) {
+                            try self.appendImmediateBytes(imm, 1);
+                        } else if (opcode == 0x69) {
+                            try self.appendImmediateBytes(imm, imm_size);
+                        }
+                    } else {
+                        try self.invalOpSizesError();
+                    }
+                } else {
+                    switch (second.tag) {
+                        .reg => utils.printSrcLineError("registers sizes don't match", self.program, self.line),
+                        .mem => utils.printSrcLineError("pointer size doesn't match register size", self.program, self.line),
+                        else => unreachable,
+                    }
+                    return CodegenError.CodeGenFailed;
+                }
+            } else {
+                utils.printSrcLineError("second operand must be register or memory", self.program, self.line);
+                return CodegenError.CodeGenFailed;
+            }
+        } else {
+            utils.printSrcLineError("first operand must be register", self.program, self.line);
+            return CodegenError.CodeGenFailed;
+        }
+    }
+}
+
 fn group1(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError!void {
     const first = operands[0];
     const second = operands[1];
@@ -1501,6 +1578,55 @@ fn group3(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError
     if (self.ibytes.reloc) |*reloc| {
         if (opt_imm != null) reloc.addend -= 1;
         try self.relaxation.addReloc(reloc.*);
+    }
+}
+
+fn group4(self: *Codegen, mnem: TokenType, operand: CodeOperand) CodegenError!void {
+    if (operand.tag == .mem) {
+        const digit: u8 = switch (mnem) {
+            .lgdt => 2,
+            .lidt => 3,
+            .invlpg => 7,
+            else => unreachable,
+        };
+        const reg = InstrBytes.digitToReg(digit);
+        const opcode: u8 = 0x01;
+        self.ibytes.reset();
+        try self.ibytes.init(reg, operand, opcode, self);
+        self.ibytes.twobyteop = true;
+        try self.appendInstrBytes();
+        if (self.ibytes.reloc) |*reloc| {
+            try self.relaxation.addReloc(reloc.*);
+        }
+    } else {
+        utils.printSrcLineError("operand must be memory", self.program, self.line);
+        return CodegenError.CodeGenFailed;
+    }
+}
+
+fn group5(self: *Codegen, mnem: TokenType, operand: CodeOperand) CodegenError!void {
+    if (operand.tag == .reg or operand.tag == .mem) {
+        const rm_size = try self.rmSize(operand);
+        if (rm_size != 2) {
+            try self.invalOpSizesError();
+        }
+        const digit: u8 = switch (mnem) {
+            .ltr => 3,
+            else => unreachable,
+        };
+        const reg = InstrBytes.digitToReg(digit);
+        const opcode: u8 = 0x00;
+        self.ibytes.reset();
+        try self.ibytes.init(reg, operand, opcode, self);
+        self.ibytes.twobyteop = true;
+        self.ibytes.os = false;
+        try self.appendInstrBytes();
+        if (self.ibytes.reloc) |*reloc| {
+            try self.relaxation.addReloc(reloc.*);
+        }
+    } else {
+        utils.printSrcLineError("operand must be register or memory", self.program, self.line);
+        return CodegenError.CodeGenFailed;
     }
 }
 
@@ -2015,13 +2141,18 @@ fn initialPass(self: *Codegen) CodegenError!void {
                     .pop => try self.pop(operands[0]),
                     .call => try self.call(operands[0]),
                     .ret => try self.ret(operands),
-                    .syscall => try self.syscall(),
+                    .syscall => try self.relaxation.appendSlice(&.{ 0x0F, 0x05 }),
                     .jmp => try self.jmp(operands[0]),
                     .ja, .jae, .jb, .jbe, .jc, .je, .jg, .jge, .jl, .jle, .jna, .jnae, .jnb, .jnbe, .jnc, .jne, .jng, .jnge, .jnl, .jnle, .jno, .jnp, .jns, .jnz, .jo, .jp, .jpe, .jpo, .js, .jz => try self.jcc(cpuinstr.mnem, operands[0]),
                     .adc, .add, .@"and", .cmp, .@"or", .sbb, .sub, .xor => try self.group1(cpuinstr.mnem, operands),
                     .dec, .div, .idiv, .inc, .mul, .neg, .not => try self.group2(cpuinstr.mnem, operands[0]),
                     .sal, .sar, .shl, .shr, .rcl, .rcr, .rol, .ror => try self.group3(cpuinstr.mnem, operands),
                     .@"test" => try self.@"test"(operands),
+                    .imul => try self.imul(operands),
+                    .clc => try self.relaxation.appendByte(0xF8),
+                    .invlpg, .lgdt, .lidt => try self.group4(cpuinstr.mnem, operands[0]),
+                    .ltr => try self.group5(cpuinstr.mnem, operands[0]),
+                    .iretq => try self.relaxation.appendSlice(&.{ 0x48, 0xCF }),
                     else => {
                         const sse = sseMnemGroup(cpuinstr.mnem);
                         switch (sse) {
