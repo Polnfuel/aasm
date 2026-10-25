@@ -3,8 +3,6 @@ const utils = @import("utils");
 const Lexer = @import("Lexer");
 const TokenType = Lexer.TokenType;
 const Token = Lexer.Token;
-const Parser = @import("Parser");
-const Codegen = @import("Codegen");
 
 const Buffer = std.ArrayList(u8);
 
@@ -22,7 +20,7 @@ pub const Register = packed struct(u16) {
     }
 
     pub fn size(self: Register) MemSize {
-        return @truncate(@intFromEnum(self.name) & 0xFF);
+        return @truncate(@backingInt(self.name) & 0xFF);
     }
 };
 
@@ -137,6 +135,211 @@ pub const CodeBlock = struct {
     buffer: Buffer = .empty,
 };
 
+/// Represents power of 2
+pub const Alignment = u8;
+
+pub fn alignmentFromBytes(bytes: usize) Alignment {
+    // Try ctz?
+    return @trunc(@log2(@as(f32, @floatFromInt(bytes))));
+}
+
+pub fn bytesFromAlignment(alignment: Alignment) u32 {
+    return @as(u32, 1) << @as(u5, @truncate(alignment));
+}
+
+pub fn alignOffset(offset: u32, alignment: Alignment) u32 {
+    return std.mem.alignForward(u32, offset, bytesFromAlignment(alignment));
+}
+
+pub const TypeName = Label;
+
+pub const Type = union(enum) {
+    d8: void,
+    d16: void,
+    d32: void,
+    d64: void,
+    d128: void,
+    array: Array,
+    @"enum": struct {
+        fields_start: u16,
+        fields_end: u16,
+        data_size: u8, // In bytes
+    }, // 6
+    @"struct": struct {
+        size: u32,
+        fields: u16, // Index in types.struct_fields
+        alignment: Alignment,
+    }, // 8
+
+    pub const Array = struct {
+        len: u32,
+        type: TypeName,
+    }; // 8
+
+    pub const EnumField = struct {
+        name: Label,
+        value: u64,
+    }; // 16
+
+    pub const StructField = struct {
+        offset: u32, // Relative to the beginning of parent struct
+        name: Label,
+        type: TypeName,
+        alignment: Alignment,
+    }; // 12
+
+    pub fn size(self: Type, program: *Program) u32 {
+        return switch (self) {
+            .d8 => 1,
+            .d16 => 2,
+            .d32 => 4,
+            .d64 => 8,
+            .d128 => 16,
+            .@"enum" => |e| e.data_size,
+            .@"struct" => |s| s.size,
+            .array => |a| program.types.get(a.type).?.size(program) * a.len,
+        };
+    }
+
+    pub fn alignment(self: Type, program: *Program) Alignment {
+        return switch (self) {
+            .d8, .d16, .d32, .d64, .d128, .@"enum" => alignmentFromBytes(self.size(program)),
+            .array => |a| program.types.get(a.type).?.alignment(program),
+            .@"struct" => |s| s.alignment,
+        };
+    }
+}; // 12
+
+pub const Types = struct {
+    types: std.AutoHashMapUnmanaged(TypeName, Type), // 65534 - d8, 65533 - d16, 65532 - d32, ...
+    enums_fields: std.ArrayList(Type.EnumField),
+    structs_fields: std.ArrayList(std.ArrayList(Type.StructField)),
+    arrays: std.AutoHashMapUnmanaged(Type.Array, TypeName),
+    next_complex: TypeName, // Moves from 65529 downwards
+
+    const GetOrPutResult = std.AutoHashMapUnmanaged(TypeName, Type).GetOrPutResult;
+
+    const empty = @This(){
+        .types = .empty,
+        .enums_fields = .empty,
+        .structs_fields = .empty,
+        .arrays = .empty,
+        .next_complex = undefined,
+    };
+
+    pub fn get(self: Types, key: Label) ?Type {
+        return self.types.get(key);
+    }
+
+    pub fn getOrPut(self: *Types, key: Label) std.mem.Allocator.Error!GetOrPutResult {
+        return try self.types.getOrPut(utils.alloc, key);
+    }
+
+    pub fn contains(self: Types, key: Label) bool {
+        return self.types.contains(key);
+    }
+
+    pub fn putNoClobber(self: *Types, key: Label, value: Type) std.mem.Allocator.Error!void {
+        return self.types.putNoClobber(utils.alloc, key, value);
+    }
+
+    /// Puts array type in types if not existed yet and return its index
+    pub fn putArrayType(self: *Types, value: Type.Array) std.mem.Allocator.Error!TypeName {
+        const res = try self.arrays.getOrPut(utils.alloc, value);
+        if (!res.found_existing) {
+            const ind = self.next_complex;
+            try self.types.putNoClobber(utils.alloc, ind, .{ .array = value });
+            res.value_ptr.* = ind;
+            self.next_complex -= 1;
+        }
+        return res.value_ptr.*;
+    }
+
+    /// Puts anonymous struct type in types and returns its index
+    pub fn putAnonStruct(self: *Types, value: Type) std.mem.Allocator.Error!TypeName {
+        std.debug.assert(value == .@"struct");
+        const ind = self.next_complex;
+        try self.types.putNoClobber(utils.alloc, ind, value);
+        self.next_complex -= 1;
+        return ind;
+    }
+
+    pub fn isUniqueEnumField(self: Types, field_name: Label, start_from: u32) bool {
+        for (self.enums_fields.items[start_from..]) |field| {
+            if (field.name == field_name) return false;
+        }
+        return true;
+    }
+
+    pub fn isUniqueStructField(self: Types, fields: []Type.StructField, field_name: Label) bool {
+        _ = self;
+        for (fields) |field| {
+            if (field.name == field_name) return false;
+        }
+        return true;
+    }
+
+    pub fn getStructField(self: *Types, fields: []Type.StructField, field: Label) ?Type.StructField {
+        _ = self;
+        for (fields) |f| {
+            if (f.name == field) return f;
+        } else {
+            return null;
+        }
+    }
+
+    pub fn getEnumField(self: *Types, fields: []Type.EnumField, field: Label) ?Type.EnumField {
+        _ = self;
+        for (fields) |f| {
+            if (f.name == field) return f;
+        } else {
+            return null;
+        }
+    }
+
+    pub fn putStructFields(self: *Types, fiedls: std.ArrayList(Type.StructField)) std.mem.Allocator.Error!u16 {
+        const ind: u16 = @truncate(self.structs_fields.items.len);
+        try self.structs_fields.append(utils.alloc, fiedls);
+        return ind;
+    }
+
+    pub fn deinit(self: *Types) void {
+        self.enums_fields.deinit(utils.alloc);
+        for (self.structs_fields.items) |*flds| {
+            flds.deinit(utils.alloc);
+        }
+        self.structs_fields.deinit(utils.alloc);
+        self.types.deinit(utils.alloc);
+        self.arrays.deinit(utils.alloc);
+    }
+};
+
+pub const DataBlock = struct {
+    buffer: Buffer = .empty,
+    alignment: Alignment = 0,
+
+    /// Returns aligned len.
+    pub fn alignBuffer(self: *DataBlock, alignment: Alignment) std.mem.Allocator.Error!u32 {
+        const next_aligned = alignOffset(@truncate(self.buffer.items.len), alignment);
+        const padding = next_aligned - @as(u32, @truncate(self.buffer.items.len));
+        try self.buffer.appendNTimes(utils.alloc, 0, padding);
+
+        self.alignment = @max(self.alignment, alignment); // ???
+        return next_aligned;
+    }
+};
+
+pub const BssBlock = struct {
+    len: u32 = 0,
+    alignment: Alignment = 0,
+
+    pub fn alignBuffer(self: *BssBlock, alignment: Alignment) void {
+        self.len = alignOffset(self.len, alignment);
+
+        self.alignment = @max(self.alignment, alignment); // ???
+    }
+};
+
 pub const RelType = enum {
     Abs64,
     Abs32,
@@ -161,17 +364,18 @@ const LabelType = enum { Local, Export };
 const BlockType = enum { Data, Bss };
 
 const DataVariable = struct {
-    visib: LabelType,
-    block: BlockType,
     offset: u32,
     size: u32,
+    type: TypeName,
+    visib: LabelType,
+    block: BlockType,
 };
 
 const Function = struct {
-    visib: LabelType,
+    local_labels: std.AutoHashMapUnmanaged(Label, void),
     offset: u32,
     size: u32,
-    local_labels: std.AutoHashMapUnmanaged(Label, void),
+    visib: LabelType,
 };
 
 const ProgramFlags = struct {
@@ -188,8 +392,9 @@ flags: ProgramFlags,
 tokens: std.ArrayList(Token),
 entry: Label,
 constants: std.AutoHashMapUnmanaged(Label, Immediate),
-data_buffer: std.ArrayList(u8),
-bss_len: u32,
+types: Types,
+data_block: DataBlock,
+bss_block: BssBlock,
 code_block: CodeBlock,
 shared_libs: std.ArrayList(Label),
 data_vars: std.AutoHashMapUnmanaged(Label, DataVariable),
@@ -199,15 +404,17 @@ relocations: std.ArrayList(Relocation),
 
 line_program: std.ArrayList(LineProgramEntry),
 
-pub fn init(self: *Program, content: []const u8, file_name: []const u8) void {
+pub fn init(self: *Program, content: []const u8, file_name: []const u8) std.mem.Allocator.Error!void {
     self.file_name = file_name;
     self.content = content;
     self.flags = ProgramFlags{};
     self.tokens = .empty;
     self.entry = 0;
     self.constants = .empty;
-    self.data_buffer = .empty;
-    self.bss_len = 0;
+    self.types = .empty;
+    try self.initBasicTypes();
+    self.data_block = DataBlock{};
+    self.bss_block = BssBlock{};
     self.code_block = CodeBlock{};
     self.shared_libs = .empty;
     self.data_vars = .empty;
@@ -215,6 +422,15 @@ pub fn init(self: *Program, content: []const u8, file_name: []const u8) void {
     self.imports = .empty;
     self.relocations = .empty;
     self.line_program = .empty;
+}
+
+fn initBasicTypes(self: *Program) std.mem.Allocator.Error!void {
+    try self.types.putNoClobber(std.math.maxInt(Label) - 1, .{ .d8 = {} });
+    try self.types.putNoClobber(std.math.maxInt(Label) - 2, .{ .d16 = {} });
+    try self.types.putNoClobber(std.math.maxInt(Label) - 3, .{ .d32 = {} });
+    try self.types.putNoClobber(std.math.maxInt(Label) - 4, .{ .d64 = {} });
+    try self.types.putNoClobber(std.math.maxInt(Label) - 5, .{ .d128 = {} });
+    self.types.next_complex = std.math.maxInt(TypeName) - 6;
 }
 
 pub fn printBuffer(buf: []const u8) void {
@@ -237,6 +453,36 @@ pub fn printProgram(self: *Program) void {
             switch (constant.value_ptr.*.sign) {
                 .i => std.debug.print("{d}\n", .{constant.value_ptr.*.negative()}),
                 .u => std.debug.print("{d}\n", .{constant.value_ptr.*.bits}),
+            }
+        }
+    }
+
+    if (self.types.types.count() > 0) {
+        std.debug.print("types\n", .{});
+        var types_iter = self.types.types.iterator();
+        while (types_iter.next()) |entry| {
+            const t = entry.value_ptr.*;
+            switch (t) {
+                .@"enum" => |e| {
+                    const enum_name = utils.stringValue(entry.key_ptr.*);
+                    const fields = self.types.enums_fields.items[e.fields_start..e.fields_end];
+                    std.debug.print("enum {s}, size: {d} b:\n", .{ enum_name, e.data_size });
+                    for (fields) |f| {
+                        const f_name = utils.stringValue(f.name);
+                        std.debug.print(" {d} - {s}\n", .{ f.value, f_name });
+                    }
+                },
+                .@"struct" => |s| {
+                    if (entry.key_ptr.* > std.math.maxInt(u16) / 2) continue;
+                    const struct_name = utils.stringValue(entry.key_ptr.*);
+                    const fields = self.types.structs_fields.items[s.fields].items;
+                    std.debug.print("struct {s}, align: {d} b, size: {d} b:\n", .{ struct_name, bytesFromAlignment(s.alignment), s.size });
+                    for (fields) |f| {
+                        const f_name = utils.stringValue(f.name);
+                        std.debug.print(" {d:4} - {s}: align: {d} b, size: {d} b\n", .{ f.offset, f_name, bytesFromAlignment(f.alignment), self.types.get(f.type).?.size(self) });
+                    }
+                },
+                else => {},
             }
         }
     }
@@ -306,7 +552,7 @@ pub fn printSymbolTable(self: *Program) void {
     std.debug.print("\n", .{});
 
     std.debug.print("data buffer\n", .{});
-    printBuffer(self.data_buffer.items);
+    printBuffer(self.data_block.buffer.items);
     std.debug.print("\n", .{});
 
     std.debug.print("code buffer\n", .{});
@@ -331,68 +577,74 @@ pub fn printSymbolTable(self: *Program) void {
     std.debug.print("\n", .{});
 }
 
+pub fn printCodeOperand(self: *Program, oper: CodeOperand) void {
+    _ = self;
+    switch (oper.tag) {
+        .imm => {
+            switch (oper.op.imm.i.sign) {
+                .i => {
+                    std.debug.print("\x1b[33m{d}\x1b[0m", .{oper.op.imm.i.negative()});
+                },
+                .u => {
+                    std.debug.print("\x1b[33m{d}\x1b[0m", .{oper.op.imm.i.bits});
+                },
+            }
+        },
+        .lbl => {
+            std.debug.print("\x1b[34m{s}\x1b[0m", .{utils.stringValue(oper.op.label.l)});
+            switch (oper.op.label.d.sign) {
+                .u => {
+                    if (oper.op.label.d.bits != 0) {
+                        std.debug.print("\x1b[33m +{d}\x1b[0m", .{oper.op.label.d.bits});
+                    }
+                },
+                .i => {
+                    if (oper.op.label.d.bits != 0) {
+                        std.debug.print("\x1b[33m {s}{d}\x1b[0m", .{ if (oper.op.label.d.negative() > 0) "+" else "", oper.op.label.d.negative() });
+                    }
+                },
+            }
+        },
+        .reg => {
+            std.debug.print("\x1b[36m{t}\x1b[0m", .{oper.op.reg.r.name});
+        },
+        .mem => {
+            const base = if (oper.op.mem.base.size() > 0) oper.op.mem.base.name else null;
+            const index = if (oper.op.mem.index.size() > 0) oper.op.mem.index.name else null;
+            const scale = oper.op.mem.scale;
+            const disp = oper.op.mem.disp;
+            const label = oper.op.mem.label;
+
+            if (oper.op.mem.size > 0) {
+                std.debug.print("p{d} ", .{oper.op.mem.size * 8});
+            }
+            std.debug.print("[", .{});
+            if (oper.op.mem.base.size() > 0) {
+                std.debug.print("\x1b[36m{t}\x1b[0m", .{oper.op.mem.base.name});
+            }
+            if (index != null) {
+                std.debug.print("{s}\x1b[31m{t}\x1b[0m", .{ if (base != null) " + " else "", index.? });
+            }
+            if (scale > 0) {
+                std.debug.print("*\x1b[32m{d}\x1b[0m", .{scale});
+            }
+            if (disp != 0) {
+                std.debug.print("\x1b[33m{s}{s}{d}\x1b[0m", .{ if (base != null or index != null) " " else "", if (disp >= 0) "+" else "", disp });
+            }
+            if (label > 0) {
+                std.debug.print("\x1b[34m{s}{s}\x1b[0m", .{ if (base != null or index != null or disp != 0) " + " else "", utils.stringValue(label) });
+            }
+            std.debug.print("]", .{});
+        },
+    }
+}
+
 pub fn printCPUInstruction(self: *Program, instr: CpuInstruction) void {
     std.debug.print("\x1b[35m {t} \x1b[0m", .{instr.mnem});
     for (0..instr.operands.len) |i| {
         const oper = self.code_block.operands.items[instr.operands.index + i];
-        switch (oper.tag) {
-            .imm => {
-                switch (oper.op.imm.i.sign) {
-                    .i => {
-                        std.debug.print("\x1b[33m{d}\x1b[0m", .{oper.op.imm.i.negative()});
-                    },
-                    .u => {
-                        std.debug.print("\x1b[33m{d}\x1b[0m", .{oper.op.imm.i.bits});
-                    },
-                }
-            },
-            .lbl => {
-                std.debug.print("\x1b[34m{s}\x1b[0m", .{utils.stringValue(oper.op.label.l)});
-                switch (oper.op.label.d.sign) {
-                    .u => {
-                        if (oper.op.label.d.bits != 0) {
-                            std.debug.print("\x1b[33m +{d}\x1b[0m", .{oper.op.label.d.bits});
-                        }
-                    },
-                    .i => {
-                        if (oper.op.label.d.bits != 0) {
-                            std.debug.print("\x1b[33m {s}{d}\x1b[0m", .{ if (oper.op.label.d.negative() > 0) "+" else "", oper.op.label.d.negative() });
-                        }
-                    },
-                }
-            },
-            .reg => {
-                std.debug.print("\x1b[36m{t}\x1b[0m", .{oper.op.reg.r.name});
-            },
-            .mem => {
-                const base = if (oper.op.mem.base.size() > 0) oper.op.mem.base.name else null;
-                const index = if (oper.op.mem.index.size() > 0) oper.op.mem.index.name else null;
-                const scale = oper.op.mem.scale;
-                const disp = oper.op.mem.disp;
-                const label = oper.op.mem.label;
+        self.printCodeOperand(oper);
 
-                if (oper.op.mem.size > 0) {
-                    std.debug.print("p{d} ", .{oper.op.mem.size * 8});
-                }
-                std.debug.print("[", .{});
-                if (oper.op.mem.base.size() > 0) {
-                    std.debug.print("\x1b[36m{t}\x1b[0m", .{oper.op.mem.base.name});
-                }
-                if (index != null) {
-                    std.debug.print("{s}\x1b[31m{t}\x1b[0m", .{ if (base != null) " + " else "", index.? });
-                }
-                if (scale > 0) {
-                    std.debug.print("*\x1b[32m{d}\x1b[0m", .{scale});
-                }
-                if (disp != 0) {
-                    std.debug.print("\x1b[33m{s}{s}{d}\x1b[0m", .{ if (base != null or index != null) " " else "", if (disp >= 0) "+" else "", disp });
-                }
-                if (label > 0) {
-                    std.debug.print("\x1b[34m{s}{s}\x1b[0m", .{ if (base != null or index != null or disp != 0) " + " else "", utils.stringValue(label) });
-                }
-                std.debug.print("]", .{});
-            },
-        }
         if (i < instr.operands.len - 1) {
             std.debug.print(", ", .{});
         }
@@ -403,9 +655,10 @@ pub fn deinit(self: *Program) void {
     utils.alloc.free(self.content);
     self.tokens.deinit(utils.alloc);
     self.constants.deinit(utils.alloc);
+    self.types.deinit();
+    self.data_block.buffer.deinit(utils.alloc);
     self.code_block.operands.deinit(utils.alloc);
     self.code_block.instr.deinit(utils.alloc);
-    self.data_buffer.deinit(utils.alloc);
     self.code_block.buffer.deinit(utils.alloc);
     self.shared_libs.deinit(utils.alloc);
     self.data_vars.deinit(utils.alloc);

@@ -43,16 +43,6 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const parser = b.addModule("Parser", .{
-        .root_source_file = b.path("src/Parser.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "utils", .module = utils },
-            .{ .name = "Lexer", .module = lexer },
-        },
-    });
-
     const program = b.addModule("Program", .{
         .root_source_file = b.path("src/Program.zig"),
         .target = target,
@@ -60,13 +50,49 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "utils", .module = utils },
             .{ .name = "Lexer", .module = lexer },
-            .{ .name = "Parser", .module = parser },
         },
     });
 
     utils.addImport("Program", program);
     lexer.addImport("Program", program);
-    parser.addImport("Program", program);
+
+    const const_expr_eval = b.addModule("ConstExprEval", .{
+        .root_source_file = b.path("src/ConstExprEval.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "utils", .module = utils },
+            .{ .name = "Lexer", .module = lexer },
+            .{ .name = "Program", .module = program },
+        },
+    });
+
+    const addr_expr_eval = b.addModule("AddrExprEval", .{
+        .root_source_file = b.path("src/AddrExprEval.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "utils", .module = utils },
+            .{ .name = "Lexer", .module = lexer },
+            .{ .name = "Program", .module = program },
+        },
+    });
+
+    const parser = b.addModule("Parser", .{
+        .root_source_file = b.path("src/Parser.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "utils", .module = utils },
+            .{ .name = "Lexer", .module = lexer },
+            .{ .name = "Program", .module = program },
+            .{ .name = "ConstExprEval", .module = const_expr_eval },
+            .{ .name = "AddrExprEval", .module = addr_expr_eval },
+        },
+    });
+
+    const_expr_eval.addImport("Parser", parser);
+    addr_expr_eval.addImport("Parser", parser);
 
     const codegen = b.addModule("Codegen", .{
         .root_source_file = b.path("src/Codegen.zig"),
@@ -78,8 +104,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "Program", .module = program },
         },
     });
-
-    program.addImport("Codegen", codegen);
 
     const objfile = b.addModule("ObjFileElf", .{
         .root_source_file = b.path("src/ObjFileElf.zig"),
@@ -158,6 +182,25 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_codgen_test = b.addRunArtifact(codegen_test);
+
+    const parser_test = b.addTest(.{
+        .root_module = b.addModule("parsetest", .{
+            .root_source_file = b.path("test/parser.zig"),
+            .target = target,
+            .imports = &.{
+                .{ .name = "utils", .module = utils },
+                .{ .name = "CliArgs", .module = cli_args },
+                .{ .name = "Program", .module = program },
+                .{ .name = "Lexer", .module = lexer },
+                .{ .name = "Parser", .module = parser },
+            },
+        }),
+        .filters = test_filter,
+    });
+
+    const run_parser_test = b.addRunArtifact(parser_test);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_codgen_test.step);
+    test_step.dependOn(&run_parser_test.step);
 }

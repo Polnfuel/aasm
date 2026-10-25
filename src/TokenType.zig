@@ -1,7 +1,7 @@
 pub const TokenType = enum(u16) {
     //  Instruction mnemonics
 
-    //x86-64 original and other
+    // x86-64 original and other
     syscall = initInstr(0, 0, 0, 0),
     dec = initInstr(0, 0, 1, 0),
     div,
@@ -67,7 +67,7 @@ pub const TokenType = enum(u16) {
     ret = initInstr(0, 0, 4, 0),
     imul = initInstr(0, 0, 5, 0),
 
-    //   SSE_
+    // SSE*
 
     // NP 0F <opcode> op1, op2
     movups = initInstr(1, 0, 2, 0x10),
@@ -426,16 +426,24 @@ pub const TokenType = enum(u16) {
 
     //Keywords
     entry = 0b1100000000000000,
-    @"const",
-    data,
-    code,
     import,
-    bss,
+    @"const",
+    types,
+    @"enum",
+    @"struct",
+    @"packed",
+    @"align",
+    sizeof,
+    alignof,
     repeat,
+    data,
+    bss,
+    code,
     d8,
     d16,
     d32,
     d64,
+    d128,
     p8,
     p16,
     p32,
@@ -452,91 +460,81 @@ pub const TokenType = enum(u16) {
     BinNumLiteral,
 
     //Punctuation
-    Colon,
-    Comma,
-    Plus,
-    Minus,
-    Asteriks,
-    OpenBracket,
-    CloseBracket,
-    OpenParenthes,
-    CloseParenthes,
+    // zig fmt: off
+    Colon,        // :
+    Comma,        // ,
+    Plus,         // +
+    Minus,        // -
+    Asteriks,     // *
+    OpenBracket,  // [
+    CloseBracket, // ]
+    OpenParen,    // (
+    CloseParen,   // )
+    OpenBrace,    // {
+    CloseBrace,   // }
+    Dot,          // .
+    Tilde,        // ~
+    Pipe,         // |
+    Ampersand,    // &
+    Hat,          // ^
+    LessThan2,    // <<
+    MoreThan2,    // >>
+    Percent,      // %
+    Slash,        // /
     NewLine,
     Eof,
+    // zig fmt: on
 
     pub fn isReg(self: TokenType) bool {
-        return @intFromEnum(self) >> 14 == 0b10;
+        return @backingInt(self) >> 14 == 0b10;
     }
 
     pub fn isAdditionalReg(self: TokenType) bool {
-        return @intFromEnum(self) & 0x700 == 0x400;
+        return @backingInt(self) & 0x700 == 0x400;
     }
 
     pub fn isByteRegAdditional(self: TokenType) bool {
-        return @intFromEnum(self) & 0x700 == 0x300;
+        return @backingInt(self) & 0x700 == 0x300;
     }
 
     pub fn isByteRegHigh(self: TokenType) bool {
-        return @intFromEnum(self) & 0x700 == 0x200;
+        return @backingInt(self) & 0x700 == 0x200;
     }
 
     pub fn isAccumulator(self: TokenType) bool {
-        return @intFromEnum(self) & 0x700 == 0x100;
+        return @backingInt(self) & 0x700 == 0x100;
     }
 
     pub fn isMnemonic(self: TokenType) bool {
-        return @intFromEnum(self) < 0x8000;
+        return @backingInt(self) < 0x8000;
     }
 
     pub fn isPointerSize(self: TokenType) bool {
-        const lower = @intFromEnum(TokenType.p8);
-        const upper = @intFromEnum(TokenType.p128);
-        const p = @intFromEnum(self);
-        if (p >= lower and p <= upper) {
-            return true;
-        } else {
-            return false;
-        }
+        return switch (self) {
+            TokenType.p8, TokenType.p16, TokenType.p32, TokenType.p64, TokenType.p128 => true,
+            else => false,
+        };
     }
 
     pub fn isDataDirective(self: TokenType) bool {
-        const lower = @intFromEnum(TokenType.d8);
-        const upper = @intFromEnum(TokenType.d64);
-        const d = @intFromEnum(self);
-        if (d >= lower and d <= upper) {
-            return true;
-        } else {
-            return false;
-        }
+        return switch (self) {
+            TokenType.d8, TokenType.d16, TokenType.d32, TokenType.d64, TokenType.d128 => true,
+            else => false,
+        };
     }
 
     pub fn isBlockDecl(self: TokenType) bool {
-        switch (self) {
-            TokenType.entry, TokenType.import, TokenType.@"const", TokenType.data, TokenType.code, TokenType.bss => {
-                return true;
-            },
-            else => {
-                return false;
-            },
-        }
+        return switch (self) {
+            TokenType.import, TokenType.entry, TokenType.@"const", TokenType.types, TokenType.bss, TokenType.data, TokenType.code => true,
+            else => false,
+        };
     }
 
     pub fn isAnyIdent(self: TokenType) bool {
-        switch (self) {
-            TokenType.Ident, TokenType.HashIdent, TokenType.DotIdent => {
-                return true;
-            },
-            else => {
-                return false;
-            },
-        }
-    }
-
-    pub fn isSign(self: TokenType) bool {
-        if (self == TokenType.Minus or self == TokenType.Plus) {
-            return true;
-        }
-        return false;
+        return switch (self) {
+            TokenType.Ident, TokenType.HashIdent, TokenType.DotIdent => true,
+            else => false,
+        };
     }
 };
 

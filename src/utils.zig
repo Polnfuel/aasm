@@ -404,6 +404,11 @@ fn printColumnPointerErr(col: u16) void {
     _ = stderr.write("\x1b[32m^~~\x1b[0m\n") catch {};
 }
 
+fn printColumnPointerWarn(col: u16) void {
+    _ = stdout.splatByte(' ', col - 1) catch {};
+    _ = stdout.write("\x1b[32m^~~\x1b[0m\n") catch {};
+}
+
 pub fn printMessage(comptime message: []const u8) void {
     stdout.print("{s}\n", .{message}) catch {};
     stdout.flush() catch {};
@@ -498,6 +503,15 @@ pub fn printSrcLineWarningFmt(comptime warn_message: []const u8, args: anytype, 
     stdout.print("{s}{s}:{d}: ", .{ WHITEBOLD, program.file_name, line }) catch {};
     printWarningFmt(warn_message, args);
     stdout.print("{s}\n", .{slice}) catch {};
+    stdout.flush() catch {};
+}
+
+pub fn printSrcLineColWarning(comptime warn_message: []const u8, program: *const Program, line: u16, col: u16) void {
+    const slice = getLine(program.content, line);
+    stdout.print("{s}{s}:{d}:{d}: ", .{ WHITEBOLD, program.file_name, line, col }) catch {};
+    printWarning(warn_message);
+    stdout.print("{s}\n", .{slice}) catch {};
+    printColumnPointerWarn(col);
     stdout.flush() catch {};
 }
 

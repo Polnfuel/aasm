@@ -19,24 +19,9 @@ fn codegenContent(content: []const u8) ![]const u8 {
     const program = try utils.alloc.create(Program);
     defer utils.alloc.destroy(program);
 
-    program.init(content, "test.asm");
-    defer {
-        program.tokens.deinit(utils.alloc);
-        program.code_block.operands.deinit(utils.alloc);
-        program.code_block.instr.deinit(utils.alloc);
-        program.data_buffer.deinit(utils.alloc);
-        program.code_block.buffer.deinit(utils.alloc);
-        program.shared_libs.deinit(utils.alloc);
-        program.data_vars.deinit(utils.alloc);
-        var func_iter = program.funcs.iterator();
-        while (func_iter.next()) |func| {
-            func.value_ptr.local_labels.deinit(utils.alloc);
-        }
-        program.funcs.deinit(utils.alloc);
-        program.imports.deinit(utils.alloc);
-        program.relocations.deinit(utils.alloc);
-        program.line_program.deinit(utils.alloc);
-    }
+    const cont_alloc = try alloc.dupe(u8, content);
+    try program.init(cont_alloc, "test.asm");
+    defer program.deinit();
 
     var lexer = Lexer.init(program);
     try lexer.tokenizeContent();
@@ -120,7 +105,7 @@ test "mov simple" {
 test "mov reg, r/m" {
     const content: []const u8 =
         \\@data
-        \\label: d8 repeat(100, 0)
+        \\label: d8[] {repeat(100, 0),}
         \\@code
         \\mov rdx, [rip]
         \\mov rdx, [rip + 100]

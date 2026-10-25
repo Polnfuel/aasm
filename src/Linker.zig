@@ -427,7 +427,7 @@ const FileSection = packed struct {
 const FS_Context = struct {
     pub fn hash(self: *const FS_Context, key: FileSection) u64 {
         _ = self;
-        return (key.file * 3 + @intFromEnum(key.section));
+        return (key.file * 3 + @backingInt(key.section));
     }
     pub fn eql(self: *const FS_Context, first: FileSection, second: FileSection) bool {
         _ = self;
@@ -647,7 +647,7 @@ fn printSymtab(self: *Linker) void {
     std.debug.print(" Symtab: \n", .{});
     for (self.exe.buffs.symtab.items) |sym| {
         const sym_name: []const u8 = std.mem.sliceTo(self.exe.buffs.strtab.items[sym.name..], 0);
-        std.debug.print("{x:016}{x:4}{t:7}{t:8}{t:8}{d:3} {s}\n", .{
+        std.debug.print("{x:016}{x:6}{t:7}{t:8}{t:8}{d:3} {s}\n", .{
             sym.value,
             sym.size,
             sym.info.type,
@@ -716,7 +716,7 @@ fn printRelas(self: *Linker) void {
             rela.offset,
             rela.info.sym,
             rela.info.type,
-            @as(elf.R_X86_64, @enumFromInt(rela.info.type)),
+            @as(elf.R_X86_64, @fromBackingInt(rela.info.type)),
             sym.value,
             sym_name,
         });
@@ -729,7 +729,7 @@ fn printRelas(self: *Linker) void {
             rela.offset,
             rela.info.sym,
             rela.info.type,
-            @as(elf.R_X86_64, @enumFromInt(rela.info.type)),
+            @as(elf.R_X86_64, @fromBackingInt(rela.info.type)),
             sym.value,
             sym_name,
         });
@@ -788,7 +788,7 @@ fn linkPlt(self: *Linker) void {
         });
         relaplt.appendAssumeCapacity(.{
             .offset = gotplt_vaddr + (index + 2) * 8,
-            .info = .{ .sym = sym_ind, .type = @intFromEnum(elf.R_X86_64.JUMP_SLOT) },
+            .info = .{ .sym = sym_ind, .type = @backingInt(elf.R_X86_64.JUMP_SLOT) },
             .addend = 0,
         });
     }
@@ -821,7 +821,7 @@ fn linkGot(self: *Linker) void {
                 });
                 reladyn.appendAssumeCapacity(.{
                     .offset = obj.value_ptr.vaddr,
-                    .info = .{ .sym = sym_ind, .type = @intFromEnum(elf.R_X86_64.COPY) },
+                    .info = .{ .sym = sym_ind, .type = @backingInt(elf.R_X86_64.COPY) },
                     .addend = 0,
                 });
             },
@@ -854,7 +854,7 @@ fn mergeTextDataBss(self: *Linker) LinkerError!void {
             self.exe.buffs.bss.appendNTimesAssumeCapacity({}, next_aligned - prev_len);
             const offset = self.exe.buffs.bss.items.len;
             try self.offsets.putNoClobber(utils.alloc, .{ .file = @truncate(i), .section = .bss }, offset);
-            self.exe.buffs.bss.appendNTimesAssumeCapacity({}, unit.program.bss_len);
+            self.exe.buffs.bss.appendNTimesAssumeCapacity({}, unit.program.bss_block.len);
         }
     }
 }
@@ -956,7 +956,7 @@ fn patchRelocations(self: *Linker) void {
             const shn_offset = self.offsets.get(.{ .file = @truncate(i), .section = .text }).?;
             const text_offset = shn_offset + rela.offset;
             const reloc_vaddr = self.exe.sections.text.vaddr + text_offset;
-            const r_type: elf.R_X86_64 = @enumFromInt(rela.info.type);
+            const r_type: elf.R_X86_64 = @fromBackingInt(rela.info.type);
             switch (r_type) {
                 .@"64" => {
                     const r_value: u64 = sym_addr +% @as(u64, @bitCast(addend));
@@ -1532,7 +1532,7 @@ fn calcSectionsInfo(self: *Linker) LinkerError!void {
             data_size += dsize;
         }
         if (unit.program.flags.has_bss) {
-            const bsize = unit.program.bss_len;
+            const bsize = unit.program.bss_block.len;
             bss_size = std.mem.alignForward(usize, bss_size, 0x8);
             bss_size += bsize;
         }

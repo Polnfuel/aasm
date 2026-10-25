@@ -49,6 +49,7 @@ const Sections = struct {
         name: u32 = 0,
         offset: u64 = 0,
         size: usize = 0,
+        alignment: u32 = 1,
     };
 
     text: Section = Section{},
@@ -294,7 +295,7 @@ fn addSymbolsToSymtab(self: *ObjFileElf, program: *Program) std.mem.Allocator.Er
         };
         const rela = elf.Elf64.Rela{
             .offset = relocation.offset,
-            .info = .{ .sym = sym_ind, .type = @intFromEnum(rel_type) },
+            .info = .{ .sym = sym_ind, .type = @backingInt(rel_type) },
             .addend = relocation.addend,
         };
         try buffs.relatext.append(utils.alloc, rela);
@@ -343,12 +344,12 @@ fn addVariableDebugInfo(self: *ObjFileElf, name: Label, sym_ind: u32) std.mem.Al
 
     try self.buffs.reladebug_info.append(utils.alloc, .{
         .offset = die_offset + 1,
-        .info = .{ .sym = self.dbg_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+        .info = .{ .sym = self.dbg_str_sym, .type = @backingInt(elf.R_X86_64.@"32") },
         .addend = name_offset,
     });
     try self.buffs.reladebug_info.append(utils.alloc, .{
         .offset = die_offset + 7,
-        .info = .{ .sym = sym_ind, .type = @intFromEnum(elf.R_X86_64.@"64") },
+        .info = .{ .sym = sym_ind, .type = @backingInt(elf.R_X86_64.@"64") },
         .addend = 0,
     });
 }
@@ -368,12 +369,12 @@ fn addFunctionDebugInfo(self: *ObjFileElf, name: Label, sym_ind: u32, sym_size: 
 
     try self.buffs.reladebug_info.append(utils.alloc, .{
         .offset = die_offset + 1,
-        .info = .{ .sym = self.dbg_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+        .info = .{ .sym = self.dbg_str_sym, .type = @backingInt(elf.R_X86_64.@"32") },
         .addend = name_offset,
     });
     try self.buffs.reladebug_info.append(utils.alloc, .{
         .offset = die_offset + 5,
-        .info = .{ .sym = sym_ind, .type = @intFromEnum(elf.R_X86_64.@"64") },
+        .info = .{ .sym = sym_ind, .type = @backingInt(elf.R_X86_64.@"64") },
         .addend = 0,
     });
 }
@@ -467,29 +468,29 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, rel_path: []co
         // debug_line relocations
         try buffs.reladebug_line.append(utils.alloc, .{
             .offset = dirs_start,
-            .info = .{ .sym = self.dbg_ln_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+            .info = .{ .sym = self.dbg_ln_str_sym, .type = @backingInt(elf.R_X86_64.@"32") },
             .addend = 0,
         });
         if (dir_cnt > 1) {
             try buffs.reladebug_line.append(utils.alloc, .{
                 .offset = dirs_start + 4,
-                .info = .{ .sym = self.dbg_ln_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+                .info = .{ .sym = self.dbg_ln_str_sym, .type = @backingInt(elf.R_X86_64.@"32") },
                 .addend = dir1_ind,
             });
         }
         try buffs.reladebug_line.append(utils.alloc, .{
             .offset = files_start,
-            .info = .{ .sym = self.dbg_ln_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+            .info = .{ .sym = self.dbg_ln_str_sym, .type = @backingInt(elf.R_X86_64.@"32") },
             .addend = filename_ind,
         });
         try buffs.reladebug_line.append(utils.alloc, .{
             .offset = files_start + 5,
-            .info = .{ .sym = self.dbg_ln_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+            .info = .{ .sym = self.dbg_ln_str_sym, .type = @backingInt(elf.R_X86_64.@"32") },
             .addend = filename_ind,
         });
         try buffs.reladebug_line.append(utils.alloc, .{
             .offset = text_reloc_offset,
-            .info = .{ .sym = self.txt_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+            .info = .{ .sym = self.txt_sym, .type = @backingInt(elf.R_X86_64.@"32") },
             .addend = 0,
         });
 
@@ -550,18 +551,18 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, rel_path: []co
     // debug_info compile_unit relocations
     try buffs.reladebug_info.append(utils.alloc, .{
         .offset = 8,
-        .info = .{ .sym = self.dbg_abbr_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+        .info = .{ .sym = self.dbg_abbr_sym, .type = @backingInt(elf.R_X86_64.@"32") },
         .addend = 0,
     });
     if (program.flags.has_code) {
         try buffs.reladebug_info.append(utils.alloc, .{
             .offset = 13,
-            .info = .{ .sym = self.dbg_ln_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+            .info = .{ .sym = self.dbg_ln_sym, .type = @backingInt(elf.R_X86_64.@"32") },
             .addend = 0,
         });
         try buffs.reladebug_info.append(utils.alloc, .{
             .offset = 17,
-            .info = .{ .sym = self.txt_sym, .type = @intFromEnum(elf.R_X86_64.@"64") },
+            .info = .{ .sym = self.txt_sym, .type = @backingInt(elf.R_X86_64.@"64") },
             .addend = 0,
         });
     } else {
@@ -570,16 +571,17 @@ fn genDwarfDebugInformation(self: *ObjFileElf, program: *Program, rel_path: []co
     }
     try buffs.reladebug_info.append(utils.alloc, .{
         .offset = name_offset,
-        .info = .{ .sym = self.dbg_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+        .info = .{ .sym = self.dbg_str_sym, .type = @backingInt(elf.R_X86_64.@"32") },
         .addend = 0,
     });
     try buffs.reladebug_info.append(utils.alloc, .{
         .offset = name_offset + 4,
-        .info = .{ .sym = self.dbg_str_sym, .type = @intFromEnum(elf.R_X86_64.@"32") },
+        .info = .{ .sym = self.dbg_str_sym, .type = @backingInt(elf.R_X86_64.@"32") },
         .addend = dir_ind,
     });
 }
 
+/// Returns curent ind and increments it.
 fn incInd(ind: *u8) u8 {
     const prev = ind.*;
     ind.* += 1;
@@ -592,36 +594,43 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
 
     var ind: u8 = 1;
 
-    secs.text.offset = std.mem.alignForward(u64, @sizeOf(elf.Elf64.Ehdr), 0x8);
+    secs.text.offset = @sizeOf(elf.Elf64.Ehdr);
     if (program.flags.has_code) {
         buffs.text = program.code_block.buffer;
         secs.text.ind = incInd(&ind);
         secs.text.name = try self.appendSectionName(".text");
         secs.text.size = buffs.text.items.len;
+        secs.text.alignment = 0x10;
+        secs.text.offset = std.mem.alignForward(u64, secs.text.offset, secs.text.alignment);
         self.txt_sym = @truncate(buffs.symtab.items.len);
         try self.appendSectionSymbol(".text", secs.text.ind);
     }
-    secs.data.offset = std.mem.alignForward(usize, secs.text.offset + secs.text.size, 0x8);
+    secs.data.offset = secs.text.offset + secs.text.size;
     if (program.flags.has_data) {
-        buffs.data = program.data_buffer;
+        buffs.data = program.data_block.buffer;
         secs.data.ind = incInd(&ind);
         secs.data.name = try self.appendSectionName(".data");
         secs.data.size = buffs.data.items.len;
+        secs.data.alignment = Program.bytesFromAlignment(program.data_block.alignment);
+        secs.data.offset = std.mem.alignForward(u64, secs.data.offset, secs.data.alignment);
     }
-    secs.bss.offset = std.mem.alignForward(usize, secs.data.offset + secs.data.size, 0x8);
+    secs.bss.offset = secs.data.offset + secs.data.size;
     if (program.flags.has_bss) {
         secs.bss.ind = incInd(&ind);
         secs.bss.name = try self.appendSectionName(".bss");
-        secs.bss.size = program.bss_len;
+        secs.bss.size = program.bss_block.len;
+        secs.bss.alignment = Program.bytesFromAlignment(program.bss_block.alignment);
+        secs.bss.offset = std.mem.alignForward(u64, secs.bss.offset, secs.bss.alignment);
     }
+    secs.relatext.offset = secs.bss.offset;
     if (program.relocations.items.len > 0) {
         secs.relatext.ind = incInd(&ind);
         secs.relatext.name = try self.appendSectionName(".rela.text");
-        secs.relatext.offset = std.mem.alignForward(usize, secs.bss.offset, 0x8);
         secs.relatext.size = program.relocations.items.len * @sizeOf(elf.Elf64.Rela);
-    } else {
-        secs.relatext.offset = secs.bss.offset;
+        secs.relatext.alignment = @alignOf(elf.Elf64.Rela);
+        secs.relatext.offset = std.mem.alignForward(u64, secs.relatext.offset, secs.relatext.alignment);
     }
+    secs.reladebug_info.offset = secs.relatext.offset + secs.relatext.size;
     if (utils.flags.debug) {
         if (program.flags.has_code) {
             secs.debug_line.ind = incInd(&ind);
@@ -653,8 +662,6 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
         secs.reladebug_info.name = try self.appendSectionName(".rela.debug_info");
 
         try self.genDwarfDebugInformation(program, rel_path);
-    } else {
-        secs.reladebug_info.offset = secs.relatext.offset + secs.relatext.size;
     }
     secs.symtab.ind = incInd(&ind);
     secs.symtab.name = try self.appendSectionName(".symtab");
@@ -662,6 +669,7 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
     try self.addSymbolsToSymtab(program);
     if (utils.flags.debug) {
         try self.patchDebugInfoHeader();
+        secs.reladebug_line.offset = secs.relatext.offset + secs.relatext.size;
         if (program.flags.has_code) {
             secs.debug_line.offset = secs.relatext.offset + secs.relatext.size;
             secs.debug_line.size = buffs.debug_line.items.len;
@@ -669,8 +677,6 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
             secs.debug_line_str.size = buffs.debug_line_str.items.len;
             secs.reladebug_line.offset = secs.debug_line_str.offset + secs.debug_line_str.size;
             secs.reladebug_line.size = buffs.reladebug_line.items.len * @sizeOf(elf.Elf64.Rela);
-        } else {
-            secs.reladebug_line.offset = secs.relatext.offset + secs.relatext.size;
         }
         secs.debug_info.offset = secs.reladebug_line.offset + secs.reladebug_line.size;
         secs.debug_info.size = buffs.debug_info.items.len;
@@ -682,18 +688,19 @@ pub fn compileProgram(self: *ObjFileElf, program: *Program, rel_path: []const u8
         secs.reladebug_info.size = buffs.reladebug_info.items.len * @sizeOf(elf.Elf64.Rela);
     }
 
-    secs.symtab.offset = secs.reladebug_info.offset + secs.reladebug_info.size;
     secs.symtab.size = buffs.symtab.items.len * @sizeOf(elf.Elf64.Sym);
+    secs.symtab.alignment = @alignOf(elf.Elf64.Sym);
+    secs.symtab.offset = std.mem.alignForward(u64, secs.reladebug_info.offset + secs.reladebug_info.size, secs.symtab.alignment);
 
     secs.strtab.ind = incInd(&ind);
     secs.strtab.name = try self.appendSectionName(".strtab");
-    secs.strtab.offset = secs.symtab.offset + secs.symtab.size;
     secs.strtab.size = buffs.strtab.items.len;
+    secs.strtab.offset = secs.symtab.offset + secs.symtab.size;
 
     secs.shstrtab.ind = incInd(&ind);
     secs.shstrtab.name = try self.appendSectionName(".shstrtab");
-    secs.shstrtab.offset = secs.strtab.offset + secs.strtab.size;
     secs.shstrtab.size = buffs.shstrtab.items.len;
+    secs.shstrtab.offset = secs.strtab.offset + secs.strtab.size;
 
     if (!utils.flags.quiet) {
         secs.print();
@@ -801,7 +808,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             .size = secs.text.size,
             .link = 0,
             .info = 0,
-            .addralign = 0x8,
+            .addralign = secs.text.alignment,
             .entsize = 0,
         }, .little);
     }
@@ -815,7 +822,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             .size = secs.data.size,
             .link = 0,
             .info = 0,
-            .addralign = 0x8,
+            .addralign = secs.data.alignment,
             .entsize = 0,
         }, .little);
     }
@@ -829,7 +836,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             .size = secs.bss.size,
             .link = 0,
             .info = 0,
-            .addralign = 0x8,
+            .addralign = secs.bss.alignment,
             .entsize = 0,
         }, .little);
     }
@@ -843,7 +850,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             .size = secs.relatext.size,
             .link = secs.symtab.ind,
             .info = secs.text.ind,
-            .addralign = 0x8,
+            .addralign = secs.relatext.alignment,
             .entsize = @sizeOf(elf.Elf64.Rela),
         }, .little);
     }
@@ -858,7 +865,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
                 .size = secs.debug_line.size,
                 .link = 0,
                 .info = 0,
-                .addralign = 0x1,
+                .addralign = secs.debug_line.alignment,
                 .entsize = 0,
             }, .little);
             try writer.writeStruct(elf.Elf64.Shdr{
@@ -870,7 +877,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
                 .size = secs.debug_line_str.size,
                 .link = 0,
                 .info = 0,
-                .addralign = 0x1,
+                .addralign = secs.debug_line_str.alignment,
                 .entsize = 0x1,
             }, .little);
             try writer.writeStruct(elf.Elf64.Shdr{
@@ -882,7 +889,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
                 .size = secs.reladebug_line.size,
                 .link = secs.symtab.ind,
                 .info = secs.debug_line.ind,
-                .addralign = 0x1,
+                .addralign = secs.reladebug_line.alignment,
                 .entsize = @sizeOf(elf.Elf64.Rela),
             }, .little);
         }
@@ -895,7 +902,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             .size = secs.debug_info.size,
             .link = 0,
             .info = 0,
-            .addralign = 0x1,
+            .addralign = secs.debug_info.alignment,
             .entsize = 0,
         }, .little);
         try writer.writeStruct(elf.Elf64.Shdr{
@@ -907,7 +914,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             .size = secs.debug_abbrev.size,
             .link = 0,
             .info = 0,
-            .addralign = 0x1,
+            .addralign = secs.debug_abbrev.alignment,
             .entsize = 0,
         }, .little);
         try writer.writeStruct(elf.Elf64.Shdr{
@@ -919,7 +926,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             .size = secs.debug_str.size,
             .link = 0,
             .info = 0,
-            .addralign = 0x1,
+            .addralign = secs.debug_str.alignment,
             .entsize = 0x1,
         }, .little);
         try writer.writeStruct(elf.Elf64.Shdr{
@@ -931,7 +938,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
             .size = secs.reladebug_info.size,
             .link = secs.symtab.ind,
             .info = secs.debug_info.ind,
-            .addralign = 0x1,
+            .addralign = secs.reladebug_info.alignment,
             .entsize = @sizeOf(elf.Elf64.Rela),
         }, .little);
     }
@@ -944,7 +951,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
         .size = secs.symtab.size,
         .link = secs.strtab.ind,
         .info = self.symtab_info,
-        .addralign = 0x1,
+        .addralign = secs.symtab.alignment,
         .entsize = @sizeOf(elf.Elf64.Sym),
     }, .little);
     try writer.writeStruct(elf.Elf64.Shdr{
@@ -956,7 +963,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
         .size = secs.strtab.size,
         .link = 0,
         .info = 0,
-        .addralign = 0x1,
+        .addralign = secs.strtab.alignment,
         .entsize = 0,
     }, .little);
     try writer.writeStruct(elf.Elf64.Shdr{
@@ -968,7 +975,7 @@ pub fn writeObjFile(self: *ObjFileElf, program: *Program) ObjectError!void {
         .size = secs.shstrtab.size,
         .link = 0,
         .info = 0,
-        .addralign = 0x1,
+        .addralign = secs.shstrtab.alignment,
         .entsize = 0,
     }, .little);
 

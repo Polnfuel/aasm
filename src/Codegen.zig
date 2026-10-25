@@ -98,7 +98,7 @@ const InstrBytes = struct {
     }
 
     fn regCode(reg: TokenType) u3 {
-        return @truncate(@intFromEnum(reg) >> 11);
+        return @truncate(@backingInt(reg) >> 11);
     }
 
     fn digitToReg(digit: u8) Register {
@@ -1006,7 +1006,7 @@ fn regMem128Encoding(self: *Codegen, mnem: TokenType, opcode: u8, reg: Register,
     const rm_size = if (rm.tag == .mem) nonNullSize(rm.op.mem.size, mem_size) else mem_size;
     if (rm_size == mem_size) {
         self.ibytes.reset();
-        const pref_bits = @intFromEnum(mnem) & 0x1800;
+        const pref_bits = @backingInt(mnem) & 0x1800;
         switch (pref_bits) {
             0x0 => {},
             0x800 => self.ibytes.os = true,
@@ -1014,7 +1014,7 @@ fn regMem128Encoding(self: *Codegen, mnem: TokenType, opcode: u8, reg: Register,
             0x1800 => self.ibytes.f2 = true,
             else => unreachable,
         }
-        const opcode_len_bits = @intFromEnum(mnem) & 0x6000;
+        const opcode_len_bits = @backingInt(mnem) & 0x6000;
         if (opcode_len_bits > 0) self.ibytes.twobyteop = true;
         if (opcode_len_bits == 0x4000) self.ibytes.threebyte38 = true else if (opcode_len_bits == 0x6000) self.ibytes.threebyte3a = true;
 
@@ -1551,7 +1551,7 @@ fn sseR128Rm(self: *Codegen, mnem: TokenType, operands: []CodeOperand, group: Ss
 
     if (first.tag == .reg and first.op.reg.r.size() == 16) {
         if (second.tag == .reg and second.op.reg.r.size() == 16 or second.tag == .mem) {
-            const opcode: u8 = @truncate(@intFromEnum(mnem));
+            const opcode: u8 = @truncate(@backingInt(mnem));
             try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, mem_sz, false);
             if (operands.len == 3) {
                 if (operands[2].tag == .imm and operands[2].op.imm.i.fitsInBytes() == 1) {
@@ -1606,7 +1606,7 @@ fn sseRegR128(self: *Codegen, mnem: TokenType, operands: []CodeOperand, group: S
         }
         if (second.tag == .reg and second.op.reg.r.size() == 16) {
             self.ibytes.reset();
-            const pref_bits = @intFromEnum(mnem) & 0x1800;
+            const pref_bits = @backingInt(mnem) & 0x1800;
             switch (pref_bits) {
                 0x0 => {},
                 0x800 => self.ibytes.os = true,
@@ -1614,10 +1614,10 @@ fn sseRegR128(self: *Codegen, mnem: TokenType, operands: []CodeOperand, group: S
                 0x1800 => self.ibytes.f2 = true,
                 else => unreachable,
             }
-            const opcode_len_bits = @intFromEnum(mnem) & 0x6000;
+            const opcode_len_bits = @backingInt(mnem) & 0x6000;
             if (opcode_len_bits > 0) self.ibytes.twobyteop = true;
             if (opcode_len_bits == 0x4000) self.ibytes.threebyte38 = true else if (opcode_len_bits == 0x6000) self.ibytes.threebyte3a = true;
-            const opcode: u8 = @truncate(@intFromEnum(mnem));
+            const opcode: u8 = @truncate(@backingInt(mnem));
             try self.ibytes.init(first.op.reg.r, second, opcode, self);
             try self.appendInstrBytes();
             if (self.ibytes.reloc) |*reloc| {
@@ -1651,7 +1651,7 @@ fn sseR128M(self: *Codegen, mnem: TokenType, operands: []CodeOperand, group: Sse
             const opcode: u8 = switch (mnem) {
                 .movlps => 0x12,
                 .movhps => 0x16,
-                else => @truncate(@intFromEnum(mnem)),
+                else => @truncate(@backingInt(mnem)),
             };
             try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, mem_sz, false);
         } else {
@@ -1690,7 +1690,7 @@ fn sseMR(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenError!
 
     if (first.tag == .mem) {
         if (second.tag == .reg) {
-            const opcode: u8 = @truncate(@intFromEnum(mnem));
+            const opcode: u8 = @truncate(@backingInt(mnem));
             if (mem_sz == 16 or mnem == .movnti and second.op.reg.r.size() == 8) {
                 try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, mem_sz, false);
             } else if (mnem == .movnti and second.op.reg.r.size() == 4) {
@@ -1781,7 +1781,7 @@ fn sseExtrInsr(self: *Codegen, mnem: TokenType, operands: []CodeOperand) Codegen
                 }
                 const opcode: u8 = switch (mnem) {
                     .pinsrq => 0x22,
-                    else => @truncate(@intFromEnum(mnem)),
+                    else => @truncate(@backingInt(mnem)),
                 };
                 try self.regMem128Encoding(mnem, opcode, first.op.reg.r, second, mem_sz, mem_sz == 8);
                 try self.relaxation.appendByte(@truncate(third.op.imm.i.bits));
@@ -1805,7 +1805,7 @@ fn sseExtrInsr(self: *Codegen, mnem: TokenType, operands: []CodeOperand) Codegen
                 }
                 const opcode: u8 = switch (mnem) {
                     .pextrq => 0x16,
-                    else => @truncate(@intFromEnum(mnem)),
+                    else => @truncate(@backingInt(mnem)),
                 };
                 try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, mem_sz, mem_sz == 8);
                 try self.relaxation.appendByte(@truncate(third.op.imm.i.bits));
@@ -1849,7 +1849,7 @@ fn sseConverts(self: *Codegen, mnem: TokenType, operands: []CodeOperand) Codegen
                     if (reg_size != 4 and reg_size != 8 or (second.tag == .reg and second.op.reg.r.size() != 16)) {
                         try self.invalOpSizesError();
                     }
-                    const opcode: u8 = @truncate(@intFromEnum(mnem));
+                    const opcode: u8 = @truncate(@backingInt(mnem));
                     const mem_size: u8 = switch (mnem) {
                         .cvtsd2si, .cvttsd2si => 8,
                         else => 4,
@@ -1878,7 +1878,7 @@ fn sseMovdQ(self: *Codegen, mnem: TokenType, operands: []CodeOperand) CodegenErr
             if (second.tag == .reg) {
                 const reg2_size = second.op.reg.r.size();
                 if (reg2_size == 16 and mnem == .movq) {
-                    const opcode: u8 = @truncate(@intFromEnum(mnem));
+                    const opcode: u8 = @truncate(@backingInt(mnem));
                     try self.regMem128Encoding(mnem, opcode, second.op.reg.r, first, 16, false);
                 } else if (reg2_size == 8 and mnem == .movq or reg2_size == 4 and mnem == .movd) {
                     const opcode: u8 = 0x6E;

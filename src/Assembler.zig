@@ -35,7 +35,7 @@ fn createProgramsAndObjfiles(self: *Assembler, cli_inputs: [][]const u8, cli_out
         const program = try utils.alloc.create(Program);
         errdefer utils.alloc.destroy(program);
 
-        program.init(content, basename);
+        try program.init(content, basename);
         errdefer program.deinit();
 
         const object_file = try utils.alloc.create(ObjFileElf);
@@ -63,14 +63,16 @@ fn lexicalAnalyzis(self: *Assembler) AssemblerError!void {
 fn syntaxAnalyzis(self: *Assembler) AssemblerError!void {
     for (self.comp_units.items) |unit| {
         var parser = Parser.init(unit.program);
+        defer if (!utils.flags.quiet) {
+            unit.program.printSymbolTable();
+            unit.program.printProgram();
+        };
         try parser.parseTokens();
 
         if (!unit.program.flags.has_code and !unit.program.flags.has_data and !unit.program.flags.has_bss) {
             utils.printSrcFileError("source file doesn't contain any data or code block", unit.program);
             return AssemblerError.AssemblyError;
         }
-
-        // unit.program.printProgram();
     }
 }
 
