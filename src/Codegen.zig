@@ -589,14 +589,15 @@ const BranchRelaxation = struct {
 
     pub fn addLastLineProgram(self: *BranchRelaxation) std.mem.Allocator.Error!void {
         const last = self.lastFragPtr();
-        try self.ensureFixed();
-        const last_line = if (self.cur_fixed.?.f.fixed.line_program.items.len > 0)
-            self.cur_fixed.?.f.fixed.line_program.items[self.cur_fixed.?.f.fixed.line_program.items.len - 1].line
-        else if (last.tag == .fixed)
-            last.f.fixed.line_program.items[last.f.fixed.line_program.items.len - 1].line
-        else
-            last.f.jump.line_program.line;
+        var last_line: u32 = 0;
+        if (last.tag == .fixed) {
+            // TEST: can it have 0 len?
+            last_line = last.f.fixed.line_program.items[last.f.fixed.line_program.items.len - 1].line;
+        } else {
+            last_line = last.f.jump.line_program.line;
+        }
 
+        try self.ensureFixed();
         try self.cur_fixed.?.f.fixed.line_program.append(utils.alloc, .{
             .offset = self.bufferLen(),
             .line = last_line + 1,
@@ -2150,6 +2151,8 @@ fn initialPass(self: *Codegen) CodegenError!void {
                     .@"test" => try self.@"test"(operands),
                     .imul => try self.imul(operands),
                     .clc => try self.relaxation.appendByte(0xF8),
+                    .cli => try self.relaxation.appendByte(0xFA),
+                    .hlt => try self.relaxation.appendByte(0xF4),
                     .invlpg, .lgdt, .lidt => try self.group4(cpuinstr.mnem, operands[0]),
                     .ltr => try self.group5(cpuinstr.mnem, operands[0]),
                     .iretq => try self.relaxation.appendSlice(&.{ 0x48, 0xCF }),

@@ -4,6 +4,8 @@ pub const TokenType = enum(u16) {
     // x86-64 original and other
     syscall = initInstr(0, 0, 0, 0),
     clc,
+    cli,
+    hlt,
     // Priveleged
     iretq,
     dec = initInstr(0, 0, 1, 0),

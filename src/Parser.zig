@@ -500,6 +500,7 @@ fn parseBssInstr(self: *Parser) ParserError!void {
     const name_token = token;
     token = self.consume();
     try self.expectToken(token, .Colon);
+    self.consumeNewline();
     const type_name = try self.parseType();
     const instr_type = self.program.types.get(type_name).?;
     const instr_align = try self.checkProperAlignment(align_token, instr_type.alignment(self.program), alignment);
@@ -778,6 +779,7 @@ fn parseDataInstr(self: *Parser) ParserError!void {
     const name_token = token;
     token = self.consume();
     try self.expectToken(token, .Colon);
+    self.consumeNewline();
     token = self.consume();
     var offset: u32 = @truncate(self.program.data_block.buffer.items.len);
     const basic_type_token = token;
